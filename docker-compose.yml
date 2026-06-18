@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: muhiya
+      POSTGRES_PASSWORD: secure_password_here
+      POSTGRES_DB: gateway_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # We do NOT expose ports to the outside world for security.
+    # It is only accessible to the gateway container internally.
+
+  # 2. MuhiyaLLM Go Gateway
+  muhiyallm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "8090:8090"
+    environment:
+      - PORT=8090
+      # Connect to the db service using its container name
+      - DATABASE_URL=postgres://muhiya:secure_password_here@db:5432/gateway_db?sslmode=disable
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=adminpassword
+    depends_on:
+      - db
+
+volumes:
+  # Persistent volume for PostgreSQL data
+  postgres_data:

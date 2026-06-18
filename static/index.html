@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MuhiyaLLM - AI Gateway Infrastructure</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/admin/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon"><i class="fa-solid fa-microchip"></i></span>
+                    <span class="logo-text">Muhiya<span class="gradient-text">LLM</span></span>
+                </div>
+                <span class="badge">Enterprise</span>
+            </div>
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active" data-tab="dashboard">
+                    <i class="fa-solid fa-chart-line"></i> <span>Dashboard</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="users">
+                    <i class="fa-solid fa-users"></i> <span>Users</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="keys">
+                    <i class="fa-solid fa-key"></i> <span>Virtual Keys</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="plans">
+                    <i class="fa-solid fa-layer-group"></i> <span>Plans</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="providers">
+                    <i class="fa-solid fa-cubes"></i> <span>Providers & Models</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="logs">
+                    <i class="fa-solid fa-terminal"></i> <span>Request Logs</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="settings">
+                    <i class="fa-solid fa-sliders"></i> <span>Settings</span>
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="dot pulse"></span>
+                    <span class="status-text">Gateway Active</span>
+                </div>
+                <div class="endpoint-info">
+                    <span class="label">OpenAI Endpoint:</span>
+                    <span class="value select-all" id="api-openai-url">http://localhost:8090/v1</span>
+                    <span class="label" style="margin-top: 0.5rem;">Anthropic Endpoint:</span>
+                    <span class="value select-all" id="api-anthropic-url">http://localhost:8090/v1/messages</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Panel -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="top-header">
+                <div class="title-area">
+                    <h1 id="page-title">Dashboard</h1>
+                    <p class="subtitle" id="page-subtitle">Gateway analytics and performance metrics</p>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-secondary btn-sm" id="btn-refresh"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
+                    <div class="avatar"><i class="fa-solid fa-shield-halved"></i></div>
+                </div>
+            </header>
+
+            <!-- TAB: Dashboard -->
+            <section id="tab-dashboard" class="tab-content active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon req"><i class="fa-solid fa-server"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Total Requests</span>
+                            <span class="stat-value" id="stat-requests">-</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon cost"><i class="fa-solid fa-credit-card"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Spend (USD)</span>
+                            <span class="stat-value" id="stat-cost">$-</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon token"><i class="fa-solid fa-chart-simple"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Tokens Handled</span>
+                            <span class="stat-value" id="stat-tokens">-</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon latency"><i class="fa-solid fa-stopwatch"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Avg Latency</span>
+                            <span class="stat-value" id="stat-latency">- ms</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon status"><i class="fa-solid fa-circle-check"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Success Rate</span>
+                            <span class="stat-value" id="stat-success">-%</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon cache"><i class="fa-solid fa-database"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Cache Hit Rate</span>
+                            <span class="stat-value" id="stat-cache-hit-rate">-%</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon cache-read"><i class="fa-solid fa-book-open"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Cache Reads</span>
+                            <span class="stat-value" id="stat-cache-reads">-</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon cache-write"><i class="fa-solid fa-pen-nib"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Cache Writes</span>
+                            <span class="stat-value" id="stat-cache-writes">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- User Budgets Summary Card -->
+                <div class="chart-container" style="margin-bottom: 2rem;">
+                    <h3><i class="fa-solid fa-wallet"></i> Current Spending per Budget Window</h3>
+                    <div class="budget-progress-grid" id="dashboard-budget-windows">
+                        <!-- Populated dynamically -->
+                        <div class="text-muted">No active budget window spending data found. Make API calls to populate.</div>
+                    </div>
+                </div>
+
+                <div class="dashboard-charts">
+                    <div class="chart-container">
+                        <h3><i class="fa-solid fa-chart-line"></i> Requests & Costs (7 Days)</h3>
+                        <canvas id="requestsChart"></canvas>
+                    </div>
+                    <div class="chart-container-split">
+                        <div class="split-left">
+                            <h3><i class="fa-solid fa-coins"></i> Token Consumption (7 Days)</h3>
+                            <canvas id="tokensChart"></canvas>
+                        </div>
+                        <div class="split-right">
+                            <h3><i class="fa-solid fa-shapes"></i> Top Virtual Models</h3>
+                            <canvas id="modelsChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB: Users -->
+            <section id="tab-users" class="tab-content">
+                <div class="section-actions">
+                    <h2>Platform Users</h2>
+                    <button class="btn btn-primary" id="btn-add-user"><i class="fa-solid fa-user-plus"></i> Create User</button>
+                </div>
+                <div class="table-container">
+                    <table id="users-table">
+                        <thead>
+                             <tr>
+                                 <th>Name</th>
+                                 <th>Email</th>
+                                 <th>Assigned Plan</th>
+                                 <th style="width: 240px;">Spending Windows</th>
+                                 <th>Status</th>
+                                 <th>Created At</th>
+                                 <th>Actions</th>
+                             </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB: Virtual Keys -->
+            <section id="tab-keys" class="tab-content">
+                <div class="section-actions">
+                    <h2>Virtual Keys</h2>
+                    <button class="btn btn-primary" id="btn-add-key"><i class="fa-solid fa-plus"></i> Generate Key</button>
+                </div>
+                <div class="table-container">
+                    <table id="keys-table">
+                        <thead>
+                            <tr>
+                                <th>Friendly Name</th>
+                                <th>Virtual Key</th>
+                                <th>Owner User</th>
+                                <th>Status</th>
+                                <th>Expires At</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB: Plans & Budget Windows -->
+            <section id="tab-plans" class="tab-content">
+                <div class="section-actions">
+                    <h2>Plans</h2>
+                    <button class="btn btn-primary" id="btn-add-plan"><i class="fa-solid fa-folder-plus"></i> Create Plan</button>
+                </div>
+                <div class="table-container">
+                    <table id="plans-table">
+                        <thead>
+                            <tr>
+                                <th>Plan ID</th>
+                                <th>Name</th>
+                                <th>RPM Limit</th>
+                                <th>TPM Limit</th>
+                                <th>Configured Budget Windows</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Budget Windows are now unified inside Plan CRUD -->
+            </section>
+
+            <!-- TAB: Providers & Models -->
+            <section id="tab-providers" class="tab-content">
+                <div class="providers-section">
+                    <div class="section-actions">
+                        <h2>Connected Upstream Providers</h2>
+                        <button class="btn btn-primary" id="btn-add-provider"><i class="fa-solid fa-square-plus"></i> Add Provider</button>
+                    </div>
+                    <div class="providers-grid" id="providers-list">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
+
+                <div class="models-section">
+                    <div class="section-actions">
+                        <h2>Virtual Model Mappings</h2>
+                        <button class="btn btn-primary" id="btn-add-model"><i class="fa-solid fa-circle-nodes"></i> Add Model Mapping</button>
+                    </div>
+                    <div class="table-container">
+                        <table id="models-table">
+                            <thead>
+                                <tr>
+                                    <th>Virtual Name</th>
+                                    <th>Provider</th>
+                                    <th>Target Model</th>
+                                    <th>Input Cost / 1M</th>
+                                    <th>Output Cost / 1M</th>
+                                    <th>Cache Read / 1M</th>
+                                    <th>Cache Write / 1M</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB: Request Logs -->
+            <section id="tab-logs" class="tab-content">
+                <div class="section-actions">
+                    <h2>Inference Log stream</h2>
+                </div>
+                <div class="table-container">
+                    <table id="logs-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Virtual Key</th>
+                                <th>Owner User</th>
+                                <th>Client App</th>
+                                <th>Virtual Model</th>
+                                <th>Endpoint Path</th>
+                                <th>Status</th>
+                                <th>Tokens (In/Out/Cache)</th>
+                                <th>Latency</th>
+                                <th>Cost (USD)</th>
+                                <th>Errors</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB: Settings -->
+            <section id="tab-settings" class="tab-content">
+                <div class="section-actions">
+                    <h2>System Settings</h2>
+                </div>
+                <div class="settings-container">
+                    <form id="settings-form">
+                        <div class="form-group">
+                            <label for="setting-gateway-name">Gateway Registry Name</label>
+                            <input type="text" id="setting-gateway-name" required placeholder="e.g. MuhiyaLLM Gateway">
+                        </div>
+                        <button type="submit" class="btn btn-primary"><i class="fa-solid fa-floppy-disk"></i> Apply Global Settings</button>
+                    </form>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- MODAL: User -->
+    <div class="modal" id="modal-user">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <h2 id="user-modal-title">Create User</h2>
+            <form id="user-form">
+                <input type="hidden" id="user-id">
+                <div class="form-group">
+                    <label for="user-name">Full Name</label>
+                    <input type="text" id="user-name" required placeholder="e.g. Alice Smith">
+                </div>
+                <div class="form-group">
+                    <label for="user-email">Email Address</label>
+                    <input type="email" id="user-email" required placeholder="e.g. alice@company.com">
+                </div>
+                <div class="form-group">
+                    <label for="user-plan-id">Assigned Plan</label>
+                    <select id="user-plan-id" required>
+                        <!-- Populated dynamically -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="user-status">Account Status</label>
+                    <select id="user-status" required>
+                        <option value="active">Active</option>
+                        <option value="suspended">Suspended</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">Save User</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL: Virtual Key -->
+    <div class="modal" id="modal-key">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <h2 id="key-modal-title">Generate Virtual Key</h2>
+            <form id="key-form">
+                <input type="hidden" id="key-id">
+                <div class="form-group">
+                    <label for="key-name">Friendly Key Identifier</label>
+                    <input type="text" id="key-name" required placeholder="e.g. Development Sandbox">
+                </div>
+                <div class="form-group">
+                    <label for="key-user-id">Assign to User</label>
+                    <select id="key-user-id" required>
+                        <!-- Populated dynamically -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="key-expires">Expiration Date (Optional)</label>
+                    <input type="date" id="key-expires">
+                </div>
+                <div class="form-group" id="key-status-group" style="display: none;">
+                    <label for="key-status">Key Status</label>
+                    <select id="key-status">
+                        <option value="active">Active</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block" id="key-submit-btn">Generate Key</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL: Plan -->
+    <div class="modal" id="modal-plan">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <h2 id="plan-modal-title">Create Plan</h2>
+            <form id="plan-form">
+                <input type="hidden" id="plan-id">
+                <div class="form-group" id="plan-id-group">
+                    <label for="plan-id-val">Plan Unique ID</label>
+                    <input type="text" id="plan-id-val" required placeholder="e.g. plan-gold">
+                </div>
+                <div class="form-group">
+                    <label for="plan-name">Plan Name</label>
+                    <input type="text" id="plan-name" required placeholder="e.g. Enterprise Tier">
+                </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="plan-rpm">RPM Limit (0 = Unlimited)</label>
+                        <input type="number" id="plan-rpm" required placeholder="60">
+                    </div>
+                    <div class="form-group">
+                        <label for="plan-tpm">TPM Limit (0 = Unlimited)</label>
+                        <input type="number" id="plan-tpm" required placeholder="100000">
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 1rem; border-top: 1px solid var(--panel-border); padding-top: 1rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                        <label>Budget Windows (USD Limits)</label>
+                        <button type="button" class="btn btn-secondary btn-sm" id="btn-plan-add-budget" style="padding: 0.2rem 0.5rem; font-size: 0.75rem;">
+                            <i class="fa-solid fa-plus"></i> Add Window
+                        </button>
+                    </div>
+                    <div id="plan-budgets-container" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 200px; overflow-y: auto;">
+                        <!-- Inline budget rows -->
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1rem;">Save Plan</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL: Provider -->
+    <div class="modal" id="modal-provider">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <h2 id="provider-modal-title">Add Upstream Provider</h2>
+            <form id="provider-form">
+                <input type="hidden" id="provider-id-hidden">
+                <div class="form-group" id="provider-id-group">
+                    <label for="provider-id">Provider ID (lowercase unique)</label>
+                    <input type="text" id="provider-id" required placeholder="e.g. openai, custom-llm">
+                </div>
+                <div class="form-group">
+                    <label for="provider-name">Friendly Name</label>
+                    <input type="text" id="provider-name" required placeholder="e.g. OpenAI Inc">
+                </div>
+                <div class="form-group">
+                    <label for="provider-apikey">Upstream Key credential</label>
+                    <input type="password" id="provider-apikey" required placeholder="API authentication key">
+                </div>
+                <div class="form-group">
+                    <label for="provider-baseurl">OpenAI Format Base URL</label>
+                    <input type="url" id="provider-baseurl" placeholder="e.g. https://api.openai.com/v1">
+                </div>
+                <div class="form-group">
+                    <label for="provider-anthropic-baseurl">Anthropic Format Base URL</label>
+                    <input type="url" id="provider-anthropic-baseurl" placeholder="e.g. https://api.deepseek.com/anthropic">
+                </div>
+                <div class="form-group" id="provider-status-group" style="display: none;">
+                    <label for="provider-status">Provider Status</label>
+                    <select id="provider-status">
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block" id="provider-submit-btn">Save Provider</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL: Model -->
+    <div class="modal" id="modal-model">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <h2 id="model-modal-title">Define Model Mapping</h2>
+            <form id="model-form">
+                <input type="hidden" id="model-id">
+                <div class="form-group">
+                    <label for="model-name">Virtual Model Name (Exposed to Clients)</label>
+                    <input type="text" id="model-name" required placeholder="e.g. deepseek-v4-flash">
+                </div>
+                <div class="form-group">
+                    <label for="model-provider-id">Upstream Provider</label>
+                    <select id="model-provider-id" required>
+                        <!-- Populated dynamically -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="model-target">Upstream Target Name</label>
+                    <input type="text" id="model-target" required placeholder="e.g. deepseek-chat">
+                </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="model-cost-in">Input Cost ($/1M tokens)</label>
+                        <input type="number" step="0.0001" id="model-cost-in" required placeholder="2.50">
+                    </div>
+                    <div class="form-group">
+                        <label for="model-cost-out">Output Cost ($/1M tokens)</label>
+                        <input type="number" step="0.0001" id="model-cost-out" required placeholder="10.00">
+                    </div>
+                </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="model-cost-read">Cache Read Cost ($/1M tokens)</label>
+                        <input type="number" step="0.0001" id="model-cost-read" required placeholder="0.30">
+                    </div>
+                    <div class="form-group">
+                        <label for="model-cost-write">Cache Write Cost ($/1M tokens)</label>
+                        <input type="number" step="0.0001" id="model-cost-write" required placeholder="3.75">
+                    </div>
+                </div>
+                <div class="form-group" id="model-status-group" style="display: none;">
+                    <label for="model-status">Model Status</label>
+                    <select id="model-status">
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block" id="model-submit-btn">Save Model</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="/admin/static/app.js"></script>
+</body>
+</html>
