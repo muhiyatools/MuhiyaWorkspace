@@ -247,12 +247,12 @@ func (db *DB) Close() error {
 
 func (db *DB) seedDefaults() error {
 	var count int
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM plans").Scan(&count)
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM plans WHERE id = 'free'").Scan(&count)
 	if err != nil {
 		return err
 	}
 	if count > 0 {
-		return nil // database already seeded
+		return nil // database already seeded with free plan
 	}
 
 	tx, err := db.conn.Begin()
@@ -261,21 +261,23 @@ func (db *DB) seedDefaults() error {
 	}
 	defer tx.Rollback()
 
+	// Clear old plans/budgets if any to avoid dirty states
+	_, _ = tx.Exec("DELETE FROM budget_windows")
+	_, _ = tx.Exec("DELETE FROM virtual_keys")
+	_, _ = tx.Exec("DELETE FROM users")
+	_, _ = tx.Exec("DELETE FROM plans")
+
 	// Seed system settings
-	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2)", "gateway_name", "MuhiyaLLM Gateway")
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2)", "theme_accent", "emerald")
-	if err != nil {
-		return err
-	}
+	_, _ = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", "gateway_name", "MuhiyaLLM Gateway")
+	_, _ = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", "theme_accent", "emerald")
 
 	// Seed plans
 	plans := []Plan{
-		{ID: "plan-dev", Name: "Developer Plan", RPMLimit: 60, TPMLimit: 100000},
-		{ID: "plan-prod", Name: "Production Plan", RPMLimit: 600, TPMLimit: 1000000},
-		{ID: "plan-unlimited", Name: "Unlimited Plan", RPMLimit: 0, TPMLimit: 0},
+		{ID: "free", Name: "MuhiyaCode Free", RPMLimit: 10, TPMLimit: 1000},
+		{ID: "yalla", Name: "Yalla Monthly", RPMLimit: 60, TPMLimit: 10000},
+		{ID: "max", Name: "Max Monthly", RPMLimit: 300, TPMLimit: 50000},
+		{ID: "yalla-annual", Name: "Yalla Annual", RPMLimit: 60, TPMLimit: 10000},
+		{ID: "max-annual", Name: "Max Annual", RPMLimit: 300, TPMLimit: 50000},
 	}
 	for _, p := range plans {
 		_, err := tx.Exec("INSERT INTO plans (id, name, rpm_limit, tpm_limit) VALUES ($1, $2, $3, $4)", p.ID, p.Name, p.RPMLimit, p.TPMLimit)
@@ -286,12 +288,25 @@ func (db *DB) seedDefaults() error {
 
 	// Seed budget windows for plans
 	budgetWindows := []BudgetWindow{
-		// Dev plan budget windows: max $2.00 per 5 hours and max $10.00 per 7 days
-		{ID: "budget-dev-5h", PlanID: "plan-dev", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 2.00},
-		{ID: "budget-dev-7d", PlanID: "plan-dev", Name: "Weekly Budget (7 Days)", DurationSeconds: 604800, BudgetUSD: 10.00},
-		// Prod plan budget windows: max $50.00 per 7 days and max $200.00 per 30 days
-		{ID: "budget-prod-7d", PlanID: "plan-prod", Name: "Weekly Budget (7 Days)", DurationSeconds: 604800, BudgetUSD: 50.00},
-		{ID: "budget-prod-30d", PlanID: "plan-prod", Name: "Monthly Budget (30 Days)", DurationSeconds: 2592000, BudgetUSD: 200.00},
+		// Free: $0.10 rolling 5-hour burst, $1.00 rolling 31-day Money Ceiling
+		{ID: "budget-free-5h", PlanID: "free", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 0.10},
+		{ID: "budget-free-31d", PlanID: "free", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 1.00},
+
+		// Yalla: $2.00 rolling 5-hour burst, $10.00 rolling 31-day Money Ceiling
+		{ID: "budget-yalla-5h", PlanID: "yalla", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 2.00},
+		{ID: "budget-yalla-31d", PlanID: "yalla", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 10.00},
+
+		// Max: $10.00 rolling 5-hour burst, $50.00 rolling 31-day Money Ceiling
+		{ID: "budget-max-5h", PlanID: "max", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 10.00},
+		{ID: "budget-max-31d", PlanID: "max", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
+
+		// Yalla Annual: $2.00 rolling 5-hour burst, $10.00 rolling 31-day Money Ceiling
+		{ID: "budget-yalla-annual-5h", PlanID: "yalla-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 2.00},
+		{ID: "budget-yalla-annual-31d", PlanID: "yalla-annual", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 10.00},
+
+		// Max Annual: $10.00 rolling 5-hour burst, $50.00 rolling 31-day Money Ceiling
+		{ID: "budget-max-annual-5h", PlanID: "max-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 10.00},
+		{ID: "budget-max-annual-31d", PlanID: "max-annual", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
 	}
 	for _, bw := range budgetWindows {
 		_, err := tx.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) VALUES ($1, $2, $3, $4, $5)", bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
@@ -302,8 +317,8 @@ func (db *DB) seedDefaults() error {
 
 	// Seed Users
 	users := []User{
-		{ID: "user-dev", Name: "Demo Developer", Email: "dev@muhiyallm.local", PlanID: "plan-dev", Status: "active"},
-		{ID: "user-prod", Name: "Corporate Client A", Email: "enterprise@client.com", PlanID: "plan-prod", Status: "active"},
+		{ID: "user-dev", Name: "Demo Developer", Email: "dev@muhiyallm.local", PlanID: "free", Status: "active"},
+		{ID: "user-prod", Name: "Corporate Client A", Email: "enterprise@client.com", PlanID: "max", Status: "active"},
 	}
 	for _, u := range users {
 		_, err := tx.Exec("INSERT INTO users (id, name, email, plan_id, status) VALUES ($1, $2, $3, $4, $5)", u.ID, u.Name, u.Email, u.PlanID, u.Status)
