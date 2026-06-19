@@ -246,95 +246,79 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) seedDefaults() error {
-	var count int
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM plans WHERE id = 'free'").Scan(&count)
-	if err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil // database already seeded with free plan
-	}
-
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// Clear old plans/budgets if any to avoid dirty states
-	_, _ = tx.Exec("DELETE FROM budget_windows")
-	_, _ = tx.Exec("DELETE FROM virtual_keys")
-	_, _ = tx.Exec("DELETE FROM users")
-	_, _ = tx.Exec("DELETE FROM plans")
-
 	// Seed system settings
-	_, _ = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", "gateway_name", "MuhiyaLLM Gateway")
-	_, _ = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", "theme_accent", "emerald")
+	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", "gateway_name", "MuhiyaLLM Gateway")
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", "theme_accent", "emerald")
+	if err != nil {
+		return err
+	}
 
 	// Seed plans
 	plans := []Plan{
-		{ID: "free", Name: "MuhiyaCode Free", RPMLimit: 10, TPMLimit: 1000},
-		{ID: "yalla", Name: "Yalla Monthly", RPMLimit: 60, TPMLimit: 10000},
-		{ID: "max", Name: "Max Monthly", RPMLimit: 300, TPMLimit: 50000},
-		{ID: "yalla-annual", Name: "Yalla Annual", RPMLimit: 60, TPMLimit: 10000},
-		{ID: "max-annual", Name: "Max Annual", RPMLimit: 300, TPMLimit: 50000},
+		{ID: "free", Name: "MuhiyaCode Free", RPMLimit: 30, TPMLimit: 300000},
+		{ID: "yalla", Name: "MuhiyaCode Yalla", RPMLimit: 60, TPMLimit: 1200000},
+		{ID: "max", Name: "MuhiyaCode Max", RPMLimit: 100, TPMLimit: 2500000},
+		{ID: "yalla-annual", Name: "MuhiyaCode Yalla Annual", RPMLimit: 60, TPMLimit: 1200000},
+		{ID: "max-annual", Name: "MuhiyaCode Max Annual", RPMLimit: 100, TPMLimit: 2500000},
 	}
 	for _, p := range plans {
-		_, err := tx.Exec("INSERT INTO plans (id, name, rpm_limit, tpm_limit) VALUES ($1, $2, $3, $4)", p.ID, p.Name, p.RPMLimit, p.TPMLimit)
+		_, err := tx.Exec(`
+			INSERT INTO plans (id, name, rpm_limit, tpm_limit) 
+			VALUES ($1, $2, $3, $4) 
+			ON CONFLICT (id) DO UPDATE SET 
+				name = EXCLUDED.name, 
+				rpm_limit = EXCLUDED.rpm_limit, 
+				tpm_limit = EXCLUDED.tpm_limit`,
+			p.ID, p.Name, p.RPMLimit, p.TPMLimit)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Seed budget windows for plans
+	// Seed budget windows
 	budgetWindows := []BudgetWindow{
-		// Free: $0.10 rolling 5-hour burst, $1.00 rolling 31-day Money Ceiling
-		{ID: "budget-free-5h", PlanID: "free", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 0.10},
-		{ID: "budget-free-31d", PlanID: "free", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 1.00},
+		// Free plan: 0.5 USD per 5 hours and 31 days
+		{ID: "budget-free-5h", PlanID: "free", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 0.50},
+		{ID: "budget-free-31d", PlanID: "free", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 0.50},
 
-		// Yalla: $2.00 rolling 5-hour burst, $10.00 rolling 31-day Money Ceiling
-		{ID: "budget-yalla-5h", PlanID: "yalla", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 2.00},
-		{ID: "budget-yalla-31d", PlanID: "yalla", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 10.00},
+		// Yalla plan: 25 USD per 5 hours and 31 days
+		{ID: "budget-yalla-5h", PlanID: "yalla", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 25.00},
+		{ID: "budget-yalla-31d", PlanID: "yalla", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 25.00},
 
-		// Max: $10.00 rolling 5-hour burst, $50.00 rolling 31-day Money Ceiling
-		{ID: "budget-max-5h", PlanID: "max", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 10.00},
+		// Max plan: 50 USD per 5 hours and 31 days
+		{ID: "budget-max-5h", PlanID: "max", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 50.00},
 		{ID: "budget-max-31d", PlanID: "max", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
 
-		// Yalla Annual: $2.00 rolling 5-hour burst, $10.00 rolling 31-day Money Ceiling
-		{ID: "budget-yalla-annual-5h", PlanID: "yalla-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 2.00},
-		{ID: "budget-yalla-annual-31d", PlanID: "yalla-annual", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 10.00},
+		// Yalla Annual plan: 25 USD per 5 hours and 31 days
+		{ID: "budget-yalla-annual-5h", PlanID: "yalla-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 25.00},
+		{ID: "budget-yalla-annual-31d", PlanID: "yalla-annual", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 25.00},
 
-		// Max Annual: $10.00 rolling 5-hour burst, $50.00 rolling 31-day Money Ceiling
-		{ID: "budget-max-annual-5h", PlanID: "max-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 10.00},
+		// Max Annual plan: 50 USD per 5 hours and 31 days
+		{ID: "budget-max-annual-5h", PlanID: "max-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 50.00},
 		{ID: "budget-max-annual-31d", PlanID: "max-annual", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
 	}
 	for _, bw := range budgetWindows {
-		_, err := tx.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) VALUES ($1, $2, $3, $4, $5)", bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
+		_, err = tx.Exec(`
+			INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) 
+			VALUES ($1, $2, $3, $4, $5) 
+			ON CONFLICT (id) DO UPDATE SET 
+				plan_id = EXCLUDED.plan_id, 
+				name = EXCLUDED.name, 
+				duration_seconds = EXCLUDED.duration_seconds, 
+				budget_usd = EXCLUDED.budget_usd`,
+			bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
 		if err != nil {
 			return err
 		}
-	}
-
-	// Seed Users
-	users := []User{
-		{ID: "user-dev", Name: "Demo Developer", Email: "dev@muhiyallm.local", PlanID: "free", Status: "active"},
-		{ID: "user-prod", Name: "Corporate Client A", Email: "enterprise@client.com", PlanID: "max", Status: "active"},
-	}
-	for _, u := range users {
-		_, err := tx.Exec("INSERT INTO users (id, name, email, plan_id, status) VALUES ($1, $2, $3, $4, $5)", u.ID, u.Name, u.Email, u.PlanID, u.Status)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Seed virtual keys
-	_, err = tx.Exec("INSERT INTO virtual_keys (id, name, user_id, status) VALUES ($1, $2, $3, $4)", "sk-virt-devkey", "Default Dev Key", "user-dev", "active")
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec("INSERT INTO virtual_keys (id, name, user_id, status) VALUES ($1, $2, $3, $4)", "sk-virt-prodkey", "Enterprise Production Key", "user-prod", "active")
-	if err != nil {
-		return err
 	}
 
 	// Seed providers
@@ -344,28 +328,46 @@ func (db *DB) seedDefaults() error {
 		{ID: "deepseek", Name: "DeepSeek", APIKey: "mock-deepseek-key", BaseURL: "https://api.deepseek.com", AnthropicBaseURL: "https://api.deepseek.com/anthropic", Status: "active"},
 	}
 	for _, pr := range providers {
-		_, err := tx.Exec("INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) VALUES ($1, $2, $3, $4, $5, $6)", pr.ID, pr.Name, pr.APIKey, pr.BaseURL, pr.AnthropicBaseURL, pr.Status)
+		_, err := tx.Exec(`
+			INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) 
+			VALUES ($1, $2, $3, $4, $5, $6) 
+			ON CONFLICT (id) DO UPDATE SET 
+				name = EXCLUDED.name, 
+				api_key = EXCLUDED.api_key, 
+				base_url = EXCLUDED.base_url, 
+				anthropic_base_url = EXCLUDED.anthropic_base_url, 
+				status = EXCLUDED.status`,
+			pr.ID, pr.Name, pr.APIKey, pr.BaseURL, pr.AnthropicBaseURL, pr.Status)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Seed models (with cache pricing details)
+	// Seed models
 	models := []Model{
 		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active"},
 		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active"},
 		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
-		// Aliases
 		{ID: "model-claude-alias", Name: "claude", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active"},
 		{ID: "model-openai-alias", Name: "openai", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active"},
 		{ID: "model-deepseek-alias", Name: "deepseek", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
 		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
 	}
 	for _, m := range models {
-		_, err := tx.Exec(`INSERT INTO models (
-			id, name, provider_id, target_model, input_cost_per_million, 
-			output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		_, err := tx.Exec(`
+			INSERT INTO models (
+				id, name, provider_id, target_model, input_cost_per_million, 
+				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
+			ON CONFLICT (id) DO UPDATE SET 
+				name = EXCLUDED.name, 
+				provider_id = EXCLUDED.provider_id, 
+				target_model = EXCLUDED.target_model, 
+				input_cost_per_million = EXCLUDED.input_cost_per_million, 
+				output_cost_per_million = EXCLUDED.output_cost_per_million, 
+				cache_read_cost_per_million = EXCLUDED.cache_read_cost_per_million, 
+				cache_write_cost_per_million = EXCLUDED.cache_write_cost_per_million, 
+				status = EXCLUDED.status`,
 			m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status)
 		if err != nil {
