@@ -329,6 +329,17 @@ func (db *DB) seedDefaults() error {
 		}
 	}
 
+	// Clean up legacy budget windows that are not in the seed list
+	_, _ = tx.Exec(`
+		DELETE FROM budget_windows 
+		WHERE id NOT IN (
+			'budget-plan-dev-5h', 'budget-plan-dev-31d',
+			'budget-yalla-5h', 'budget-yalla-31d',
+			'budget-max-5h', 'budget-max-31d',
+			'budget-yalla-annual-5h', 'budget-yalla-annual-31d',
+			'budget-max-annual-5h', 'budget-max-annual-31d'
+		)`)
+
 	// Seed providers
 	providers := []Provider{
 		{ID: "openai", Name: "OpenAI", APIKey: "mock-openai-key", BaseURL: "https://api.openai.com/v1", AnthropicBaseURL: "", Status: "active"},
