@@ -62,6 +62,9 @@ func getClientAppName(r *http.Request) string {
 	if r == nil {
 		return "Unknown"
 	}
+	if clientApp := r.Header.Get("X-Client-App"); clientApp != "" {
+		return clientApp
+	}
 	ua := r.Header.Get("User-Agent")
 	if ua == "" {
 		if r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != "" {

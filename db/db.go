@@ -309,9 +309,8 @@ func (db *DB) seedDefaults() error {
 
 	// Seed budget windows
 	budgetWindows := []BudgetWindow{
-		// Free plan: 0.5 USD per 5 hours and 31 days
+		// Free plan: 0.5 USD per 5 hours
 		{ID: "budget-plan-dev-5h", PlanID: "plan-dev", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 0.50},
-		{ID: "budget-plan-dev-31d", PlanID: "plan-dev", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 0.50},
 
 		// Yalla plan: 25 USD per 5 hours and 31 days
 		{ID: "budget-yalla-5h", PlanID: "yalla", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 25.00},
@@ -340,7 +339,7 @@ func (db *DB) seedDefaults() error {
 	_, _ = tx.Exec(`
 		DELETE FROM budget_windows 
 		WHERE id NOT IN (
-			'budget-plan-dev-5h', 'budget-plan-dev-31d',
+			'budget-plan-dev-5h',
 			'budget-yalla-5h', 'budget-yalla-31d',
 			'budget-max-5h', 'budget-max-31d'
 		)`)

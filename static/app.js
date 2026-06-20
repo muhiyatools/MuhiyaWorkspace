@@ -935,7 +935,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const app = l.client_app || 'API Client';
                 const appLower = app.toLowerCase();
                 let clientAppBadge = '';
-                if (appLower.includes('claude code') || appLower.includes('claude-code') || appLower.includes('claude')) {
+                if (appLower.includes('muhiyachat') || appLower.includes('muhiya chat')) {
+                    clientAppBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); text-transform:none;"><i class="fa-solid fa-comment-dots" style="margin-right: 4px;"></i>${app}</span>`;
+                } else if (appLower.includes('claude code') || appLower.includes('claude-code') || appLower.includes('claude')) {
                     clientAppBadge = `<span class="badge" style="background: rgba(168, 85, 247, 0.1); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.2); text-transform:none;">${app}</span>`;
                 } else if (appLower.includes('curl')) {
                     clientAppBadge = `<span class="badge" style="background: rgba(113, 113, 122, 0.1); color: #d4d4d8; border: 1px solid rgba(113, 113, 122, 0.2); text-transform:none;">${app}</span>`;
