@@ -78,6 +78,8 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 		return fmt.Errorf("failed to list budget windows: %w", err)
 	}
 
+	budgetExceeded := false
+	var limitErr error
 	for _, w := range windows {
 		if w.BudgetUSD > 0 {
 			spending, err := rl.db.GetUserSpendingInWindow(user.ID, w.DurationSeconds)
@@ -85,8 +87,20 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 				return fmt.Errorf("failed to calculate window spending: %w", err)
 			}
 			if spending >= w.BudgetUSD {
-				return fmt.Errorf("budget limit of $%.2f exceeded for window '%s' (current spending: $%.4f)", w.BudgetUSD, w.Name, spending)
+				budgetExceeded = true
+				limitErr = fmt.Errorf("budget limit of $%.2f exceeded for window '%s' (current spending: $%.4f)", w.BudgetUSD, w.Name, spending)
+				break
 			}
+		}
+	}
+
+	if budgetExceeded {
+		remainingCredits, err := rl.db.GetRemainingExtraCredits(user.ID)
+		if err != nil {
+			return fmt.Errorf("failed to check extra credits: %w", err)
+		}
+		if remainingCredits <= 0 {
+			return limitErr
 		}
 	}
 

@@ -104,6 +104,14 @@ type SystemSetting struct {
 	Value string `json:"value"`
 }
 
+type UserTopup struct {
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	Credits     float64   `json:"credits"`
+	UsedCredits float64   `json:"used_credits"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type DashboardStats struct {
 	TotalRequests    int            `json:"total_requests"`
 	TotalCost        float64        `json:"total_cost"`
@@ -222,6 +230,13 @@ func Open(dsn string) (*DB, error) {
 		`CREATE TABLE IF NOT EXISTS system_settings (
 			key VARCHAR(255) PRIMARY KEY,
 			value TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS user_topups (
+			id VARCHAR(100) PRIMARY KEY,
+			user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			credits DOUBLE PRECISION NOT NULL,
+			used_credits DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
 	}
 
@@ -877,6 +892,10 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 		log.ID, log.VirtualKeyID, log.UserID, modelID, providerID, log.RequestPath, log.StatusCode,
 		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp)
+
+	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
+		_ = db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost)
+	}
 	return err
 }
 
@@ -945,6 +964,134 @@ func (db *DB) GetUserSpendingInWindow(userID string, durationSeconds int) (float
 	var total float64
 	err = db.conn.QueryRow("SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, periodStart).Scan(&total)
 	return total, err
+}
+
+func (db *DB) GetRemainingExtraCredits(userID string) (float64, error) {
+	var remaining float64
+	err := db.conn.QueryRow("SELECT COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1", userID).Scan(&remaining)
+	return remaining, err
+}
+
+func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error {
+	if costUSD <= 0 {
+		return nil
+	}
+	// 1. Fetch user's plan
+	var planID string
+	err := db.conn.QueryRow("SELECT plan_id FROM users WHERE id = $1", userID).Scan(&planID)
+	if err != nil {
+		return err
+	}
+	// 2. Fetch budget windows
+	windows, err := db.ListBudgetWindowsByPlan(planID)
+	if err != nil {
+		return err
+	}
+	// 3. Compute max exceeded portion
+	var maxExceeded float64
+	for _, w := range windows {
+		if w.BudgetUSD <= 0 {
+			continue
+		}
+		currentSpending, err := db.GetUserSpendingInWindow(userID, w.DurationSeconds)
+		if err != nil {
+			return err
+		}
+		previousSpending := currentSpending - costUSD
+		limit := w.BudgetUSD
+		
+		var prevExceeded float64
+		if previousSpending > limit {
+			prevExceeded = previousSpending
+		} else {
+			prevExceeded = limit
+		}
+		exceeded := currentSpending - prevExceeded
+		if exceeded < 0 {
+			exceeded = 0
+		}
+		if exceeded > maxExceeded {
+			maxExceeded = exceeded
+		}
+	}
+	
+	if maxExceeded <= 0 {
+		return nil
+	}
+	
+	deductCredits := maxExceeded * 100.0 // 1 credit = $0.01 USD
+	
+	// 4. Deduct in FIFO order
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	
+	rows, err := tx.Query("SELECT id, credits, used_credits FROM user_topups WHERE user_id = $1 AND used_credits < credits ORDER BY created_at ASC FOR UPDATE", userID)
+	if err != nil {
+		return err
+	}
+	
+	type topupRow struct {
+		id          string
+		credits     float64
+		usedCredits float64
+	}
+	var activeTopups []topupRow
+	for rows.Next() {
+		var r topupRow
+		if err := rows.Scan(&r.id, &r.credits, &r.usedCredits); err != nil {
+			rows.Close()
+			return err
+		}
+		activeTopups = append(activeTopups, r)
+	}
+	rows.Close()
+	
+	for _, r := range activeTopups {
+		if deductCredits <= 0 {
+			break
+		}
+		rem := r.credits - r.usedCredits
+		var toAdd float64
+		if deductCredits <= rem {
+			toAdd = deductCredits
+			deductCredits = 0
+		} else {
+			toAdd = rem
+			deductCredits -= rem
+		}
+		_, err = tx.Exec("UPDATE user_topups SET used_credits = used_credits + $1 WHERE id = $2", toAdd, r.id)
+		if err != nil {
+			return err
+		}
+	}
+	
+	return tx.Commit()
+}
+
+func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
+	rows, err := db.conn.Query("SELECT id, user_id, credits, used_credits, created_at FROM user_topups WHERE user_id = $1 ORDER BY created_at DESC", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var list []UserTopup
+	for rows.Next() {
+		var u UserTopup
+		if err := rows.Scan(&u.ID, &u.UserID, &u.Credits, &u.UsedCredits, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, u)
+	}
+	return list, nil
+}
+
+func (db *DB) CreateUserTopup(t UserTopup) error {
+	_, err := db.conn.Exec("INSERT INTO user_topups (id, user_id, credits, used_credits, created_at) VALUES ($1, $2, $3, $4, $5)", t.ID, t.UserID, t.Credits, t.UsedCredits, t.CreatedAt)
+	return err
 }
 
 func (db *DB) GetUserBudgetUsage(userID string, planID string) ([]UserBudgetUsage, error) {

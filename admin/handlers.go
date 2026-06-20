@@ -28,6 +28,7 @@ func RegisterRoutes(mux *http.ServeMux, database *db.DB) {
 	mux.HandleFunc("/api/models", api.handleModels)
 	mux.HandleFunc("/api/settings", api.handleSettings)
 	mux.HandleFunc("/api/logs", api.handleLogs)
+	mux.HandleFunc("/api/users/topups", api.handleUserTopups)
 }
 
 func (api *AdminAPI) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -599,4 +600,46 @@ func generateRandomString(length int) string {
 	b := make([]byte, length/2+1)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)[:length]
+}
+
+func (api *AdminAPI) handleUserTopups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		userID := r.URL.Query().Get("user_id")
+		if userID == "" {
+			api.errorResponse(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		list, err := api.db.ListUserTopups(userID)
+		if err != nil {
+			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		api.jsonResponse(w, http.StatusOK, list)
+
+	case http.MethodPost:
+		var t db.UserTopup
+		if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
+			return
+		}
+		if t.UserID == "" || t.Credits <= 0 {
+			api.errorResponse(w, http.StatusBadRequest, "user_id and credits are required")
+			return
+		}
+		if t.ID == "" {
+			t.ID = "topup_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		}
+		t.UsedCredits = 0
+		t.CreatedAt = time.Now()
+
+		if err := api.db.CreateUserTopup(t); err != nil {
+			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		api.jsonResponse(w, http.StatusCreated, t)
+
+	default:
+		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
 }
