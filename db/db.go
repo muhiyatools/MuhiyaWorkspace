@@ -264,7 +264,7 @@ func (db *DB) seedDefaults() error {
 
 	// Seed plans
 	plans := []Plan{
-		{ID: "free", Name: "MuhiyaCode Free", RPMLimit: 30, TPMLimit: 300000},
+		{ID: "plan-dev", Name: "MuhiyaCode Free", RPMLimit: 30, TPMLimit: 300000},
 		{ID: "yalla", Name: "MuhiyaCode Yalla", RPMLimit: 60, TPMLimit: 1200000},
 		{ID: "max", Name: "MuhiyaCode Max", RPMLimit: 100, TPMLimit: 2500000},
 		{ID: "yalla-annual", Name: "MuhiyaCode Yalla Annual", RPMLimit: 60, TPMLimit: 1200000},
@@ -284,11 +284,19 @@ func (db *DB) seedDefaults() error {
 		}
 	}
 
+	// Update users on legacy plan IDs to new IDs
+	_, _ = tx.Exec("UPDATE users SET plan_id = 'plan-dev' WHERE plan_id = 'free'")
+	_, _ = tx.Exec("UPDATE users SET plan_id = 'yalla' WHERE plan_id = 'plan-unlimited'")
+	_, _ = tx.Exec("UPDATE users SET plan_id = 'max' WHERE plan_id = 'plan-prod'")
+
+	// Clean up legacy plans to prevent conflicts
+	_, _ = tx.Exec("DELETE FROM plans WHERE id IN ('free', 'plan-prod', 'plan-unlimited')")
+
 	// Seed budget windows
 	budgetWindows := []BudgetWindow{
 		// Free plan: 0.5 USD per 5 hours and 31 days
-		{ID: "budget-free-5h", PlanID: "free", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 0.50},
-		{ID: "budget-free-31d", PlanID: "free", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 0.50},
+		{ID: "budget-plan-dev-5h", PlanID: "plan-dev", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 0.50},
+		{ID: "budget-plan-dev-31d", PlanID: "plan-dev", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 0.50},
 
 		// Yalla plan: 25 USD per 5 hours and 31 days
 		{ID: "budget-yalla-5h", PlanID: "yalla", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 25.00},
