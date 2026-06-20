@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const modalPlan = document.getElementById('modal-plan');
     const modalProvider = document.getElementById('modal-provider');
     const modalModel = document.getElementById('modal-model');
+    const modalUserTopups = document.getElementById('modal-user-topups');
 
     // Setup Modal Close Handlers Once globally
     document.querySelectorAll('.close-modal').forEach(btn => {
@@ -547,7 +548,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const tbody = document.querySelector('#users-table tbody');
             if (!users || users.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center" style="text-align: center;">No users registered yet.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-muted text-center" style="text-align: center;">No users registered yet.</td></tr>`;
                 return;
             }
 
@@ -586,6 +587,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     budgetsHTML = '<span class="text-muted" style="font-size:0.75rem;">No limits configured</span>';
                 }
 
+                let extraCreditsHTML = '';
+                if (u.extra_credits > 0) {
+                    const pct = Math.min((u.remaining_extra_credits / u.extra_credits) * 100, 100);
+                    extraCreditsHTML = `
+                        <div style="min-width: 150px;">
+                            <div style="display: flex; justify-content: space-between; font-size: 0.75rem; font-weight: 600; margin-bottom: 2px;">
+                                <span style="color:var(--text-muted);"><i class="fa-solid fa-coins" style="color:#fbbf24; margin-right:4px;"></i>Balance</span>
+                                <span>${u.remaining_extra_credits.toFixed(2)} / ${u.extra_credits.toFixed(2)}</span>
+                            </div>
+                            <div style="background: var(--panel-border); height: 6px; border-radius: 3px; overflow: hidden; width: 100%;">
+                                <div style="background: #fbbf24; width: ${pct}%; height: 100%; border-radius: 3px; transition: var(--transition);"></div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    extraCreditsHTML = `<span class="text-muted" style="font-size:0.75rem;">0 Credits</span>`;
+                }
+
                 return `
                     <tr>
                         <td><strong>${u.name}</strong></td>
@@ -596,9 +615,13 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ${budgetsHTML}
                             </div>
                         </td>
+                        <td>
+                            ${extraCreditsHTML}
+                        </td>
                         <td><span class="status-pill ${u.status === 'active' ? 'active' : 'suspended'}">${u.status}</span></td>
                         <td>${new Date(u.created_at).toLocaleDateString()}</td>
                         <td>
+                            <button class="btn btn-secondary btn-sm" onclick="manageUserTopups('${u.id}')" title="Manage Top-ups"><i class="fa-solid fa-coins"></i> Top-ups</button>
                             <button class="btn btn-secondary btn-sm" onclick="editUser('${u.id}')"><i class="fa-solid fa-pen"></i> Edit</button>
                             <button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
                         </td>
@@ -986,6 +1009,106 @@ document.addEventListener('DOMContentLoaded', () => {
             }, 2000);
         });
     };
+
+    // --- User Top-ups Management ---
+    window.manageUserTopups = (userId) => {
+        const u = state.users.find(x => x.id === userId);
+        if (!u) return;
+
+        document.getElementById('topups-user-name').innerText = `User: ${u.name}`;
+        document.getElementById('topups-user-email').innerText = u.email;
+        document.getElementById('topup-user-id').value = u.id;
+        document.getElementById('topup-credits').value = '';
+
+        loadUserTopups(userId);
+        modalUserTopups.classList.add('show');
+    };
+
+    window.loadUserTopups = (userId) => {
+        const tbody = document.querySelector('#topups-table tbody');
+        tbody.innerHTML = `<tr><td colspan="5" class="text-muted text-center" style="text-align: center;">Loading top-ups...</td></tr>`;
+
+        fetch(`/api/users/topups?user_id=${userId}`)
+            .then(res => res.json())
+            .then(topups => {
+                if (!topups || topups.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" class="text-muted text-center" style="text-align: center;">No top-up logs found for this user.</td></tr>`;
+                    return;
+                }
+
+                tbody.innerHTML = topups.map(t => {
+                    const pct = Math.min((t.used_credits / t.credits) * 100, 100);
+                    let barColor = 'var(--primary)';
+                    let statusLabel = 'Active';
+                    if (pct >= 100) {
+                        barColor = 'var(--text-muted-dark)';
+                        statusLabel = 'Consumed';
+                    } else if (pct > 0) {
+                        barColor = '#fbbf24'; // warning gold
+                        statusLabel = 'In Use';
+                    }
+
+                    const dateStr = new Date(t.created_at).toLocaleString();
+                    return `
+                        <tr>
+                            <td>${dateStr}</td>
+                            <td><code>${t.id.substring(0, 12)}...</code></td>
+                            <td><strong>${t.credits.toFixed(2)}</strong></td>
+                            <td><strong>${t.used_credits.toFixed(2)}</strong></td>
+                            <td>
+                                <div style="display: flex; flex-direction: column; gap: 2px; min-width: 140px;">
+                                    <div style="display: flex; justify-content: space-between; font-size: 0.7rem; font-weight: 600;">
+                                        <span style="color:var(--text-muted);">${statusLabel}</span>
+                                        <span>${pct.toFixed(1)}%</span>
+                                    </div>
+                                    <div style="background: var(--panel-border); height: 6px; border-radius: 3px; overflow: hidden; width: 100%;">
+                                        <div style="background: ${barColor}; width: ${pct}%; height: 100%; border-radius: 3px;"></div>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            })
+            .catch(err => {
+                console.error(err);
+                tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center" style="text-align: center;">Failed to load top-up logs.</td></tr>`;
+            });
+    };
+
+    // Setup submit listener for top-up form once
+    document.getElementById('topup-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const userId = document.getElementById('topup-user-id').value;
+        const credits = parseFloat(document.getElementById('topup-credits').value);
+
+        if (!userId || isNaN(credits) || credits <= 0) {
+            alert('Please enter a valid amount of credits.');
+            return;
+        }
+
+        fetch('/api/users/topups', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, credits: credits })
+        })
+        .then(res => {
+            if (!res.ok) {
+                return res.text().then(text => { throw new Error(text) });
+            }
+            return res.json();
+        })
+        .then(() => {
+            // Reload user top-ups table
+            loadUserTopups(userId);
+            // Refresh global users list to reflect the balance
+            loadUsers();
+        })
+        .catch(err => {
+            console.error(err);
+            alert('Failed to add top-up credits: ' + err.message);
+        });
+    });
 
     // Load initial tab data
     loadTabData('dashboard');

@@ -19,14 +19,16 @@ type UserBudgetUsage struct {
 }
 
 type User struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	Email          string            `json:"email"`
-	PlanID         string            `json:"plan_id"`
-	Status         string            `json:"status"` // active, suspended
-	CreatedAt      time.Time         `json:"created_at"`
-	PlanAssignedAt time.Time         `json:"plan_assigned_at"`
-	BudgetUsage    []UserBudgetUsage `json:"budget_usage,omitempty"`
+	ID                    string            `json:"id"`
+	Name                  string            `json:"name"`
+	Email                 string            `json:"email"`
+	PlanID                string            `json:"plan_id"`
+	Status                string            `json:"status"` // active, suspended
+	CreatedAt             time.Time         `json:"created_at"`
+	PlanAssignedAt        time.Time         `json:"plan_assigned_at"`
+	BudgetUsage           []UserBudgetUsage `json:"budget_usage,omitempty"`
+	ExtraCredits          float64           `json:"extra_credits"`
+	RemainingExtraCredits float64           `json:"remaining_extra_credits"`
 }
 
 type Plan struct {
@@ -416,6 +418,12 @@ func (db *DB) GetUser(id string) (*User, error) {
 	if err == nil {
 		u.BudgetUsage = usage
 	}
+	var extra, remaining float64
+	err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1", u.ID).Scan(&extra, &remaining)
+	if err == nil {
+		u.ExtraCredits = extra
+		u.RemainingExtraCredits = remaining
+	}
 	return &u, nil
 }
 
@@ -435,6 +443,12 @@ func (db *DB) ListUsers() ([]User, error) {
 		usage, err := db.GetUserBudgetUsage(u.ID, u.PlanID)
 		if err == nil {
 			u.BudgetUsage = usage
+		}
+		var extra, remaining float64
+		err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1", u.ID).Scan(&extra, &remaining)
+		if err == nil {
+			u.ExtraCredits = extra
+			u.RemainingExtraCredits = remaining
 		}
 		list = append(list, u)
 	}

@@ -807,3 +807,26 @@ input:focus, select:focus, textarea:focus {
 .select-all {
     user-select: all;
 }
+
+/* User Credits Top-ups Modal Styling */
+#modal-user-topups .modal-content {
+    border-color: rgba(251, 191, 36, 0.2);
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(251, 191, 36, 0.05);
+}
+
+#topup-form input:focus {
+    border-color: #fbbf24;
+    box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.15);
+}
+
+#topup-form .btn-primary {
+    background-color: #fbbf24;
+    border-color: #fbbf24;
+    color: #09090b;
+}
+
+#topup-form .btn-primary:hover {
+    background-color: #f59e0b;
+    border-color: #f59e0b;
+    box-shadow: 0 0 12px rgba(251, 191, 36, 0.25);
+}

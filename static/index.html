@@ -178,6 +178,7 @@
                                  <th>Email</th>
                                  <th>Assigned Plan</th>
                                  <th style="width: 240px;">Spending Windows</th>
+                                 <th>Topped-up Credits</th>
                                  <th>Status</th>
                                  <th>Created At</th>
                                  <th>Actions</th>
@@ -525,6 +526,46 @@
                 </div>
                 <button type="submit" class="btn btn-primary btn-block" id="model-submit-btn">Save Model</button>
             </form>
+        </div>
+    </div>
+
+    <!-- MODAL: User Top-ups -->
+    <div class="modal" id="modal-user-topups">
+        <div class="modal-content" style="max-width: 650px;">
+            <span class="close-modal">&times;</span>
+            <h2>Manage Credits & Top-ups</h2>
+            <div style="margin-bottom: 1.5rem; padding: 1rem; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px solid var(--panel-border);">
+                <h3 id="topups-user-name" style="font-size: 1rem; margin-bottom: 0.25rem; font-family: var(--font-heading);">User: -</h3>
+                <p id="topups-user-email" style="font-size: 0.8rem; color: var(--text-muted); font-family: var(--font-mono);">-</p>
+            </div>
+            
+            <!-- Form to Add Top-up -->
+            <form id="topup-form" style="display: flex; gap: 0.75rem; align-items: flex-end; margin-bottom: 1.5rem; border-bottom: 1px solid var(--panel-border); padding-bottom: 1.5rem;">
+                <input type="hidden" id="topup-user-id">
+                <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                    <label for="topup-credits">Add Top-up Credits (1 Credit = $0.01)</label>
+                    <input type="number" id="topup-credits" min="1" required placeholder="e.g. 100">
+                </div>
+                <button type="submit" class="btn btn-primary" style="height: 38px;"><i class="fa-solid fa-plus"></i> Add Credits</button>
+            </form>
+            
+            <h3 style="font-family: var(--font-heading); font-size: 1.1rem; margin-bottom: 1rem;">Top-ups History & Log</h3>
+            <div class="table-container" style="max-height: 250px; overflow-y: auto; margin-bottom: 0;">
+                <table id="topups-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Top-up ID</th>
+                            <th>Credits</th>
+                            <th>Used</th>
+                            <th>Consumption</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Populated dynamically -->
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 
