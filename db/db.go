@@ -267,8 +267,6 @@ func (db *DB) seedDefaults() error {
 		{ID: "plan-dev", Name: "MuhiyaCode Free", RPMLimit: 30, TPMLimit: 300000},
 		{ID: "yalla", Name: "MuhiyaCode Yalla", RPMLimit: 60, TPMLimit: 1200000},
 		{ID: "max", Name: "MuhiyaCode Max", RPMLimit: 100, TPMLimit: 2500000},
-		{ID: "yalla-annual", Name: "MuhiyaCode Yalla Annual", RPMLimit: 60, TPMLimit: 1200000},
-		{ID: "max-annual", Name: "MuhiyaCode Max Annual", RPMLimit: 100, TPMLimit: 2500000},
 	}
 	for _, p := range plans {
 		_, err := tx.Exec(`
@@ -286,11 +284,11 @@ func (db *DB) seedDefaults() error {
 
 	// Update users on legacy plan IDs to new IDs
 	_, _ = tx.Exec("UPDATE users SET plan_id = 'plan-dev' WHERE plan_id = 'free'")
-	_, _ = tx.Exec("UPDATE users SET plan_id = 'yalla' WHERE plan_id = 'plan-unlimited'")
-	_, _ = tx.Exec("UPDATE users SET plan_id = 'max' WHERE plan_id = 'plan-prod'")
+	_, _ = tx.Exec("UPDATE users SET plan_id = 'yalla' WHERE plan_id IN ('plan-unlimited', 'yalla-annual')")
+	_, _ = tx.Exec("UPDATE users SET plan_id = 'max' WHERE plan_id IN ('plan-prod', 'max-annual')")
 
 	// Clean up legacy plans to prevent conflicts
-	_, _ = tx.Exec("DELETE FROM plans WHERE id IN ('free', 'plan-prod', 'plan-unlimited')")
+	_, _ = tx.Exec("DELETE FROM plans WHERE id IN ('free', 'plan-prod', 'plan-unlimited', 'yalla-annual', 'max-annual')")
 
 	// Seed budget windows
 	budgetWindows := []BudgetWindow{
@@ -305,14 +303,6 @@ func (db *DB) seedDefaults() error {
 		// Max plan: 50 USD per 5 hours and 31 days
 		{ID: "budget-max-5h", PlanID: "max", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 50.00},
 		{ID: "budget-max-31d", PlanID: "max", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
-
-		// Yalla Annual plan: 25 USD per 5 hours and 31 days
-		{ID: "budget-yalla-annual-5h", PlanID: "yalla-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 25.00},
-		{ID: "budget-yalla-annual-31d", PlanID: "yalla-annual", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 25.00},
-
-		// Max Annual plan: 50 USD per 5 hours and 31 days
-		{ID: "budget-max-annual-5h", PlanID: "max-annual", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 50.00},
-		{ID: "budget-max-annual-31d", PlanID: "max-annual", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
 	}
 	for _, bw := range budgetWindows {
 		_, err = tx.Exec(`
@@ -335,9 +325,7 @@ func (db *DB) seedDefaults() error {
 		WHERE id NOT IN (
 			'budget-plan-dev-5h', 'budget-plan-dev-31d',
 			'budget-yalla-5h', 'budget-yalla-31d',
-			'budget-max-5h', 'budget-max-31d',
-			'budget-yalla-annual-5h', 'budget-yalla-annual-31d',
-			'budget-max-annual-5h', 'budget-max-annual-31d'
+			'budget-max-5h', 'budget-max-31d'
 		)`)
 
 	// Seed providers
