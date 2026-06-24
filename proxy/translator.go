@@ -109,6 +109,12 @@ type OpenAIChunk struct {
 // Anthropic Protocol Structures
 // ==========================================
 
+type AnthropicSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // e.g. "image/jpeg"
+	Data      string `json:"data"`       // base64 data
+}
+
 type AnthropicContent struct {
 	Type       string              `json:"type"` // "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking"
 	Text       string              `json:"text,omitempty"`
@@ -120,6 +126,7 @@ type AnthropicContent struct {
 	ToolUseID  string              `json:"tool_use_id,omitempty"` // tool_result ID
 	Content    interface{}         `json:"content,omitempty"` // tool_result Content (string or array)
 	IsError    bool                `json:"is_error,omitempty"` // tool_result IsError
+	Source     *AnthropicSource    `json:"source,omitempty"`
 }
 
 type AnthropicMessage struct {
@@ -256,6 +263,73 @@ func GetMessageContentString(content interface{}) string {
 // ------------------------------------------
 // Translate OpenAI Request -> Anthropic Request
 // ------------------------------------------
+func TranslateOpenAIContentToAnthropic(content interface{}) []AnthropicContent {
+	if content == nil {
+		return nil
+	}
+
+	switch v := content.(type) {
+	case string:
+		return []AnthropicContent{{
+			Type: "text",
+			Text: v,
+		}}
+	case []interface{}:
+		var result []AnthropicContent
+		for _, part := range v {
+			m, ok := part.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			switch t {
+			case "text":
+				if text, ok := m["text"].(string); ok {
+					result = append(result, AnthropicContent{
+						Type: "text",
+						Text: text,
+					})
+				}
+			case "image_url":
+				if imgMap, ok := m["image_url"].(map[string]interface{}); ok {
+					if url, ok := imgMap["url"].(string); ok {
+						if strings.HasPrefix(url, "data:") {
+							// Parse data URL: data:<media-type>;base64,<data>
+							commaIdx := strings.Index(url, ",")
+							if commaIdx != -1 {
+								header := url[:commaIdx]
+								base64Data := url[commaIdx+1:]
+
+								// Extract media type from header (e.g. "data:image/jpeg;base64")
+								mediaType := "image/jpeg"
+								semiIdx := strings.Index(header, ";")
+								if semiIdx != -1 && strings.HasPrefix(header, "data:") {
+									mediaType = header[5:semiIdx]
+								}
+
+								result = append(result, AnthropicContent{
+									Type: "image",
+									Source: &AnthropicSource{
+										Type:      "base64",
+										MediaType: mediaType,
+										Data:      base64Data,
+									},
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+		return result
+	default:
+		return []AnthropicContent{{
+			Type: "text",
+			Text: fmt.Sprintf("%v", v),
+		}}
+	}
+}
+
 func TranslateOpenAIToAnthropic(orig *OpenAIRequest, targetModel string) (*AnthropicRequest, error) {
 	var systemParts []string
 	var rawMessages []OpenAIMessage
@@ -290,10 +364,7 @@ func TranslateOpenAIToAnthropic(orig *OpenAIRequest, targetModel string) (*Anthr
 		} else {
 			// standard message content
 			if msg.Content != nil {
-				content = append(content, AnthropicContent{
-					Type: "text",
-					Text: GetMessageContentString(msg.Content),
-				})
+				content = append(content, TranslateOpenAIContentToAnthropic(msg.Content)...)
 			}
 
 			// append tool calls if any

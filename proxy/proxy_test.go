@@ -442,6 +442,60 @@ func TestTranslateErrorBytes(t *testing.T) {
 	}
 }
 
+func TestTranslateOpenAIToAnthropicWithAttachments(t *testing.T) {
+	origReq := &OpenAIRequest{
+		Model: "gpt-4o",
+		Messages: []OpenAIMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{
+						"type": "text",
+						"text": "What is in this image?",
+					},
+					map[string]interface{}{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": "data:image/png;base64,iVBORw0KGgoAAAANS",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	anthReq, err := TranslateOpenAIToAnthropic(origReq, "claude-3-5-sonnet")
+	if err != nil {
+		t.Fatalf("Failed to translate request with attachments: %v", err)
+	}
+
+	if len(anthReq.Messages) != 1 {
+		t.Fatalf("Expected 1 translated message, got %d", len(anthReq.Messages))
+	}
+
+	content := anthReq.Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("Expected 2 content blocks in translated message, got %d", len(content))
+	}
+
+	if content[0].Type != "text" || content[0].Text != "What is in this image?" {
+		t.Errorf("Expected first content block to be text, got type=%s text=%s", content[0].Type, content[0].Text)
+	}
+
+	if content[1].Type != "image" {
+		t.Fatalf("Expected second content block to be image, got type=%s", content[1].Type)
+	}
+
+	if content[1].Source == nil {
+		t.Fatalf("Expected image source to be not nil")
+	}
+
+	if content[1].Source.Type != "base64" || content[1].Source.MediaType != "image/png" || content[1].Source.Data != "iVBORw0KGgoAAAANS" {
+		t.Errorf("Unexpected translated image source details: %+v", content[1].Source)
+	}
+}
+
 // Helpers
 func floatPtr(f float64) *float64 { return &f }
 func intPtr(i int) *int         { return &i }
+

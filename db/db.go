@@ -270,11 +270,11 @@ func (db *DB) seedDefaults() error {
 	defer tx.Rollback()
 
 	// Seed system settings
-	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", "gateway_name", "MuhiyaLLM Gateway")
+	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING", "gateway_name", "MuhiyaLLM Gateway")
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", "theme_accent", "emerald")
+	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING", "theme_accent", "emerald")
 	if err != nil {
 		return err
 	}
@@ -289,10 +289,7 @@ func (db *DB) seedDefaults() error {
 		_, err := tx.Exec(`
 			INSERT INTO plans (id, name, rpm_limit, tpm_limit) 
 			VALUES ($1, $2, $3, $4) 
-			ON CONFLICT (id) DO UPDATE SET 
-				name = EXCLUDED.name, 
-				rpm_limit = EXCLUDED.rpm_limit, 
-				tpm_limit = EXCLUDED.tpm_limit`,
+			ON CONFLICT (id) DO NOTHING`,
 			p.ID, p.Name, p.RPMLimit, p.TPMLimit)
 		if err != nil {
 			return err
@@ -324,11 +321,7 @@ func (db *DB) seedDefaults() error {
 		_, err = tx.Exec(`
 			INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) 
 			VALUES ($1, $2, $3, $4, $5) 
-			ON CONFLICT (id) DO UPDATE SET 
-				plan_id = EXCLUDED.plan_id, 
-				name = EXCLUDED.name, 
-				duration_seconds = EXCLUDED.duration_seconds, 
-				budget_usd = EXCLUDED.budget_usd`,
+			ON CONFLICT (id) DO NOTHING`,
 			bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
 		if err != nil {
 			return err
@@ -354,26 +347,18 @@ func (db *DB) seedDefaults() error {
 		_, err := tx.Exec(`
 			INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) 
 			VALUES ($1, $2, $3, $4, $5, $6) 
-			ON CONFLICT (id) DO UPDATE SET 
-				name = EXCLUDED.name, 
-				api_key = EXCLUDED.api_key, 
-				base_url = EXCLUDED.base_url, 
-				anthropic_base_url = EXCLUDED.anthropic_base_url, 
-				status = EXCLUDED.status`,
+			ON CONFLICT (id) DO NOTHING`,
 			pr.ID, pr.Name, pr.APIKey, pr.BaseURL, pr.AnthropicBaseURL, pr.Status)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Seed models
+	// Seed models (excluding internal virtual/alias model rows)
 	models := []Model{
 		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active"},
 		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active"},
 		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
-		{ID: "model-claude-alias", Name: "claude", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active"},
-		{ID: "model-openai-alias", Name: "openai", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active"},
-		{ID: "model-deepseek-alias", Name: "deepseek", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
 		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
 	}
 	for _, m := range models {
@@ -382,21 +367,16 @@ func (db *DB) seedDefaults() error {
 				id, name, provider_id, target_model, input_cost_per_million, 
 				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
-			ON CONFLICT (id) DO UPDATE SET 
-				name = EXCLUDED.name, 
-				provider_id = EXCLUDED.provider_id, 
-				target_model = EXCLUDED.target_model, 
-				input_cost_per_million = EXCLUDED.input_cost_per_million, 
-				output_cost_per_million = EXCLUDED.output_cost_per_million, 
-				cache_read_cost_per_million = EXCLUDED.cache_read_cost_per_million, 
-				cache_write_cost_per_million = EXCLUDED.cache_write_cost_per_million, 
-				status = EXCLUDED.status`,
+			ON CONFLICT (id) DO NOTHING`,
 			m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status)
 		if err != nil {
 			return err
 		}
 	}
+
+	// Clean up legacy alias/virtual model records from the database
+	_, _ = tx.Exec("DELETE FROM models WHERE id IN ('model-claude-alias', 'model-openai-alias', 'model-deepseek-alias')")
 
 	return tx.Commit()
 }
@@ -777,10 +757,19 @@ func (db *DB) DeleteProvider(id string) error {
 // --- Models CRUD ---
 
 func (db *DB) GetModelByName(name string) (*Model, error) {
+	normalizedName := name
+	if name == "claude" {
+		normalizedName = "claude-3-5-sonnet"
+	} else if name == "openai" {
+		normalizedName = "gpt-4o"
+	} else if name == "deepseek" {
+		normalizedName = "deepseek-chat"
+	}
+
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, created_at 
-		FROM models WHERE name = $1 AND status = 'active'`, name).
+		FROM models WHERE name = $1 AND status = 'active'`, normalizedName).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.CreatedAt)
 	if err == sql.ErrNoRows {
