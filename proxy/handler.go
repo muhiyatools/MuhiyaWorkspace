@@ -267,75 +267,140 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	model, err := h.db.GetModelByName(oaiReq.Model)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
-		return
-	}
-	if model == nil {
-		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", oaiReq.Model), "invalid_request_error")
-		return
-	}
+	isRouterRequest := oaiReq.Model == "muhiya-ai-router"
+	var targetModel *db.Model
+	var fallbackModels []*db.Model
+	var err error
 
-	provider, err := h.db.GetProvider(model.ProviderID)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
-		return
-	}
-	if provider == nil || provider.Status != "active" {
-		h.writeError(w, http.StatusServiceUnavailable, "Provider is currently unavailable or inactive", "api_error")
-		return
-	}
+	if isRouterRequest {
+		complexity := AnalyzePromptComplexity(oaiReq.Messages)
+		needsVision := false
+		for _, msg := range oaiReq.Messages {
+			if arr, ok := msg.Content.([]interface{}); ok {
+				for _, item := range arr {
+					if m, ok := item.(map[string]interface{}); ok {
+						if m["type"] == "image_url" {
+							needsVision = true
+							break
+						}
+					}
+				}
+			}
+		}
 
-	// Estimate prompt tokens
-	var textBuilder strings.Builder
-	for _, m := range oaiReq.Messages {
-		textBuilder.WriteString(GetMessageContentString(m.Content))
-	}
-	promptTokens := estimateTokens(textBuilder.String())
-
-	// Check Rate Limits and Budgets
-	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
-		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
-		return
-	}
-
-	startTime := time.Now()
-	reqLog := db.RequestLog{
-		ID:           uuid.New().String(),
-		VirtualKeyID: key.ID,
-		UserID:       key.UserID,
-		ModelID:      model.ID,
-		ProviderID:   provider.ID,
-		RequestPath:  r.URL.Path,
-		InputTokens:  promptTokens,
-		ClientApp:    getClientAppName(r),
-		CreatedAt:    startTime,
-	}
-
-	var targetURL string
-	var useAnthropicUpstream bool
-
-	if provider.BaseURL != "" {
-		targetURL = provider.BaseURL
-		useAnthropicUpstream = false
-	} else if provider.AnthropicBaseURL != "" {
-		targetURL = provider.AnthropicBaseURL
-		useAnthropicUpstream = true
+		targetModel, err = h.RouteToModel(complexity, needsVision)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
+			return
+		}
+		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needsVision)
+		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, vision: %v) with %d fallback(s)", targetModel.Name, complexity, needsVision, len(fallbackModels))
 	} else {
-		h.writeError(w, http.StatusInternalServerError, "Provider has no base URL configured", "api_error")
-		return
+		targetModel, err = h.db.GetModelByName(oaiReq.Model)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+			return
+		}
+		if targetModel == nil {
+			h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", oaiReq.Model), "invalid_request_error")
+			return
+		}
 	}
 
-	resolvedProvider := *provider
-	resolvedProvider.BaseURL = targetURL
+	// Prepare candidate models to try
+	candidates := []*db.Model{targetModel}
+	if isRouterRequest {
+		candidates = append(candidates, fallbackModels...)
+	}
 
-	if useAnthropicUpstream {
-		// OpenAI Client -> MuhiyaLLM -> Anthropic Provider
-		h.proxyOpenAIToAnthropic(w, r, &oaiReq, model, &resolvedProvider, reqLog, startTime)
-	} else {
-		// OpenAI Client -> MuhiyaLLM -> OpenAI Provider (Passthrough)
-		h.proxyOpenAIToOpenAI(w, r, bodyBytes, model, &resolvedProvider, reqLog, startTime)
+	var lastBuffer *BufferedResponseWriter
+	success := false
+
+	for idx, model := range candidates {
+		// Clone request to avoid mutating original for subsequent retries
+		reqCopy := oaiReq
+		reqCopy.Model = model.Name
+
+		provider, err := h.db.GetProvider(model.ProviderID)
+		if err != nil {
+			log.Printf("[ROUTER-WARNING] Failed to get provider for model %s: %v", model.Name, err)
+			continue
+		}
+		if provider == nil || provider.Status != "active" {
+			log.Printf("[ROUTER-WARNING] Provider %s is inactive for model %s", model.ProviderID, model.Name)
+			continue
+		}
+
+		// Estimate prompt tokens
+		var textBuilder strings.Builder
+		for _, m := range reqCopy.Messages {
+			textBuilder.WriteString(GetMessageContentString(m.Content))
+		}
+		promptTokens := estimateTokens(textBuilder.String())
+
+		// Check Rate Limits and Budgets
+		if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+			h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+			return
+		}
+
+		startTime := time.Now()
+		reqLog := db.RequestLog{
+			ID:           uuid.New().String(),
+			VirtualKeyID: key.ID,
+			UserID:       key.UserID,
+			ModelID:      model.ID,
+			ProviderID:   provider.ID,
+			RequestPath:  r.URL.Path,
+			InputTokens:  promptTokens,
+			ClientApp:    getClientAppName(r),
+			CreatedAt:    startTime,
+		}
+
+		var targetURL string
+		var useAnthropicUpstream bool
+
+		if provider.BaseURL != "" {
+			targetURL = provider.BaseURL
+			useAnthropicUpstream = false
+		} else if provider.AnthropicBaseURL != "" {
+			targetURL = provider.AnthropicBaseURL
+			useAnthropicUpstream = true
+		} else {
+			log.Printf("[ROUTER-WARNING] Provider %s has no base URL", provider.ID)
+			continue
+		}
+
+		resolvedProvider := *provider
+		resolvedProvider.BaseURL = targetURL
+
+		// Create buffered writer to intercept failures cleanly
+		bufW := NewBufferedResponseWriter(w)
+		lastBuffer = bufW
+
+		// Perform proxy
+		if useAnthropicUpstream {
+			h.proxyOpenAIToAnthropic(bufW, r, &reqCopy, model, &resolvedProvider, reqLog, startTime)
+		} else {
+			newBody, _ := json.Marshal(reqCopy)
+			h.proxyOpenAIToOpenAI(bufW, r, newBody, model, &resolvedProvider, reqLog, startTime)
+		}
+
+		// Check if request was successful
+		if bufW.statusCode > 0 && bufW.statusCode < 400 {
+			success = true
+			if idx > 0 {
+				log.Printf("[ROUTER-SUCCESS] Router failover succeeded with model %s on attempt %d", model.Name, idx+1)
+			}
+			break
+		}
+
+		log.Printf("[ROUTER-FAILOVER] Model %s failed (status %d). Trying next candidate...", model.Name, bufW.statusCode)
+	}
+
+	// If all candidates failed, flush the last failure response to the client
+	if !success && lastBuffer != nil {
+		lastBuffer.FlushToActual()
 	}
 }
 
@@ -355,79 +420,153 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	model, err := h.db.GetModelByName(anthReq.Model)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
-		return
-	}
-	if model == nil {
-		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", anthReq.Model), "invalid_request_error")
-		return
-	}
+	isRouterRequest := anthReq.Model == "muhiya-ai-router"
+	var targetModel *db.Model
+	var fallbackModels []*db.Model
+	var err error
 
-	provider, err := h.db.GetProvider(model.ProviderID)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
-		return
-	}
-	if provider == nil || provider.Status != "active" {
-		h.writeError(w, http.StatusServiceUnavailable, "Provider is currently unavailable or inactive", "api_error")
-		return
-	}
+	if isRouterRequest {
+		// Convert Anthropic format messages to OpenAI format for simple complexity analysis
+		var oaiMessages []OpenAIMessage
+		for _, m := range anthReq.Messages {
+			var textBuilder strings.Builder
+			for _, c := range m.Content {
+				textBuilder.WriteString(c.Text)
+			}
+			oaiMessages = append(oaiMessages, OpenAIMessage{
+				Role:    m.Role,
+				Content: textBuilder.String(),
+			})
+		}
+		complexity := AnalyzePromptComplexity(oaiMessages)
 
-	// Estimate prompt tokens
-	var textBuilder strings.Builder
-	textBuilder.WriteString(string(anthReq.System))
-	for _, m := range anthReq.Messages {
-		for _, b := range m.Content {
-			textBuilder.WriteString(b.Text)
-			textBuilder.WriteString(b.Thinking)
+		needsVision := false
+		for _, msg := range anthReq.Messages {
+			for _, contentBlock := range msg.Content {
+				if contentBlock.Type == "image" {
+					needsVision = true
+					break
+				}
+			}
+		}
+
+		targetModel, err = h.RouteToModel(complexity, needsVision)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
+			return
+		}
+		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needsVision)
+		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, vision: %v) with %d fallback(s)", targetModel.Name, complexity, needsVision, len(fallbackModels))
+	} else {
+		targetModel, err = h.db.GetModelByName(anthReq.Model)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+			return
+		}
+		if targetModel == nil {
+			h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", anthReq.Model), "invalid_request_error")
+			return
 		}
 	}
-	promptTokens := estimateTokens(textBuilder.String())
 
-	// Check limits
-	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
-		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
-		return
+	// Prepare candidate models to try
+	candidates := []*db.Model{targetModel}
+	if isRouterRequest {
+		candidates = append(candidates, fallbackModels...)
 	}
 
-	startTime := time.Now()
-	reqLog := db.RequestLog{
-		ID:           uuid.New().String(),
-		VirtualKeyID: key.ID,
-		UserID:       key.UserID,
-		ModelID:      model.ID,
-		ProviderID:   provider.ID,
-		RequestPath:  r.URL.Path,
-		InputTokens:  promptTokens,
-		ClientApp:    getClientAppName(r),
-		CreatedAt:    startTime,
+	var lastBuffer *BufferedResponseWriter
+	success := false
+
+	for idx, model := range candidates {
+		// Clone request to avoid mutating original for subsequent retries
+		reqCopy := anthReq
+		reqCopy.Model = model.Name
+
+		provider, err := h.db.GetProvider(model.ProviderID)
+		if err != nil {
+			log.Printf("[ROUTER-WARNING] Failed to get provider for model %s: %v", model.Name, err)
+			continue
+		}
+		if provider == nil || provider.Status != "active" {
+			log.Printf("[ROUTER-WARNING] Provider %s is inactive for model %s", model.ProviderID, model.Name)
+			continue
+		}
+
+		// Estimate prompt tokens
+		var textBuilder strings.Builder
+		textBuilder.WriteString(string(reqCopy.System))
+		for _, m := range reqCopy.Messages {
+			for _, b := range m.Content {
+				textBuilder.WriteString(b.Text)
+				textBuilder.WriteString(b.Thinking)
+			}
+		}
+		promptTokens := estimateTokens(textBuilder.String())
+
+		// Check limits
+		if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+			h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+			return
+		}
+
+		startTime := time.Now()
+		reqLog := db.RequestLog{
+			ID:           uuid.New().String(),
+			VirtualKeyID: key.ID,
+			UserID:       key.UserID,
+			ModelID:      model.ID,
+			ProviderID:   provider.ID,
+			RequestPath:  r.URL.Path,
+			InputTokens:  promptTokens,
+			ClientApp:    getClientAppName(r),
+			CreatedAt:    startTime,
+		}
+
+		var targetURL string
+		var useAnthropicUpstream bool
+
+		if provider.BaseURL != "" {
+			targetURL = provider.BaseURL
+			useAnthropicUpstream = false
+		} else if provider.AnthropicBaseURL != "" {
+			targetURL = provider.AnthropicBaseURL
+			useAnthropicUpstream = true
+		} else {
+			log.Printf("[ROUTER-WARNING] Provider %s has no base URL", provider.ID)
+			continue
+		}
+
+		resolvedProvider := *provider
+		resolvedProvider.BaseURL = targetURL
+
+		// Create buffered writer to intercept failures cleanly
+		bufW := NewBufferedResponseWriter(w)
+		lastBuffer = bufW
+
+		// Perform proxy
+		if useAnthropicUpstream {
+			newBody, _ := json.Marshal(reqCopy)
+			h.proxyAnthropicToAnthropic(bufW, r, newBody, &reqCopy, model, &resolvedProvider, reqLog, startTime)
+		} else {
+			h.proxyAnthropicToOpenAI(bufW, r, &reqCopy, model, &resolvedProvider, reqLog, startTime)
+		}
+
+		// Check if request was successful
+		if bufW.statusCode > 0 && bufW.statusCode < 400 {
+			success = true
+			if idx > 0 {
+				log.Printf("[ROUTER-SUCCESS] Router failover succeeded with model %s on attempt %d", model.Name, idx+1)
+			}
+			break
+		}
+
+		log.Printf("[ROUTER-FAILOVER] Model %s failed (status %d). Trying next candidate...", model.Name, bufW.statusCode)
 	}
 
-	var targetURL string
-	var useAnthropicUpstream bool
-
-	if provider.AnthropicBaseURL != "" {
-		targetURL = provider.AnthropicBaseURL
-		useAnthropicUpstream = true
-	} else if provider.BaseURL != "" {
-		targetURL = provider.BaseURL
-		useAnthropicUpstream = false
-	} else {
-		h.writeError(w, http.StatusInternalServerError, "Provider has no base URL configured", "api_error")
-		return
-	}
-
-	resolvedProvider := *provider
-	resolvedProvider.BaseURL = targetURL
-
-	if useAnthropicUpstream {
-		// Anthropic Client -> MuhiyaLLM -> Anthropic Provider (Passthrough)
-		h.proxyAnthropicToAnthropic(w, r, bodyBytes, &anthReq, model, &resolvedProvider, reqLog, startTime)
-	} else {
-		// Anthropic Client -> MuhiyaLLM -> OpenAI Provider
-		h.proxyAnthropicToOpenAI(w, r, &anthReq, model, &resolvedProvider, reqLog, startTime)
+	// If all candidates failed, flush the last failure response to the client
+	if !success && lastBuffer != nil {
+		lastBuffer.FlushToActual()
 	}
 }
 
