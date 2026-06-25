@@ -44,6 +44,9 @@
                 <a href="#" class="nav-item" data-tab="logs">
                     <i class="fa-solid fa-terminal"></i> <span>Request Logs</span>
                 </a>
+                <a href="#" class="nav-item" data-tab="router">
+                    <i class="fa-solid fa-route"></i> <span>AI Router</span>
+                </a>
                 <a href="#" class="nav-item" data-tab="settings">
                     <i class="fa-solid fa-sliders"></i> <span>Settings</span>
                 </a>
@@ -326,6 +329,171 @@
                         </div>
                         <button type="submit" class="btn btn-primary"><i class="fa-solid fa-floppy-disk"></i> Apply Global Settings</button>
                     </form>
+                </div>
+            </section>
+ 
+            <!-- TAB: AI Router -->
+            <section id="tab-router" class="tab-content">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon req"><i class="fa-solid fa-route"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Router Requests</span>
+                            <span class="stat-value" id="router-stat-requests">0</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon cost"><i class="fa-solid fa-piggy-bank"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Credit Savings (USD)</span>
+                            <span class="stat-value" id="router-stat-savings">$0.00</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon status"><i class="fa-solid fa-percent"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Router Success Rate</span>
+                            <span class="stat-value" id="router-stat-success">100.0%</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon latency"><i class="fa-solid fa-shield-heart"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Failover Recoveries</span>
+                            <span class="stat-value" id="router-stat-failovers">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="router-dashboard-split" style="margin-top: 2rem;">
+                    <!-- Complexity Classification Rules Panel -->
+                    <div class="chart-container" style="flex: 1;">
+                        <h3><i class="fa-solid fa-sliders"></i> Dynamic Classification Tiers</h3>
+                        <div class="complexity-tiers-list">
+                            <div class="complexity-tier-card simple">
+                                <div class="tier-header">
+                                    <span class="tier-badge simple">SIMPLE</span>
+                                    <span class="tier-routing"><i class="fa-solid fa-arrow-right"></i> Cheapest Active Model</span>
+                                </div>
+                                <div class="tier-body">
+                                    <p class="tier-desc">Used for quick conversational questions and translation. Minimizes credit spending.</p>
+                                    <div class="tier-rules">
+                                        <span class="rule-tag"><i class="fa-solid fa-text-width"></i> Length &lt; 400 chars</span>
+                                        <span class="rule-tag"><i class="fa-solid fa-ban"></i> No technical keywords</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="complexity-tier-card medium" style="margin-top: 1rem;">
+                                <div class="tier-header">
+                                    <span class="tier-badge medium">MEDIUM</span>
+                                    <span class="tier-routing"><i class="fa-solid fa-arrow-right"></i> Mid-Tier reasoning (e.g. DeepSeek V3 / GPT-4o)</span>
+                                </div>
+                                <div class="tier-body">
+                                    <p class="tier-desc">Used for general research, summarization, and standard prompt lengths.</p>
+                                    <div class="tier-rules">
+                                        <span class="rule-tag"><i class="fa-solid fa-text-width"></i> Length 400 - 1500 chars</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="complexity-tier-card hard" style="margin-top: 1rem;">
+                                <div class="tier-header">
+                                    <span class="tier-badge hard">HARD</span>
+                                    <span class="tier-routing"><i class="fa-solid fa-arrow-right"></i> Premium reasoning (Claude 3.5 Sonnet / GPT-4o)</span>
+                                </div>
+                                <div class="tier-body">
+                                    <p class="tier-desc">Triggered for complex programming tasks, deep logical analysis, or long contexts.</p>
+                                    <div class="tier-rules">
+                                        <span class="rule-tag"><i class="fa-solid fa-text-width"></i> Length &gt; 1500 chars</span>
+                                        <span class="rule-tag"><i class="fa-solid fa-code"></i> Coding/Reasoning keywords</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Mapped Models list & pricing -->
+                    <div class="chart-container" style="flex: 1.2;">
+                        <h3><i class="fa-solid fa-microchip"></i> Active Model Pricing & Tier Mappings</h3>
+                        <div class="table-container" style="box-shadow: none; border: 1px solid var(--color-border); margin-top: 1rem;">
+                            <table id="router-models-table" style="font-size: 13px;">
+                                <thead>
+                                    <tr>
+                                        <th>Model Name</th>
+                                        <th>Input / 1M</th>
+                                        <th>Output / 1M</th>
+                                        <th>Routing Tier</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Failover retry queue visualization -->
+                <div class="chart-container" style="margin-top: 2rem;">
+                    <h3><i class="fa-solid fa-shuffle"></i> Automatic Failover & Credit Optimization Sequence</h3>
+                    <div class="failover-sequence-flow" style="margin-top: 1.5rem;">
+                        <div class="flow-step active">
+                            <div class="step-icon"><i class="fa-solid fa-route"></i></div>
+                            <div class="step-details">
+                                <span class="step-title">1. Analyze Complexity</span>
+                                <span class="step-desc">Prompts intercepted & analyzed dynamically.</span>
+                            </div>
+                        </div>
+                        <div class="flow-connector active"></div>
+                        <div class="flow-step active">
+                            <div class="step-icon"><i class="fa-solid fa-arrow-up-right-from-square"></i></div>
+                            <div class="step-details">
+                                <span class="step-title">2. Target Primary</span>
+                                <span class="step-desc">Dispatched to the cheapest active model for that tier.</span>
+                            </div>
+                        </div>
+                        <div class="flow-connector active"></div>
+                        <div class="flow-step active">
+                            <div class="step-icon alert"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                            <div class="step-details">
+                                <span class="step-title">3. Intercept Failures</span>
+                                <span class="step-desc">BufferedResponseWriter catches 429/5xx errors.</span>
+                            </div>
+                        </div>
+                        <div class="flow-connector active"></div>
+                        <div class="flow-step active">
+                            <div class="step-icon success"><i class="fa-solid fa-shield-halved"></i></div>
+                            <div class="step-details">
+                                <span class="step-title">4. Auto-Retry Fallbacks</span>
+                                <span class="step-desc">Retries using other active models sorted by cost (cheapest first).</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Router logs -->
+                <div class="chart-container" style="margin-top: 2rem;">
+                    <h3><i class="fa-solid fa-terminal"></i> Recent AI Router Executions</h3>
+                    <div class="table-container" style="box-shadow: none; border: 1px solid var(--color-border); margin-top: 1rem;">
+                        <table id="router-logs-table" style="font-size: 13px;">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Virtual Key</th>
+                                    <th>Routed Model</th>
+                                    <th>Tokens (In/Out)</th>
+                                    <th>Latency</th>
+                                    <th>Cost (USD)</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
         </main>

@@ -60,6 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 plans: "Configure plans and define budget window parameters inline",
                 providers: "Manage connection keys and model mapping configurations",
                 logs: "Audit live API request headers, latencies, and token spendings",
+                router: "Monitor and analyze the Muhiya AI Router routing tiers, mappings, and failovers",
                 settings: "Customize global gateway variables and system settings"
             };
             pageSubtitle.innerText = subtitles[tab] || "";
@@ -94,6 +95,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 break;
             case 'logs':
                 loadLogs();
+                break;
+            case 'router':
+                loadRouterData();
                 break;
             case 'settings':
                 loadSettings();
@@ -1111,6 +1115,115 @@ document.addEventListener('DOMContentLoaded', () => {
             alert('Failed to add top-up credits: ' + err.message);
         });
     });
+
+    function loadRouterData() {
+        // Fetch active models to populate pricing table
+        fetch('/api/models')
+            .then(res => res.json())
+            .then(models => {
+                state.models = models;
+                const tbody = document.querySelector('#router-models-table tbody');
+                tbody.innerHTML = '';
+                
+                models.forEach(m => {
+                    let tier = 'Cheapest (Simple)';
+                    let tierBadge = 'simple';
+                    const nameLower = m.name.toLowerCase();
+                    
+                    if (nameLower.includes('sonnet') || nameLower.includes('gpt-4o')) {
+                        tier = 'Premium (Hard)';
+                        tierBadge = 'hard';
+                    } else if (nameLower.includes('mini') || nameLower.includes('flash')) {
+                        tier = 'Mid-Tier (Medium)';
+                        tierBadge = 'medium';
+                    }
+                    
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td><strong>${m.name}</strong> <span class="text-muted" style="font-size: 11px;">(${m.provider_id})</span></td>
+                        <td>$${m.input_cost_per_million.toFixed(2)}</td>
+                        <td>$${m.output_cost_per_million.toFixed(2)}</td>
+                        <td><span class="tier-badge ${tierBadge}" style="font-size: 10px; padding: 2px 6px;">${tier}</span></td>
+                        <td><span class="badge ${m.status === 'active' ? 'badge-active' : 'badge-inactive'}">${m.status}</span></td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            })
+            .catch(err => console.error('Failed to load router models:', err));
+
+        // Fetch logs to compute statistics and savings
+        fetch('/api/logs?limit=1000')
+            .then(res => res.json())
+            .then(logs => {
+                const routerLogs = logs.filter(log => log.virtual_model === 'muhiya-ai-router');
+                const totalRequests = routerLogs.length;
+                
+                let successCount = 0;
+                let failoverCount = 0;
+                let totalSavings = 0.0;
+                
+                routerLogs.forEach(log => {
+                    if (!log.is_error) {
+                        successCount++;
+                        
+                        // Compute estimated savings:
+                        // Savings = (Cost if routed to Claude 3.5 Sonnet) - (Actual Cost)
+                        // Assuming Claude 3.5 Sonnet costs $3.00/1M input and $15.00/1M output
+                        const inputTokens = log.prompt_tokens || 0;
+                        const outputTokens = log.completion_tokens || 0;
+                        const claudeCost = (inputTokens * 3.00 / 1000000) + (outputTokens * 15.00 / 1000000);
+                        const savings = claudeCost - log.cost_usd;
+                        if (savings > 0) {
+                            totalSavings += savings;
+                        }
+                    }
+                    
+                    if (log.error_message && (log.error_message.toLowerCase().includes('retry') || log.error_message.toLowerCase().includes('fallback') || log.error_message.toLowerCase().includes('failover'))) {
+                        failoverCount++;
+                    }
+                });
+
+                const successRate = totalRequests > 0 ? (successCount / totalRequests * 100) : 100.0;
+                
+                document.getElementById('router-stat-requests').innerText = totalRequests.toLocaleString();
+                document.getElementById('router-stat-savings').innerText = `$${totalSavings.toFixed(4)}`;
+                document.getElementById('router-stat-success').innerText = `${successRate.toFixed(1)}%`;
+                document.getElementById('router-stat-failovers').innerText = failoverCount.toLocaleString();
+
+                // Populate router logs table
+                const tbody = document.querySelector('#router-logs-table tbody');
+                tbody.innerHTML = '';
+                
+                if (routerLogs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted" style="padding: 2rem;">No router request logs found yet. Run prompt queries to test.</td></tr>';
+                    return;
+                }
+                
+                routerLogs.slice(0, 10).forEach(log => {
+                    const tr = document.createElement('tr');
+                    const date = new Date(log.created_at).toLocaleTimeString();
+                    
+                    let statusClass = 'status-success';
+                    let statusText = 'Success';
+                    if (log.is_error) {
+                        statusClass = 'status-error';
+                        statusText = 'Error';
+                    }
+                    
+                    tr.innerHTML = `
+                        <td>${date}</td>
+                        <td class="font-mono" style="font-size: 11px;">${log.virtual_key_id.slice(0, 12)}...</td>
+                        <td><span class="tier-badge ${log.model.includes('sonnet') || log.model.includes('gpt-4o') ? 'hard' : 'simple'}" style="font-size: 11px; padding: 2px 6px;">${log.model}</span></td>
+                        <td>${log.prompt_tokens || 0} / ${log.completion_tokens || 0}</td>
+                        <td>${log.latency_ms || 0} ms</td>
+                        <td class="font-mono">$${log.cost_usd.toFixed(5)}</td>
+                        <td><span class="status-indicator-badge ${statusClass}">${statusText}</span></td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            })
+            .catch(err => console.error('Failed to load router logs:', err));
+    }
 
     // Load initial tab data
     loadTabData('dashboard');
