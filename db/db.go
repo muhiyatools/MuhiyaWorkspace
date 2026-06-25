@@ -79,6 +79,7 @@ type Model struct {
 	CacheReadCostPerMillion  float64   `json:"cache_read_cost_per_million"`
 	CacheWriteCostPerMillion float64   `json:"cache_write_cost_per_million"`
 	Status                   string    `json:"status"` // active, inactive
+	RoutingTier              string    `json:"routing_tier"` // none, simple, medium, hard
 	CreatedAt                time.Time `json:"created_at"`
 }
 
@@ -98,6 +99,9 @@ type RequestLog struct {
 	LatencyMS        int       `json:"latency_ms"`
 	ErrorMessage     string    `json:"error_message"`
 	ClientApp        string    `json:"client_app"`
+	RequestedModel   string    `json:"requested_model"`
+	Complexity       string    `json:"complexity"`
+	FailoverAttempts int       `json:"failover_attempts"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 
@@ -248,6 +252,12 @@ func Open(dsn string) (*DB, error) {
 			return nil, fmt.Errorf("failed to execute schema: %w", err)
 		}
 	}
+
+	// Run schema migrations for newer AI Router fields
+	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS routing_tier VARCHAR(50) DEFAULT 'none';")
+	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS requested_model VARCHAR(255) DEFAULT '';")
+	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS complexity VARCHAR(50) DEFAULT '';")
+	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS failover_attempts INTEGER DEFAULT 0;")
 
 	db := &DB{conn: conn}
 	if err := db.seedDefaults(); err != nil {
@@ -768,10 +778,10 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, created_at 
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, COALESCE(routing_tier, 'none'), created_at 
 		FROM models WHERE name = $1 AND status = 'active'`, normalizedName).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -784,10 +794,10 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 func (db *DB) GetModel(id string) (*Model, error) {
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, created_at 
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, COALESCE(routing_tier, 'none'), created_at 
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -799,7 +809,7 @@ func (db *DB) GetModel(id string) (*Model, error) {
 
 func (db *DB) ListModels() ([]Model, error) {
 	rows, err := db.conn.Query(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, created_at 
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, COALESCE(routing_tier, 'none'), created_at 
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -810,7 +820,7 @@ func (db *DB) ListModels() ([]Model, error) {
 	for rows.Next() {
 		var m Model
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -820,21 +830,27 @@ func (db *DB) ListModels() ([]Model, error) {
 }
 
 func (db *DB) CreateModel(m Model) error {
+	if m.RoutingTier == "" {
+		m.RoutingTier = "none"
+	}
 	_, err := db.conn.Exec(`INSERT INTO models (
 		id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, routing_tier
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status)
+		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier)
 	return err
 }
 
 func (db *DB) UpdateModel(m Model) error {
+	if m.RoutingTier == "" {
+		m.RoutingTier = "none"
+	}
 	_, err := db.conn.Exec(`UPDATE models SET name = $1, provider_id = $2, target_model = $3, 
 		input_cost_per_million = $4, output_cost_per_million = $5, 
-		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8 WHERE id = $9`,
+		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9 WHERE id = $10`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
-		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.ID)
+		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ID)
 	return err
 }
 
@@ -890,10 +906,12 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 
 	_, err := db.conn.Exec(`INSERT INTO request_logs (
 		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code, 
-		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, latency_ms, error_message, created_at, client_app
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, latency_ms, error_message, created_at, client_app,
+		requested_model, complexity, failover_attempts
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
 		log.ID, log.VirtualKeyID, log.UserID, modelID, providerID, log.RequestPath, log.StatusCode,
-		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp)
+		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp,
+		log.RequestedModel, log.Complexity, log.FailoverAttempts)
 
 	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
 		_ = db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost)
@@ -904,7 +922,8 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string) ([]RequestLog, error) {
 	query := `
 		SELECT request_logs.id, request_logs.virtual_key_id, request_logs.user_id, COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code, 
-		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, '') 
+		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
+		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0)
 		FROM request_logs 
 		LEFT JOIN models ON request_logs.model_id = models.id
 		WHERE 1=1`
@@ -937,7 +956,8 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	for rows.Next() {
 		var r RequestLog
 		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp)
+			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
+			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts)
 		if err != nil {
 			return nil, err
 		}

@@ -68,13 +68,13 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool) (*db.Mo
 		return nil, fmt.Errorf("failed to retrieve models: %w", err)
 	}
 
-	// Filter active models
-	var activeModels []db.Model
-	for _, m := range models {
-		if m.Status == "active" {
+	// 1. Filter active models assigned to the exact requested routing tier
+	var candidates []*db.Model
+	for i := range models {
+		m := &models[i]
+		if m.Status == "active" && m.RoutingTier == complexity {
 			if needsVision {
 				nameLower := strings.ToLower(m.Name)
-				// Vision-enabled models
 				if !strings.Contains(nameLower, "gpt-4o") && 
 				   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
 				   !strings.Contains(nameLower, "vision") && 
@@ -82,55 +82,45 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool) (*db.Mo
 					continue
 				}
 			}
-			activeModels = append(activeModels, m)
+			candidates = append(candidates, m)
 		}
 	}
 
-	if len(activeModels) == 0 {
-		return nil, fmt.Errorf("no active models available for routing")
-	}
-
-	// Preferred model names for each tier (highest preference first)
-	var preferences []string
-	switch complexity {
-	case "hard":
-		preferences = []string{"claude-3-5-sonnet", "gpt-4o", "deepseek-chat", "deepseek-v3"}
-	case "medium":
-		// DeepSeek is preferred for cost savings if it can handle medium reasoning
-		preferences = []string{"deepseek-chat", "deepseek-v3", "gpt-4o", "claude-3-5-sonnet"}
-	case "simple":
-		// Route to cheapest possible model
-		preferences = []string{"deepseek-chat", "deepseek-v3"}
-	default:
-		preferences = []string{"deepseek-chat", "deepseek-v3"}
-	}
-
-	// 1. Try to find a model matching our preferences in order
-	for _, pref := range preferences {
-		for _, m := range activeModels {
-			if strings.Contains(strings.ToLower(m.Name), pref) {
-				return &m, nil
+	// 2. If no candidate matches the exact tier, fall back to any active model
+	if len(candidates) == 0 {
+		for i := range models {
+			m := &models[i]
+			if m.Status == "active" {
+				if needsVision {
+					nameLower := strings.ToLower(m.Name)
+					if !strings.Contains(nameLower, "gpt-4o") && 
+					   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
+					   !strings.Contains(nameLower, "vision") && 
+					   !strings.Contains(nameLower, "gemini") {
+						continue
+					}
+				}
+				candidates = append(candidates, m)
 			}
 		}
 	}
 
-	// 2. Fallback: Simply choose the cheapest active model in the database
-	var cheapest *db.Model
-	minCost := -1.0
-	for i := range activeModels {
-		m := &activeModels[i]
-		cost := m.InputCostPerMillion + m.OutputCostPerMillion
-		if minCost < 0 || cost < minCost {
-			minCost = cost
-			cheapest = m
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no active models available for routing")
+	}
+
+	// 3. Sort candidates by price (cheapest first) to guarantee credit optimization!
+	for i := 0; i < len(candidates); i++ {
+		for j := i + 1; j < len(candidates); j++ {
+			costI := candidates[i].InputCostPerMillion + candidates[i].OutputCostPerMillion
+			costJ := candidates[j].InputCostPerMillion + candidates[j].OutputCostPerMillion
+			if costJ < costI {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			}
 		}
 	}
 
-	if cheapest != nil {
-		return cheapest, nil
-	}
-
-	return nil, fmt.Errorf("no suitable model found")
+	return candidates[0], nil
 }
 
 // GetFallbackModels returns a list of alternative active models for load-balancing / failover,

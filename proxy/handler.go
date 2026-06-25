@@ -271,9 +271,10 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	var targetModel *db.Model
 	var fallbackModels []*db.Model
 	var err error
+	complexity := "direct"
 
 	if isRouterRequest {
-		complexity := AnalyzePromptComplexity(oaiReq.Messages)
+		complexity = AnalyzePromptComplexity(oaiReq.Messages)
 		needsVision := false
 		for _, msg := range oaiReq.Messages {
 			if arr, ok := msg.Content.([]interface{}); ok {
@@ -344,17 +345,27 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
+		requestedModel := oaiReq.Model
+		complexityStr := "direct"
+		if isRouterRequest {
+			requestedModel = "muhiya-ai-router"
+			complexityStr = complexity
+		}
+
 		startTime := time.Now()
 		reqLog := db.RequestLog{
-			ID:           uuid.New().String(),
-			VirtualKeyID: key.ID,
-			UserID:       key.UserID,
-			ModelID:      model.ID,
-			ProviderID:   provider.ID,
-			RequestPath:  r.URL.Path,
-			InputTokens:  promptTokens,
-			ClientApp:    getClientAppName(r),
-			CreatedAt:    startTime,
+			ID:               uuid.New().String(),
+			VirtualKeyID:     key.ID,
+			UserID:           key.UserID,
+			ModelID:          model.ID,
+			ProviderID:       provider.ID,
+			RequestPath:      r.URL.Path,
+			InputTokens:      promptTokens,
+			ClientApp:        getClientAppName(r),
+			RequestedModel:   requestedModel,
+			Complexity:       complexityStr,
+			FailoverAttempts: idx,
+			CreatedAt:        startTime,
 		}
 
 		var targetURL string
@@ -424,6 +435,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	var targetModel *db.Model
 	var fallbackModels []*db.Model
 	var err error
+	complexity := "direct"
 
 	if isRouterRequest {
 		// Convert Anthropic format messages to OpenAI format for simple complexity analysis
@@ -438,7 +450,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 				Content: textBuilder.String(),
 			})
 		}
-		complexity := AnalyzePromptComplexity(oaiMessages)
+		complexity = AnalyzePromptComplexity(oaiMessages)
 
 		needsVision := false
 		for _, msg := range anthReq.Messages {
@@ -510,17 +522,27 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
+		requestedModel := anthReq.Model
+		complexityStr := "direct"
+		if isRouterRequest {
+			requestedModel = "muhiya-ai-router"
+			complexityStr = complexity
+		}
+
 		startTime := time.Now()
 		reqLog := db.RequestLog{
-			ID:           uuid.New().String(),
-			VirtualKeyID: key.ID,
-			UserID:       key.UserID,
-			ModelID:      model.ID,
-			ProviderID:   provider.ID,
-			RequestPath:  r.URL.Path,
-			InputTokens:  promptTokens,
-			ClientApp:    getClientAppName(r),
-			CreatedAt:    startTime,
+			ID:               uuid.New().String(),
+			VirtualKeyID:     key.ID,
+			UserID:           key.UserID,
+			ModelID:          model.ID,
+			ProviderID:       provider.ID,
+			RequestPath:      r.URL.Path,
+			InputTokens:      promptTokens,
+			ClientApp:        getClientAppName(r),
+			RequestedModel:   requestedModel,
+			Complexity:       complexityStr,
+			FailoverAttempts: idx,
+			CreatedAt:        startTime,
 		}
 
 		var targetURL string

@@ -7,7 +7,8 @@ document.addEventListener('DOMContentLoaded', () => {
         keys: [],
         plans: [],
         providers: [],
-        models: []
+        models: [],
+        logs: []
     };
 
     // DOM Elements
@@ -317,6 +318,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const readCost = parseFloat(document.getElementById('model-cost-read').value) || 0;
         const writeCost = parseFloat(document.getElementById('model-cost-write').value) || 0;
         const status = document.getElementById('model-status').value || 'active';
+        const routing_tier = document.getElementById('model-routing-tier').value || 'none';
 
         const payload = {
             id, name, provider_id, target_model,
@@ -324,7 +326,8 @@ document.addEventListener('DOMContentLoaded', () => {
             output_cost_per_million: outCost,
             cache_read_cost_per_million: readCost,
             cache_write_cost_per_million: writeCost,
-            status
+            status,
+            routing_tier
         };
         const method = id ? 'PUT' : 'POST';
 
@@ -833,7 +836,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.models = models;
                 const tbody = document.querySelector('#models-table tbody');
                 if (!models || models.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="9" class="text-muted text-center" style="text-align: center;">No virtual model mappings configured.</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="10" class="text-muted text-center" style="text-align: center;">No virtual model mappings configured.</td></tr>`;
                     return;
                 }
                 tbody.innerHTML = models.map(m => `
@@ -845,6 +848,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>$${m.output_cost_per_million.toFixed(4)}</td>
                         <td>$${m.cache_read_cost_per_million.toFixed(4)}</td>
                         <td>$${m.cache_write_cost_per_million.toFixed(4)}</td>
+                        <td><span class="tier-badge ${m.routing_tier || 'none'}" style="font-size: 11px; padding: 2px 6px;">${m.routing_tier ? m.routing_tier.toUpperCase() : 'NONE'}</span></td>
                         <td><span class="status-pill ${m.status === 'active' ? 'active' : 'inactive'}">${m.status}</span></td>
                         <td>
                             <button class="btn btn-secondary btn-sm" onclick="editModel('${m.id}')"><i class="fa-solid fa-pen"></i> Edit</button>
@@ -894,6 +898,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-cost-out').value = m.output_cost_per_million;
             document.getElementById('model-cost-read').value = m.cache_read_cost_per_million;
             document.getElementById('model-cost-write').value = m.cache_write_cost_per_million;
+            document.getElementById('model-routing-tier').value = m.routing_tier || 'none';
 
             document.getElementById('model-status-group').style.display = 'block';
             document.getElementById('model-status').value = m.status;
@@ -911,15 +916,16 @@ document.addEventListener('DOMContentLoaded', () => {
             .catch(err => console.error(err));
     };
 
-    // --- Request Logs ---
     function loadLogs() {
         Promise.all([
             fetch('/api/logs?limit=100').then(res => res.json()),
             fetch('/api/users').then(res => res.json())
         ]).then(([logs, users]) => {
+            state.logs = logs;
+            state.users = users;
             const tbody = document.querySelector('#logs-table tbody');
             if (!logs || logs.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="11" class="text-muted text-center" style="text-align: center;">No gateway request logs audited yet.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="12" class="text-muted text-center" style="text-align: center;">No gateway request logs audited yet.</td></tr>`;
                 return;
             }
             tbody.innerHTML = logs.map(l => {
@@ -939,7 +945,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const app = l.client_app || 'API Client';
                 const appLower = app.toLowerCase();
                 let clientAppBadge = '';
-                if (appLower.includes('muhiyachat') || appLower.includes('muhiya chat')) {
+                if (appLower.includes('muhiyaachat') || appLower.includes('muhiya chat')) {
                     clientAppBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); text-transform:none;"><i class="fa-solid fa-comment-dots" style="margin-right: 4px;"></i>${app}</span>`;
                 } else if (appLower.includes('claude code') || appLower.includes('claude-code') || appLower.includes('claude')) {
                     clientAppBadge = `<span class="badge" style="background: rgba(168, 85, 247, 0.1); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.2); text-transform:none;">${app}</span>`;
@@ -968,6 +974,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td><strong>${l.latency_ms} ms</strong></td>
                         <td><strong style="color:#10b981;">${costFormatted}</strong></td>
                         <td><small class="text-muted" style="color:var(--danger); font-size:0.75rem;">${l.error_message ? l.error_message.substring(0, 30) + '...' : '-'}</small></td>
+                        <td>
+                            <button class="btn btn-secondary btn-sm" onclick="showLogDetails('${l.id}')"><i class="fa-solid fa-circle-info"></i> Details</button>
+                        </td>
                     </tr>
                 `;
             }).join('');
@@ -1116,38 +1125,178 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    window.showLogDetails = (id) => {
+        const l = state.logs.find(x => x.id === id);
+        if (!l) return;
+
+        const ownerUser = state.users.find(u => u.id === l.user_id);
+        const ownerName = ownerUser ? ownerUser.name : 'Unknown User';
+        const ownerEmail = ownerUser ? ownerUser.email : 'Unknown';
+
+        const statusClass = l.status_code >= 200 && l.status_code < 300 ? 'status-success' : 'status-error';
+        const statusText = l.status_code >= 200 && l.status_code < 300 ? 'Success' : 'Error';
+        const dateStr = new Date(l.created_at).toLocaleString();
+
+        const inputTokens = l.input_tokens || 0;
+        const outputTokens = l.output_tokens || 0;
+        const cacheRead = l.cache_read_tokens || 0;
+        const cacheWrite = l.cache_write_tokens || 0;
+        
+        const cacheHitRate = inputTokens > 0 ? ((cacheRead / inputTokens) * 100).toFixed(1) : '0.0';
+
+        // Check if this request was routed by the AI Router
+        const isRouter = l.requested_model === 'muhiya-ai-router';
+        let routerHTML = '';
+        if (isRouter) {
+            const complexityBadge = l.complexity ? l.complexity.toUpperCase() : 'UNKNOWN';
+            const compClass = l.complexity || 'simple';
+            routerHTML = `
+                <div class="details-section router-info" style="background: rgba(16, 185, 129, 0.03); border: 1px solid rgba(16, 185, 129, 0.15); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); font-weight: bold; font-size: 11px;">
+                            <i class="fa-solid fa-route" style="margin-right: 4px;"></i> Routed by Muhiya AI Router
+                        </span>
+                        <span>Complexity: <span class="tier-badge ${compClass}" style="font-size: 11px; padding: 2px 6px;">${complexityBadge}</span></span>
+                    </div>
+                    <div style="display: flex; gap: 2rem; margin-top: 0.75rem; font-size: 0.85rem;">
+                        <span><strong>Primary Target:</strong> <code>${l.model_id}</code></span>
+                        <span><strong>Retry Index:</strong> <code>${l.failover_attempts}</code> ${l.failover_attempts > 0 ? `<span class="text-warning" style="color:#fbbf24; font-weight:bold;"><i class="fa-solid fa-triangle-exclamation"></i> Fallback Used</span>` : `<span class="text-success" style="color:#10b981; font-weight:bold;"><i class="fa-solid fa-circle-check"></i> Primary Succeeded</span>`}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        const errorHTML = l.error_message ? `
+            <div class="details-section error-info" style="background: rgba(239, 68, 68, 0.05); border: 1px solid rgba(239, 68, 68, 0.15); border-radius: 8px; padding: 1rem; margin-top: 1rem; color: var(--danger);">
+                <h4 style="margin-bottom: 0.5rem; font-size: 0.9rem; color:#ef4444;"><i class="fa-solid fa-triangle-exclamation"></i> Upstream Error Log</h4>
+                <pre style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; overflow-x: auto;">${l.error_message}</pre>
+            </div>
+        ` : '';
+
+        const modalContent = `
+            ${routerHTML}
+            
+            <div class="details-grid-two-col" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">
+                <div class="details-card" style="background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 1rem;">
+                    <h4 style="margin-bottom: 0.75rem; border-bottom: 1px solid var(--panel-border); padding-bottom: 0.25rem;">Metadata</h4>
+                    <table class="details-subtable" style="width:100%; font-size: 0.8rem; line-height: 1.6;">
+                        <tr><td style="color:var(--text-muted); width:100px;">Log ID:</td><td><small><code>${l.id}</code></small></td></tr>
+                        <tr><td style="color:var(--text-muted);">Timestamp:</td><td>${dateStr}</td></tr>
+                        <tr><td style="color:var(--text-muted);">Virtual Key:</td><td><small><code>${l.virtual_key_id.substring(0,18)}...</code></small></td></tr>
+                        <tr><td style="color:var(--text-muted);">User:</td><td><strong>${ownerName}</strong></td></tr>
+                        <tr><td style="color:var(--text-muted);">Client App:</td><td><code>${l.client_app || 'API Client'}</code></td></tr>
+                        <tr><td style="color:var(--text-muted);">Path:</td><td><code>${l.request_path}</code></td></tr>
+                    </table>
+                </div>
+                
+                <div class="details-card" style="background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 1rem;">
+                    <h4 style="margin-bottom: 0.75rem; border-bottom: 1px solid var(--panel-border); padding-bottom: 0.25rem;">Execution</h4>
+                    <table class="details-subtable" style="width:100%; font-size: 0.8rem; line-height: 1.6;">
+                        <tr><td style="color:var(--text-muted); width:100px;">HTTP Status:</td><td><span class="status-indicator-badge ${statusClass}" style="padding: 2px 6px; border-radius:4px; font-size: 10px;">${l.status_code} ${statusText}</span></td></tr>
+                        <tr><td style="color:var(--text-muted);">Latency:</td><td><strong>${l.latency_ms} ms</strong></td></tr>
+                        <tr><td style="color:var(--text-muted);">Routed Model:</td><td><code>${l.model_id}</code></td></tr>
+                        <tr><td style="color:var(--text-muted);">Precise Cost:</td><td><strong style="color:#10b981; font-size:1rem;">$${l.cost.toFixed(6)}</strong></td></tr>
+                        <tr><td style="color:var(--text-muted);">Cache Hit Rate:</td><td><strong style="color:#3b82f6;">${cacheHitRate}%</strong></td></tr>
+                    </table>
+                </div>
+                
+                <div class="details-card" style="grid-column: 1 / -1; background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 1rem;">
+                    <h4 style="margin-bottom: 0.75rem; border-bottom: 1px solid var(--panel-border); padding-bottom: 0.25rem;">Token Consumption</h4>
+                    <div style="display: flex; justify-content: space-around; text-align: center; margin-top: 0.5rem;">
+                        <div>
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">Input (Prompt)</span>
+                            <div style="font-size: 1.25rem; font-weight: bold; font-family: var(--font-mono);">${inputTokens}</div>
+                        </div>
+                        <div>
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">Output (Completion)</span>
+                            <div style="font-size: 1.25rem; font-weight: bold; font-family: var(--font-mono);">${outputTokens}</div>
+                        </div>
+                        <div>
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">Cache Reads (Hits)</span>
+                            <div style="font-size: 1.25rem; font-weight: bold; font-family: var(--font-mono); color:#10b981;">${cacheRead}</div>
+                        </div>
+                        <div>
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">Cache Writes (Misses)</span>
+                            <div style="font-size: 1.25rem; font-weight: bold; font-family: var(--font-mono); color:#fbbf24;">${cacheWrite}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            ${errorHTML}
+        `;
+
+        document.getElementById('log-details-content').innerHTML = modalContent;
+        document.getElementById('modal-log-details').classList.add('show');
+    };
+
     function loadRouterData() {
-        // Fetch active models to populate pricing table
+        // Fetch active models to populate routing tier columns dynamically
         fetch('/api/models')
             .then(res => res.json())
             .then(models => {
                 state.models = models;
-                const tbody = document.querySelector('#router-models-table tbody');
-                tbody.innerHTML = '';
                 
-                models.forEach(m => {
-                    let tier = 'Cheapest (Simple)';
-                    let tierBadge = 'simple';
-                    const nameLower = m.name.toLowerCase();
-                    
-                    if (nameLower.includes('sonnet') || nameLower.includes('gpt-4o')) {
-                        tier = 'Premium (Hard)';
-                        tierBadge = 'hard';
-                    } else if (nameLower.includes('mini') || nameLower.includes('flash')) {
-                        tier = 'Mid-Tier (Medium)';
-                        tierBadge = 'medium';
-                    }
-                    
-                    const tr = document.createElement('tr');
-                    tr.innerHTML = `
-                        <td><strong>${m.name}</strong> <span class="text-muted" style="font-size: 11px;">(${m.provider_id})</span></td>
-                        <td>$${m.input_cost_per_million.toFixed(2)}</td>
-                        <td>$${m.output_cost_per_million.toFixed(2)}</td>
-                        <td><span class="tier-badge ${tierBadge}" style="font-size: 10px; padding: 2px 6px;">${tier}</span></td>
-                        <td><span class="badge ${m.status === 'active' ? 'badge-active' : 'badge-inactive'}">${m.status}</span></td>
-                    `;
-                    tbody.appendChild(tr);
+                const simpleList = document.getElementById('tier-list-simple');
+                const mediumList = document.getElementById('tier-list-medium');
+                const hardList = document.getElementById('tier-list-hard');
+                
+                simpleList.innerHTML = '';
+                mediumList.innerHTML = '';
+                hardList.innerHTML = '';
+                
+                let simpleCount = 0;
+                let mediumCount = 0;
+                let hardCount = 0;
+                
+                // Sort models by price (cheapest first) to match routing cost optimization!
+                const activeModels = models.filter(m => m.status === 'active');
+                activeModels.sort((a, b) => {
+                    const costA = a.input_cost_per_million + a.output_cost_per_million;
+                    const costB = b.input_cost_per_million + b.output_cost_per_million;
+                    return costA - costB;
                 });
+                
+                activeModels.forEach(m => {
+                    const costUSD = m.input_cost_per_million + m.output_cost_per_million;
+                    const card = document.createElement('div');
+                    card.className = 'tier-model-item';
+                    card.style = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem;';
+                    card.innerHTML = `
+                        <div style="display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 0.85rem;">
+                            <span>${m.name}</span>
+                            <span class="badge" style="background:#27272a; font-size:9px; padding: 2px 4px; border-radius: 4px; text-transform:none;">${m.provider_id}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-top: 0.4rem; font-size: 0.75rem; color: var(--text-muted);">
+                            <span>In: $${m.input_cost_per_million.toFixed(2)}/1M</span>
+                            <span>Out: $${m.output_cost_per_million.toFixed(2)}/1M</span>
+                        </div>
+                        <div style="font-size: 0.68rem; color: var(--text-muted-dark); margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 3px;">
+                            Target: <code>${m.target_model}</code>
+                        </div>
+                    `;
+                    
+                    if (m.routing_tier === 'simple') {
+                        simpleList.appendChild(card);
+                        simpleCount++;
+                    } else if (m.routing_tier === 'medium') {
+                        mediumList.appendChild(card);
+                        mediumCount++;
+                    } else if (m.routing_tier === 'hard') {
+                        hardList.appendChild(card);
+                        hardCount++;
+                    }
+                });
+                
+                if (simpleCount === 0) {
+                    simpleList.innerHTML = '<div class="text-muted text-center" style="padding: 1.5rem; font-size:0.8rem; background:rgba(255,255,255,0.01); border: 1px dashed var(--panel-border); border-radius:8px;">No models assigned to Simple.</div>';
+                }
+                if (mediumCount === 0) {
+                    mediumList.innerHTML = '<div class="text-muted text-center" style="padding: 1.5rem; font-size:0.8rem; background:rgba(255,255,255,0.01); border: 1px dashed var(--panel-border); border-radius:8px;">No models assigned to Medium.</div>';
+                }
+                if (hardCount === 0) {
+                    hardList.innerHTML = '<div class="text-muted text-center" style="padding: 1.5rem; font-size:0.8rem; background:rgba(255,255,255,0.01); border: 1px dashed var(--panel-border); border-radius:8px;">No models assigned to Hard.</div>';
+                }
             })
             .catch(err => console.error('Failed to load router models:', err));
 
@@ -1155,7 +1304,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fetch('/api/logs?limit=1000')
             .then(res => res.json())
             .then(logs => {
-                const routerLogs = logs.filter(log => log.virtual_model === 'muhiya-ai-router');
+                const routerLogs = logs.filter(log => log.requested_model === 'muhiya-ai-router');
                 const totalRequests = routerLogs.length;
                 
                 let successCount = 0;
@@ -1163,22 +1312,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 let totalSavings = 0.0;
                 
                 routerLogs.forEach(log => {
-                    if (!log.is_error) {
+                    const isSuccess = log.status_code >= 200 && log.status_code < 300;
+                    if (isSuccess) {
                         successCount++;
                         
                         // Compute estimated savings:
                         // Savings = (Cost if routed to Claude 3.5 Sonnet) - (Actual Cost)
-                        // Assuming Claude 3.5 Sonnet costs $3.00/1M input and $15.00/1M output
-                        const inputTokens = log.prompt_tokens || 0;
-                        const outputTokens = log.completion_tokens || 0;
+                        // Claude 3.5 Sonnet costs $3.00/1M input and $15.00/1M output
+                        const inputTokens = log.input_tokens || 0;
+                        const outputTokens = log.output_tokens || 0;
                         const claudeCost = (inputTokens * 3.00 / 1000000) + (outputTokens * 15.00 / 1000000);
-                        const savings = claudeCost - log.cost_usd;
+                        const savings = claudeCost - log.cost;
                         if (savings > 0) {
                             totalSavings += savings;
                         }
                     }
                     
-                    if (log.error_message && (log.error_message.toLowerCase().includes('retry') || log.error_message.toLowerCase().includes('fallback') || log.error_message.toLowerCase().includes('failover'))) {
+                    if (isSuccess && log.failover_attempts > 0) {
                         failoverCount++;
                     }
                 });
@@ -1189,38 +1339,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('router-stat-savings').innerText = `$${totalSavings.toFixed(4)}`;
                 document.getElementById('router-stat-success').innerText = `${successRate.toFixed(1)}%`;
                 document.getElementById('router-stat-failovers').innerText = failoverCount.toLocaleString();
-
-                // Populate router logs table
-                const tbody = document.querySelector('#router-logs-table tbody');
-                tbody.innerHTML = '';
-                
-                if (routerLogs.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted" style="padding: 2rem;">No router request logs found yet. Run prompt queries to test.</td></tr>';
-                    return;
-                }
-                
-                routerLogs.slice(0, 10).forEach(log => {
-                    const tr = document.createElement('tr');
-                    const date = new Date(log.created_at).toLocaleTimeString();
-                    
-                    let statusClass = 'status-success';
-                    let statusText = 'Success';
-                    if (log.is_error) {
-                        statusClass = 'status-error';
-                        statusText = 'Error';
-                    }
-                    
-                    tr.innerHTML = `
-                        <td>${date}</td>
-                        <td class="font-mono" style="font-size: 11px;">${log.virtual_key_id.slice(0, 12)}...</td>
-                        <td><span class="tier-badge ${log.model.includes('sonnet') || log.model.includes('gpt-4o') ? 'hard' : 'simple'}" style="font-size: 11px; padding: 2px 6px;">${log.model}</span></td>
-                        <td>${log.prompt_tokens || 0} / ${log.completion_tokens || 0}</td>
-                        <td>${log.latency_ms || 0} ms</td>
-                        <td class="font-mono">$${log.cost_usd.toFixed(5)}</td>
-                        <td><span class="status-indicator-badge ${statusClass}">${statusText}</span></td>
-                    `;
-                    tbody.appendChild(tr);
-                });
             })
             .catch(err => console.error('Failed to load router logs:', err));
     }
