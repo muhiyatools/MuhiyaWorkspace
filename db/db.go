@@ -370,6 +370,7 @@ func (db *DB) seedDefaults() error {
 		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active"},
 		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
 		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
+		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", InputCostPerMillion: 0.00, OutputCostPerMillion: 0.00, CacheReadCostPerMillion: 0.00, CacheWriteCostPerMillion: 0.00, Status: "active"},
 	}
 	for _, m := range models {
 		_, err := tx.Exec(`

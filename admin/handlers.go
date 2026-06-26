@@ -549,6 +549,26 @@ func (api *AdminAPI) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 // --- Logs Handler ---
 func (api *AdminAPI) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var log db.RequestLog
+		if err := json.NewDecoder(r.Body).Decode(&log); err != nil {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
+			return
+		}
+		if log.ID == "" {
+			log.ID = "log-" + generateRandomString(16)
+		}
+		if log.CreatedAt.IsZero() {
+			log.CreatedAt = time.Now()
+		}
+		if err := api.db.InsertRequestLog(log); err != nil {
+			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		api.jsonResponse(w, http.StatusCreated, log)
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
