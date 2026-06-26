@@ -80,6 +80,8 @@ type Model struct {
 	CacheWriteCostPerMillion float64   `json:"cache_write_cost_per_million"`
 	Status                   string    `json:"status"` // active, inactive
 	RoutingTier              string    `json:"routing_tier"` // none, simple, medium, hard
+	ModelType                string    `json:"model_type"` // llm, transcription
+	PricePerMinute           float64   `json:"price_per_minute"`
 	CreatedAt                time.Time `json:"created_at"`
 }
 
@@ -255,6 +257,10 @@ func Open(dsn string) (*DB, error) {
 
 	// Run schema migrations for newer AI Router fields
 	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS routing_tier VARCHAR(50) DEFAULT 'none';")
+	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS model_type VARCHAR(50) DEFAULT 'llm';")
+	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS price_per_minute DOUBLE PRECISION DEFAULT 0.0;")
+	_, _ = conn.Exec("UPDATE models SET model_type = 'llm' WHERE model_type IS NULL;")
+	_, _ = conn.Exec("UPDATE models SET price_per_minute = 0.0 WHERE price_per_minute IS NULL;")
 	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS requested_model VARCHAR(255) DEFAULT '';")
 	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS complexity VARCHAR(50) DEFAULT '';")
 	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS failover_attempts INTEGER DEFAULT 0;")
@@ -366,21 +372,31 @@ func (db *DB) seedDefaults() error {
 
 	// Seed models (excluding internal virtual/alias model rows)
 	models := []Model{
-		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active"},
-		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active"},
-		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
-		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active"},
-		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", InputCostPerMillion: 0.00, OutputCostPerMillion: 0.00, CacheReadCostPerMillion: 0.00, CacheWriteCostPerMillion: 0.00, Status: "active"},
+		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active", ModelType: "llm", PricePerMinute: 0.0},
+		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active", ModelType: "llm", PricePerMinute: 0.0},
+		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active", ModelType: "llm", PricePerMinute: 0.0},
+		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active", ModelType: "llm", PricePerMinute: 0.0},
+		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", InputCostPerMillion: 0.00, OutputCostPerMillion: 0.00, CacheReadCostPerMillion: 0.00, CacheWriteCostPerMillion: 0.00, Status: "active", ModelType: "transcription", PricePerMinute: 0.006},
 	}
 	for _, m := range models {
 		_, err := tx.Exec(`
 			INSERT INTO models (
 				id, name, provider_id, target_model, input_cost_per_million, 
-				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
-			ON CONFLICT (id) DO NOTHING`,
+				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, model_type, price_per_minute
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
+			ON CONFLICT (id) DO UPDATE SET 
+				name = EXCLUDED.name,
+				provider_id = EXCLUDED.provider_id,
+				target_model = EXCLUDED.target_model,
+				input_cost_per_million = EXCLUDED.input_cost_per_million,
+				output_cost_per_million = EXCLUDED.output_cost_per_million,
+				cache_read_cost_per_million = EXCLUDED.cache_read_cost_per_million,
+				cache_write_cost_per_million = EXCLUDED.cache_write_cost_per_million,
+				status = EXCLUDED.status,
+				model_type = EXCLUDED.model_type,
+				price_per_minute = EXCLUDED.price_per_minute`,
 			m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status)
+			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.ModelType, m.PricePerMinute)
 		if err != nil {
 			return err
 		}
@@ -779,10 +795,11 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, COALESCE(routing_tier, 'none'), created_at 
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), created_at 
 		FROM models WHERE name = $1 AND status = 'active'`, normalizedName).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -795,10 +812,11 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 func (db *DB) GetModel(id string) (*Model, error) {
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, COALESCE(routing_tier, 'none'), created_at 
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), created_at 
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -810,7 +828,8 @@ func (db *DB) GetModel(id string) (*Model, error) {
 
 func (db *DB) ListModels() ([]Model, error) {
 	rows, err := db.conn.Query(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, COALESCE(routing_tier, 'none'), created_at 
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), created_at 
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -821,7 +840,7 @@ func (db *DB) ListModels() ([]Model, error) {
 	for rows.Next() {
 		var m Model
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -834,12 +853,15 @@ func (db *DB) CreateModel(m Model) error {
 	if m.RoutingTier == "" {
 		m.RoutingTier = "none"
 	}
+	if m.ModelType == "" {
+		m.ModelType = "llm"
+	}
 	_, err := db.conn.Exec(`INSERT INTO models (
 		id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, routing_tier
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, routing_tier, model_type, price_per_minute
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier)
+		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute)
 	return err
 }
 
@@ -847,11 +869,15 @@ func (db *DB) UpdateModel(m Model) error {
 	if m.RoutingTier == "" {
 		m.RoutingTier = "none"
 	}
+	if m.ModelType == "" {
+		m.ModelType = "llm"
+	}
 	_, err := db.conn.Exec(`UPDATE models SET name = $1, provider_id = $2, target_model = $3, 
 		input_cost_per_million = $4, output_cost_per_million = $5, 
-		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9 WHERE id = $10`,
+		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9,
+		model_type = $10, price_per_minute = $11 WHERE id = $12`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
-		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ID)
+		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.ID)
 	return err
 }
 

@@ -159,10 +159,39 @@ document.addEventListener('DOMContentLoaded', () => {
         modalProvider.classList.add('show');
     });
 
+    const modelTypeSelect = document.getElementById('model-type');
+    function toggleModelTypeFields() {
+        const isTranscription = modelTypeSelect.value === 'transcription';
+        
+        const inCostInput = document.getElementById('model-cost-in');
+        const outCostInput = document.getElementById('model-cost-out');
+        const readCostInput = document.getElementById('model-cost-read');
+        const writeCostInput = document.getElementById('model-cost-write');
+        const priceMinuteInput = document.getElementById('model-price-minute');
+        
+        const inCostRow = inCostInput.closest('.form-group-row');
+        const readCostRow = readCostInput.closest('.form-group-row');
+        const priceMinuteGroup = document.getElementById('model-price-minute-group');
+        
+        if (inCostRow) inCostRow.style.display = isTranscription ? 'none' : 'flex';
+        if (readCostRow) readCostRow.style.display = isTranscription ? 'none' : 'flex';
+        if (priceMinuteGroup) priceMinuteGroup.style.display = isTranscription ? 'block' : 'none';
+        
+        inCostInput.required = !isTranscription;
+        outCostInput.required = !isTranscription;
+        readCostInput.required = !isTranscription;
+        writeCostInput.required = !isTranscription;
+        priceMinuteInput.required = isTranscription;
+    }
+    modelTypeSelect.addEventListener('change', toggleModelTypeFields);
+
     document.getElementById('btn-add-model').addEventListener('click', () => {
         const form = document.getElementById('model-form');
         form.reset();
         document.getElementById('model-id').value = '';
+        document.getElementById('model-type').value = 'llm';
+        document.getElementById('model-price-minute').value = '';
+        toggleModelTypeFields();
         document.getElementById('model-status-group').style.display = 'none';
         document.getElementById('model-modal-title').innerText = "Define Model Mapping";
         document.getElementById('model-submit-btn').innerText = "Save Model";
@@ -313,6 +342,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const name = document.getElementById('model-name').value;
         const provider_id = document.getElementById('model-provider-id').value;
         const target_model = document.getElementById('model-target').value;
+        const model_type = document.getElementById('model-type').value || 'llm';
+        const price_per_minute = parseFloat(document.getElementById('model-price-minute').value) || 0.0;
         const inCost = parseFloat(document.getElementById('model-cost-in').value) || 0;
         const outCost = parseFloat(document.getElementById('model-cost-out').value) || 0;
         const readCost = parseFloat(document.getElementById('model-cost-read').value) || 0;
@@ -321,7 +352,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const routing_tier = document.getElementById('model-routing-tier').value || 'none';
 
         const payload = {
-            id, name, provider_id, target_model,
+            id, name, provider_id, target_model, model_type, price_per_minute,
             input_cost_per_million: inCost,
             output_cost_per_million: outCost,
             cache_read_cost_per_million: readCost,
@@ -836,7 +867,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.models = models;
                 const tbody = document.querySelector('#models-table tbody');
                 if (!models || models.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="10" class="text-muted text-center" style="text-align: center;">No virtual model mappings configured.</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="12" class="text-muted text-center" style="text-align: center;">No virtual model mappings configured.</td></tr>`;
                     return;
                 }
                 tbody.innerHTML = models.map(m => `
@@ -844,10 +875,12 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td><strong>${m.name}</strong></td>
                         <td><span class="badge" style="background:#27272a;">${m.provider_id}</span></td>
                         <td><code>${m.target_model}</code></td>
-                        <td>$${m.input_cost_per_million.toFixed(4)}</td>
-                        <td>$${m.output_cost_per_million.toFixed(4)}</td>
-                        <td>$${m.cache_read_cost_per_million.toFixed(4)}</td>
-                        <td>$${m.cache_write_cost_per_million.toFixed(4)}</td>
+                        <td><span class="badge" style="background:${(m.model_type || 'llm') === 'transcription' ? '#0f766e' : '#1e3a8a'};">${(m.model_type || 'llm').toUpperCase()}</span></td>
+                        <td>${(m.model_type || 'llm') === 'transcription' ? `$${(m.price_per_minute || 0).toFixed(4)}` : '-'}</td>
+                        <td>${(m.model_type || 'llm') === 'llm' ? `$${m.input_cost_per_million.toFixed(4)}` : '-'}</td>
+                        <td>${(m.model_type || 'llm') === 'llm' ? `$${m.output_cost_per_million.toFixed(4)}` : '-'}</td>
+                        <td>${(m.model_type || 'llm') === 'llm' ? `$${m.cache_read_cost_per_million.toFixed(4)}` : '-'}</td>
+                        <td>${(m.model_type || 'llm') === 'llm' ? `$${m.cache_write_cost_per_million.toFixed(4)}` : '-'}</td>
                         <td><span class="tier-badge ${m.routing_tier || 'none'}" style="font-size: 11px; padding: 2px 6px;">${m.routing_tier ? m.routing_tier.toUpperCase() : 'NONE'}</span></td>
                         <td><span class="status-pill ${m.status === 'active' ? 'active' : 'inactive'}">${m.status}</span></td>
                         <td>
@@ -894,6 +927,9 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-name').value = m.name;
             document.getElementById('model-provider-id').value = m.provider_id;
             document.getElementById('model-target').value = m.target_model;
+            document.getElementById('model-type').value = m.model_type || 'llm';
+            document.getElementById('model-price-minute').value = m.price_per_minute || 0.0;
+            toggleModelTypeFields();
             document.getElementById('model-cost-in').value = m.input_cost_per_million;
             document.getElementById('model-cost-out').value = m.output_cost_per_million;
             document.getElementById('model-cost-read').value = m.cache_read_cost_per_million;

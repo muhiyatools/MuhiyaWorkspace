@@ -139,6 +139,8 @@ func main() {
 	mux.Handle("/completions", corsMiddleware(proxyHandler))
 	mux.Handle("/v1/messages", corsMiddleware(proxyHandler))
 	mux.Handle("/messages", corsMiddleware(proxyHandler))
+	mux.Handle("/v1/audio/transcriptions", corsMiddleware(proxyHandler))
+	mux.Handle("/audio/transcriptions", corsMiddleware(proxyHandler))
 	mux.Handle("/v1/models", corsMiddleware(proxyHandler))
 	mux.Handle("/v1/models/", corsMiddleware(proxyHandler))
 	mux.Handle("/models", corsMiddleware(proxyHandler))

@@ -271,6 +271,8 @@
                                     <th>Virtual Name</th>
                                     <th>Provider</th>
                                     <th>Target Model</th>
+                                    <th>Type</th>
+                                    <th>Price/Min</th>
                                     <th>Input Cost / 1M</th>
                                     <th>Output Cost / 1M</th>
                                     <th>Cache Read / 1M</th>
@@ -577,6 +579,19 @@
                 <div class="form-group">
                     <label for="model-target">Upstream Target Name</label>
                     <input type="text" id="model-target" required placeholder="e.g. deepseek-chat">
+                </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="model-type">Model Type</label>
+                        <select id="model-type" required>
+                            <option value="llm">LLM (Token Pricing)</option>
+                            <option value="transcription">Transcription (Time Pricing)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="model-price-minute-group" style="display: none;">
+                        <label for="model-price-minute">Price Per Minute ($)</label>
+                        <input type="number" step="0.0001" id="model-price-minute" placeholder="0.0060">
+                    </div>
                 </div>
                 <div class="form-group-row">
                     <div class="form-group">

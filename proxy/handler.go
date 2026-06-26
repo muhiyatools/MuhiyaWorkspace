@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -243,8 +245,11 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Detect Route Protocol
 	isAnthropicRoute := strings.Contains(r.URL.Path, "/messages")
+	isTranscriptionRoute := strings.Contains(r.URL.Path, "/audio/transcriptions")
 
-	if isAnthropicRoute {
+	if isTranscriptionRoute {
+		h.serveTranscriptionClient(w, r, bodyBytes, key)
+	} else if isAnthropicRoute {
 		h.serveAnthropicClient(w, r, bodyBytes, key)
 	} else {
 		h.serveOpenAIClient(w, r, bodyBytes, key)
@@ -1235,4 +1240,170 @@ func calculateCost(model *db.Model, input, output, cacheRead, cacheWrite int) fl
 	cacheReadCost := (float64(cacheRead) / 1000000.0) * model.CacheReadCostPerMillion
 	cacheWriteCost := (float64(cacheWrite) / 1000000.0) * writeCostPerMillion
 	return inputCost + outputCost + cacheReadCost + cacheWriteCost
+}
+
+func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.Request, bodyBytes []byte, key *db.VirtualKey) {
+	// Restore body to parse multipart form
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	// Max upload size 10MB
+	err := r.ParseMultipartForm(10 << 20)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "Failed to parse multipart form: "+err.Error(), "invalid_request_error")
+		return
+	}
+
+	modelName := r.FormValue("model")
+	if modelName == "" {
+		modelName = "whisper-1"
+	}
+
+	// Retrieve target model
+	targetModel, err := h.db.GetModelByName(modelName)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+		return
+	}
+	if targetModel == nil {
+		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", modelName), "invalid_request_error")
+		return
+	}
+
+	// Retrieve provider
+	provider, err := h.db.GetProvider(targetModel.ProviderID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+		return
+	}
+	if provider == nil || provider.Status != "active" {
+		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Provider '%s' is inactive or missing", targetModel.ProviderID), "invalid_request_error")
+		return
+	}
+
+	// Extract file
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "Failed to get file field: "+err.Error(), "invalid_request_error")
+		return
+	}
+	defer file.Close()
+
+	// Recreate multipart request to send upstream
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+
+	part, err := writer.CreateFormFile("file", header.Filename)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Failed to create upstream multipart file: "+err.Error(), "api_error")
+		return
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Failed to copy file data: "+err.Error(), "api_error")
+		return
+	}
+
+	// Set target model
+	if err := writer.WriteField("model", targetModel.TargetModel); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Failed to write model field: "+err.Error(), "api_error")
+		return
+	}
+
+	// Copy other form fields
+	for k, vals := range r.MultipartForm.Value {
+		if k != "model" && k != "file" && k != "durationSec" {
+			for _, v := range vals {
+				_ = writer.WriteField(k, v)
+			}
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Failed to close multipart writer: "+err.Error(), "api_error")
+		return
+	}
+
+	// Determine upstream URL
+	url := strings.TrimSuffix(provider.BaseURL, "/")
+	if !strings.HasSuffix(url, "/audio/transcriptions") {
+		url += "/audio/transcriptions"
+	}
+
+	startTime := time.Now()
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, &requestBody)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Failed to create upstream request: "+err.Error(), "api_error")
+		return
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.writeError(w, http.StatusBadGateway, "Connection to upstream failed: "+err.Error(), "api_error")
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Failed to read upstream response: "+err.Error(), "api_error")
+		return
+	}
+
+	latencyMs := int(time.Since(startTime).Milliseconds())
+
+	if resp.StatusCode >= 400 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
+
+	// Extract text for log
+	var textResult string
+	var jsonMap map[string]interface{}
+	if err := json.Unmarshal(respBody, &jsonMap); err == nil {
+		if t, ok := jsonMap["text"].(string); ok {
+			textResult = t
+		}
+	}
+
+	// Calculate cost using price_per_minute from targetModel
+	durationSecStr := r.FormValue("durationSec")
+	durationSec := 0.0
+	if durationSecStr != "" {
+		if d, err := strconv.ParseFloat(durationSecStr, 64); err == nil {
+			durationSec = d
+		}
+	}
+
+	cost := (durationSec / 60.0) * targetModel.PricePerMinute
+
+	// Log request and deduct credits
+	logEntry := db.RequestLog{
+		ID:             "log-" + uuid.New().String(),
+		VirtualKeyID:   key.ID,
+		UserID:         key.UserID,
+		ModelID:        targetModel.ID,
+		ProviderID:     targetModel.ProviderID,
+		RequestPath:    "/v1/audio/transcriptions",
+		StatusCode:     resp.StatusCode,
+		InputTokens:    int(durationSec),
+		OutputTokens:   len(strings.Fields(textResult)),
+		Cost:           cost,
+		LatencyMS:      latencyMs,
+		ClientApp:      "MuhiyaChat",
+		RequestedModel: targetModel.Name,
+		Complexity:     "direct",
+		CreatedAt:      time.Now(),
+	}
+
+	if err := h.db.InsertRequestLog(logEntry); err != nil {
+		log.Printf("[TRANSCRIPTION-ERROR] Failed to insert request log: %v", err)
+	}
+
+	// Return response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respBody)
 }
