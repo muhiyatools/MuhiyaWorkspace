@@ -50,11 +50,11 @@ func AnalyzePromptComplexity(messages []OpenAIMessage) string {
 	}
 
 	// 1. Hard: Requires strong logic, coding expertise, or very large context
-	if totalLen > 1500 || hasCodingKeywords || hasDeepReasoning {
+	if totalLen > 1500 || hasDeepReasoning || (hasCodingKeywords && totalLen > 600) {
 		return "hard"
 	}
-	// 2. Medium: Moderate length and general research
-	if totalLen > 400 {
+	// 2. Medium: Moderate length, general research, or short coding queries
+	if totalLen > 400 || hasCodingKeywords {
 		return "medium"
 	}
 	// 3. Simple: Conversational and quick questions
@@ -72,7 +72,7 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool) (*db.Mo
 	var candidates []*db.Model
 	for i := range models {
 		m := &models[i]
-		if m.Status == "active" && m.RoutingTier == complexity {
+		if m.Status == "active" && m.RoutingTier == complexity && !m.Transcribe {
 			if needsVision {
 				nameLower := strings.ToLower(m.Name)
 				if !strings.Contains(nameLower, "gpt-4o") && 
@@ -90,7 +90,7 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool) (*db.Mo
 	if len(candidates) == 0 {
 		for i := range models {
 			m := &models[i]
-			if m.Status == "active" {
+			if m.Status == "active" && !m.Transcribe {
 				if needsVision {
 					nameLower := strings.ToLower(m.Name)
 					if !strings.Contains(nameLower, "gpt-4o") && 
@@ -134,7 +134,7 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 	var fallbacks []*db.Model
 	for i := range models {
 		m := &models[i]
-		if m.Status == "active" && m.ID != excludeModelID {
+		if m.Status == "active" && m.ID != excludeModelID && !m.Transcribe {
 			if needsVision {
 				nameLower := strings.ToLower(m.Name)
 				if !strings.Contains(nameLower, "gpt-4o") && 

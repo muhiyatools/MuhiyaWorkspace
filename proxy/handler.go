@@ -1080,7 +1080,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		modelID := pathParts[1]
 		var matchedModel *db.Model
 		for _, m := range models {
-			if m.Name == modelID {
+			if m.Name == modelID && !m.Transcribe {
 				matchedModel = &m
 				break
 			}
@@ -1117,7 +1117,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 	if clientIsAnthropic {
 		var data []map[string]interface{}
 		for _, m := range models {
-			if m.Status == "active" {
+			if m.Status == "active" && !m.Transcribe {
 				data = append(data, map[string]interface{}{
 					"type":         "model",
 					"id":           m.Name,
@@ -1138,7 +1138,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 	} else {
 		var data []map[string]interface{}
 		for _, m := range models {
-			if m.Status == "active" {
+			if m.Status == "active" && !m.Transcribe {
 				data = append(data, map[string]interface{}{
 					"id":       m.Name,
 					"object":   "model",
