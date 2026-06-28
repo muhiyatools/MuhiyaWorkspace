@@ -1,6 +1,48 @@
 version: '3.8'
 
 services:
+  # =========================================================================
+  # 1. PostgreSQL Database Service
+  # =========================================================================
+  postgres:
+    image: elestio/postgres:${SOFTWARE_VERSION_TAG}
+    shm_size: 1g
+    restart: always
+    command: -c ssl=on -c ssl_cert_file=/var/lib/postgresql/data/server.crt -c ssl_key_file=/var/lib/postgresql/data/server.key
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${SOFTWARE_PASSWORD}
+      PGDATA: /var/lib/postgresql/data
+      TS_TUNE_MAX_CONNS: 100
+    volumes:
+      # Local volume to persist database data
+      - ./data:/var/lib/postgresql/data
+    ports:
+      # Listens on docker0 interface for security (change to "5432:5432" if external host access is needed)
+      - '172.17.0.1:5432:5432'
+
+  # =========================================================================
+  # 2. pgAdmin Dashboard Service
+  # =========================================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${ADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${ADMIN_PASSWORD}
+      PGADMIN_LISTEN_PORT: 8080
+    ports:
+      # Listens on docker0 interface (change to "8080:8080" if external dashboard access is needed)
+      - "172.17.0.1:8080:8080"
+    volumes:
+      - ./servers.json:/pgadmin4/servers.json
+    depends_on:
+      - postgres
+
+  # =========================================================================
+  # 3. MuhiyaLLM Go Proxy Service
+  # =========================================================================
   muhiyallm:
     build:
       context: .
@@ -8,10 +50,12 @@ services:
     restart: always
     ports:
       - "8090:8090"
+    depends_on:
+      - postgres
     environment:
       - PORT=8090
-      # External PostgreSQL connection string
-      # Set this in your CI/CD pipeline or elest.io environment variables
-      - DATABASE_URL=${DATABASE_URL}
+      # Auto-links to the 'postgres' service using the internal docker network.
+      # Utilizes ${SOFTWARE_PASSWORD} from your Elest.io environment variables.
+      - DATABASE_URL=postgres://postgres:${SOFTWARE_PASSWORD}@postgres:5432/postgres?sslmode=disable
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpassword}

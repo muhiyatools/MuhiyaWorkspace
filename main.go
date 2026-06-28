@@ -21,23 +21,16 @@ var staticFS embed.FS
 var dbReady atomic.Bool
 
 func main() {
-	// 1. Initialize PostgreSQL Database with retry
 	dsn := "host=localhost port=5432 user=postgres password=postgres dbname=gateway sslmode=disable"
 	if envDSN := os.Getenv("DATABASE_URL"); envDSN != "" {
 		dsn = envDSN
 	}
 
-	database, err := connectWithRetry(dsn, 30)
-	if err != nil {
-		log.Fatalf("Fatal: failed to initialize database: %v", err)
+	port := "8090"
+	if envPort := os.Getenv("PORT"); envPort != "" {
+		port = envPort
 	}
-	dbReady.Store(true)
-	defer database.Close()
 
-	// 2. Initialize Rate Limiter
-	limiter := proxy.NewRateLimiter(database)
-
-	// 3. Setup Routing & Security Mappings
 	adminUser := os.Getenv("ADMIN_USERNAME")
 	if adminUser == "" {
 		adminUser = "admin"
@@ -49,12 +42,12 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// Health check — used by Docker HEALTHCHECK and elest.io
+	// Health endpoint — responds immediately so elest.io proxy never 502s
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !dbReady.Load() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"not_ready"}`))
+			w.Write([]byte(`{"status":"connecting"}`))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -62,7 +55,7 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Redirect root / to /admin/
+	// Root redirect
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
@@ -71,13 +64,12 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// Health check for /v1 and /v1/ (crucial for client-side ping/verifications)
-	mux.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+	// v1 health checks
+	mux.Handle("/v1", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"running","gateway":"MuhiyaLLM"}`))
-	})
+	})))
 	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/" {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -89,12 +81,31 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// Setup API Mux protected by Basic Auth
+	// Start HTTP server immediately so elest.io reverse proxy gets a response
+	// DB connection happens in background; /health returns 503 until ready
+	go func() {
+		log.Printf("Listening on http://localhost:%s...", port)
+		if err := http.ListenAndServe(":"+port, pathNormalizationMiddleware(loggerMiddleware(mux))); err != nil {
+			log.Fatalf("Server failed to start: %v", err)
+		}
+	}()
+
+	// Now connect to the external PostgreSQL database (this can take time)
+	database, err := connectWithRetry(dsn, 30)
+	if err != nil {
+		log.Fatalf("Fatal: failed to initialize database: %v", err)
+	}
+	dbReady.Store(true)
+	defer database.Close()
+
+	// Initialize rate limiter
+	limiter := proxy.NewRateLimiter(database)
+
+	// Register all API + Admin + Proxy handlers now that DB is connected
 	apiMux := http.NewServeMux()
 	admin.RegisterRoutes(apiMux, database)
 	mux.Handle("/api/", basicAuth(adminUser, adminPass, apiMux))
 
-	// Setup Admin Interface Mux
 	adminMux := http.NewServeMux()
 	adminMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -143,12 +154,10 @@ func main() {
 
 		http.NotFound(w, r)
 	})
-
-	// Apply Basic Auth to Admin UI endpoints
 	mux.Handle("/admin", basicAuth(adminUser, adminPass, adminMux))
 	mux.Handle("/admin/", basicAuth(adminUser, adminPass, adminMux))
 
-	// Register Proxy Handler (Unprotected by Basic Auth - uses Bearer key)
+	// Register proxy handlers
 	proxyHandler := proxy.NewProxyHandler(database, limiter)
 	mux.Handle("/v1/chat/completions", corsMiddleware(proxyHandler))
 	mux.Handle("/chat/completions", corsMiddleware(proxyHandler))
@@ -162,12 +171,6 @@ func main() {
 	mux.Handle("/v1/models/", corsMiddleware(proxyHandler))
 	mux.Handle("/models", corsMiddleware(proxyHandler))
 	mux.Handle("/models/", corsMiddleware(proxyHandler))
-
-	// 4. Start HTTP Server
-	port := "8090"
-	if envPort := os.Getenv("PORT"); envPort != "" {
-		port = envPort
-	}
 
 	fmt.Println(`
     __  ___      __    _               __    __    __  ___
@@ -188,10 +191,8 @@ func main() {
 ==================================================
 `)
 
-	log.Printf("Listening on http://localhost:%s...", port)
-	if err := http.ListenAndServe(":"+port, pathNormalizationMiddleware(loggerMiddleware(mux))); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
-	}
+	// Block main goroutine forever
+	select {}
 }
 
 func connectWithRetry(dsn string, maxAttempts int) (*db.DB, error) {
@@ -213,13 +214,12 @@ func connectWithRetry(dsn string, maxAttempts int) (*db.DB, error) {
 
 func loggerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[REQ] %s %s (x-api-key: %q, Authorization: %q)", 
+		log.Printf("[REQ] %s %s (x-api-key: %q, Authorization: %q)",
 			r.Method, r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("Authorization"))
 		next.ServeHTTP(w, r)
 	})
 }
 
-// Basic Authentication Middleware
 func basicAuth(username, password string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
@@ -232,7 +232,6 @@ func basicAuth(username, password string, next http.Handler) http.Handler {
 	})
 }
 
-// Simple CORS middleware to allow external developer tools/SDKs to call the local endpoint
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -248,7 +247,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Path normalization middleware to dynamically fix client URL duplication issues (e.g. /v1/v1/)
 func pathNormalizationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/v1/") {
