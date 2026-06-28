@@ -162,6 +162,12 @@ func Open(dsn string) (*DB, error) {
 		return nil, fmt.Errorf("failed to ping postgres database: %w", err)
 	}
 
+	// Configure connection pool for scalability and stability in production
+	conn.SetMaxOpenConns(25)
+	conn.SetMaxIdleConns(25)
+	conn.SetConnMaxLifetime(5 * time.Minute)
+	conn.SetConnMaxIdleTime(5 * time.Minute)
+
 	// Create tables matching the new relational user-budget schema
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS plans (
@@ -268,6 +274,14 @@ func Open(dsn string) (*DB, error) {
 	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS complexity VARCHAR(50) DEFAULT '';")
 	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS failover_attempts INTEGER DEFAULT 0;")
 
+	// Migrate foreign keys to support SET NULL on delete for logs, and CASCADE on delete for models
+	_, _ = conn.Exec("ALTER TABLE request_logs DROP CONSTRAINT IF EXISTS request_logs_model_id_fkey;")
+	_, _ = conn.Exec("ALTER TABLE request_logs ADD CONSTRAINT request_logs_model_id_fkey FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE SET NULL;")
+	_, _ = conn.Exec("ALTER TABLE request_logs DROP CONSTRAINT IF EXISTS request_logs_provider_id_fkey;")
+	_, _ = conn.Exec("ALTER TABLE request_logs ADD CONSTRAINT request_logs_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL;")
+	_, _ = conn.Exec("ALTER TABLE models DROP CONSTRAINT IF EXISTS models_provider_id_fkey;")
+	_, _ = conn.Exec("ALTER TABLE models ADD CONSTRAINT models_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE;")
+
 	db := &DB{conn: conn}
 	if err := db.seedDefaults(); err != nil {
 		conn.Close()
@@ -282,6 +296,13 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) seedDefaults() error {
+	// Check if already seeded to prevent overwriting deleted models/providers or user changes on restart
+	var exists bool
+	err := db.conn.QueryRow("SELECT EXISTS(SELECT 1 FROM system_settings WHERE key = 'seeded_defaults')").Scan(&exists)
+	if err == nil && exists {
+		return nil
+	}
+
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return err
@@ -408,6 +429,12 @@ func (db *DB) seedDefaults() error {
 
 	// Clean up legacy alias/virtual model records from the database
 	_, _ = tx.Exec("DELETE FROM models WHERE id IN ('model-claude-alias', 'model-openai-alias', 'model-deepseek-alias')")
+
+	// Mark database as seeded
+	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value", "seeded_defaults", "true")
+	if err != nil {
+		return err
+	}
 
 	return tx.Commit()
 }

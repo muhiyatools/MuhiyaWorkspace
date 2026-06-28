@@ -17,6 +17,15 @@ import (
 	"github.com/google/uuid"
 )
 
+var httpClient = &http.Client{
+	Timeout: 15 * time.Minute, // Allow very long responses / reasoning models
+	Transport: &http.Transport{
+		MaxIdleConns:        500,
+		MaxIdleConnsPerHost: 50,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 type ProxyHandler struct {
 	db      *db.DB
 	limiter *RateLimiter
@@ -627,7 +636,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		h.logAndWriteError(w, http.StatusBadGateway, "Connection failed: "+err.Error(), "api_error", &log, startTime)
 		return
@@ -751,7 +760,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 	req.Header.Set("x-api-key", provider.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		h.logAndWriteError(w, http.StatusBadGateway, "Upstream error: "+err.Error(), "api_error", &log, startTime)
 		return
@@ -859,7 +868,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		h.logAndWriteError(w, http.StatusBadGateway, "Upstream connection failed: "+err.Error(), "api_error", &log, startTime)
 		return
@@ -963,7 +972,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 	req.Header.Set("x-api-key", provider.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		h.logAndWriteError(w, http.StatusBadGateway, "Upstream connection failed: "+err.Error(), "api_error", &log, startTime)
 		return
@@ -1337,7 +1346,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		h.writeError(w, http.StatusBadGateway, "Connection to upstream failed: "+err.Error(), "api_error")
 		return

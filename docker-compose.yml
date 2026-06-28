@@ -6,9 +6,9 @@ services:
     image: postgres:15-alpine
     restart: always
     environment:
-      POSTGRES_USER: muhiya
-      POSTGRES_PASSWORD: secure_password_here
-      POSTGRES_DB: gateway_db
+      POSTGRES_USER: ${DB_USER:-muhiya}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_here}
+      POSTGRES_DB: ${DB_NAME:-gateway_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     # We do NOT expose ports to the outside world for security.
@@ -25,9 +25,9 @@ services:
     environment:
       - PORT=8090
       # Connect to the db service using its container name
-      - DATABASE_URL=postgres://muhiya:secure_password_here@db:5432/gateway_db?sslmode=disable
-      - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=adminpassword
+      - DATABASE_URL=postgres://${DB_USER:-muhiya}:${DB_PASSWORD:-secure_password_here}@db:5432/${DB_NAME:-gateway_db}?sslmode=disable
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpassword}
     depends_on:
       - db
 
