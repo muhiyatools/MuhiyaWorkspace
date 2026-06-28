@@ -303,7 +303,8 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		targetModel, err = h.RouteToModel(complexity, needsVision)
+		thinkingRequested := oaiReq.Thinking != nil || oaiReq.ReasoningEffort != nil
+		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
 			return
@@ -476,7 +477,8 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 			}
 		}
 
-		targetModel, err = h.RouteToModel(complexity, needsVision)
+		thinkingRequested := anthReq.Thinking != nil
+		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
 			return

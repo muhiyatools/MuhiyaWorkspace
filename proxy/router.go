@@ -31,6 +31,10 @@ func AnalyzePromptComplexity(messages []OpenAIMessage) string {
 	}
 
 	for _, msg := range messages {
+		// Only analyze complexity based on the user's input, ignore system instructions or assistant replies
+		if msg.Role != "user" {
+			continue
+		}
 		content := strings.ToLower(GetMessageContentString(msg.Content))
 		totalLen += len(content)
 
@@ -61,32 +65,81 @@ func AnalyzePromptComplexity(messages []OpenAIMessage) string {
 	return "simple"
 }
 
-// RouteToModel resolves a complexity level and optional vision requirement to the cheapest active model
-func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool) (*db.Model, error) {
+func modelSupportsThinking(targetModel string) bool {
+	target := strings.ToLower(targetModel)
+	return strings.Contains(target, "reasoner") || 
+	       strings.Contains(target, "r1") || 
+	       strings.Contains(target, "o1") || 
+	       strings.Contains(target, "o3") || 
+	       strings.Contains(target, "claude-3-7")
+}
+
+// RouteToModel resolves a complexity level, optional vision requirement, and thinking preference to the cheapest active model
+func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkingRequested bool) (*db.Model, error) {
 	models, err := h.db.ListModels()
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve models: %w", err)
 	}
 
-	// 1. Filter active models assigned to the exact requested routing tier
+	// Helper to check if model meets all criteria
+	matchFilter := func(m *db.Model, tierCheck bool) bool {
+		if m.Status != "active" || m.Transcribe {
+			return false
+		}
+		if tierCheck && m.RoutingTier != complexity {
+			return false
+		}
+		if needsVision {
+			nameLower := strings.ToLower(m.Name)
+			if !strings.Contains(nameLower, "gpt-4o") && 
+			   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
+			   !strings.Contains(nameLower, "vision") && 
+			   !strings.Contains(nameLower, "gemini") {
+				return false
+			}
+		}
+		return modelSupportsThinking(m.TargetModel) == thinkingRequested
+	}
+
+	// 1. Try exact tier + thinking criteria
 	var candidates []*db.Model
 	for i := range models {
 		m := &models[i]
-		if m.Status == "active" && m.RoutingTier == complexity && !m.Transcribe {
-			if needsVision {
-				nameLower := strings.ToLower(m.Name)
-				if !strings.Contains(nameLower, "gpt-4o") && 
-				   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
-				   !strings.Contains(nameLower, "vision") && 
-				   !strings.Contains(nameLower, "gemini") {
-					continue
-				}
-			}
+		if matchFilter(m, true) {
 			candidates = append(candidates, m)
 		}
 	}
 
-	// 2. If no candidate matches the exact tier, fall back to any active model
+	// 2. Fallback: Exact tier but ignore thinking filter
+	if len(candidates) == 0 {
+		for i := range models {
+			m := &models[i]
+			if m.Status == "active" && m.RoutingTier == complexity && !m.Transcribe {
+				if needsVision {
+					nameLower := strings.ToLower(m.Name)
+					if !strings.Contains(nameLower, "gpt-4o") && 
+					   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
+					   !strings.Contains(nameLower, "vision") && 
+					   !strings.Contains(nameLower, "gemini") {
+						continue
+					}
+				}
+				candidates = append(candidates, m)
+			}
+		}
+	}
+
+	// 3. Fallback: Ignore tier check but keep thinking criteria
+	if len(candidates) == 0 {
+		for i := range models {
+			m := &models[i]
+			if matchFilter(m, false) {
+				candidates = append(candidates, m)
+			}
+		}
+	}
+
+	// 4. Ultimate fallback: ignore all except active status and vision
 	if len(candidates) == 0 {
 		for i := range models {
 			m := &models[i]
@@ -109,7 +162,7 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool) (*db.Mo
 		return nil, fmt.Errorf("no active models available for routing")
 	}
 
-	// 3. Sort candidates by price (cheapest first) to guarantee credit optimization!
+	// Sort candidates by price (cheapest first) to guarantee credit optimization!
 	for i := 0; i < len(candidates); i++ {
 		for j := i + 1; j < len(candidates); j++ {
 			costI := candidates[i].InputCostPerMillion + candidates[i].OutputCostPerMillion
