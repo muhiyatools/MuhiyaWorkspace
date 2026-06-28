@@ -171,6 +171,7 @@ INSERT INTO models (
 ('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'active', 'none', 'llm', 0.0, false),
 ('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'active', 'none', 'llm', 0.0, false),
 ('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'active', 'none', 'llm', 0.0, false),
+('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-reasoner', 0.55, 2.19, 0.14, 0.55, 'active', 'none', 'llm', 0.0, false),
 ('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'active', 'none', 'llm', 0.0, false),
 ('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'active', 'none', 'transcript', 0.006, true)
 ON CONFLICT (id) DO NOTHING;

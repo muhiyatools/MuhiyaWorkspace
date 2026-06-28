@@ -44,6 +44,11 @@ type OpenAIStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+type AnthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
+}
+
 type OpenAIRequest struct {
 	Model               string               `json:"model"`
 	Messages            []OpenAIMessage      `json:"messages"`
@@ -54,6 +59,8 @@ type OpenAIRequest struct {
 	StreamOptions       *OpenAIStreamOptions `json:"stream_options,omitempty"`
 	Tools               []OpenAITool         `json:"tools,omitempty"`
 	ToolChoice          interface{}          `json:"tool_choice,omitempty"`
+	ReasoningEffort     *string              `json:"reasoning_effort,omitempty"`
+	Thinking            *AnthropicThinking   `json:"thinking,omitempty"`
 }
 
 type PromptTokensDetail struct {
@@ -212,6 +219,7 @@ type AnthropicRequest struct {
 	Temperature *float64           `json:"temperature,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
 	Tools       []AnthropicTool    `json:"tools,omitempty"`
+	Thinking    *AnthropicThinking `json:"thinking,omitempty"`
 }
 
 type AnthropicUsage struct {
@@ -438,6 +446,7 @@ func TranslateOpenAIToAnthropic(orig *OpenAIRequest, targetModel string) (*Anthr
 		Temperature: orig.Temperature,
 		Stream:      orig.Stream,
 		Tools:       anthTools,
+		Thinking:    orig.Thinking,
 	}
 
 	return req, nil
