@@ -156,131 +156,20 @@ func Open(dsn string) (*DB, error) {
 		return nil, fmt.Errorf("failed to open postgres database: %w", err)
 	}
 
-	// Test the database connection
 	if err := conn.Ping(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to ping postgres database: %w", err)
 	}
 
-	// Configure connection pool for scalability and stability in production
 	conn.SetMaxOpenConns(25)
 	conn.SetMaxIdleConns(25)
 	conn.SetConnMaxLifetime(5 * time.Minute)
 	conn.SetConnMaxIdleTime(5 * time.Minute)
 
-	// Create tables matching the new relational user-budget schema
-	schemas := []string{
-		`CREATE TABLE IF NOT EXISTS plans (
-			id VARCHAR(100) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL,
-			rpm_limit INTEGER NOT NULL DEFAULT 0,
-			tpm_limit INTEGER NOT NULL DEFAULT 0,
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
-		`CREATE TABLE IF NOT EXISTS budget_windows (
-			id VARCHAR(100) PRIMARY KEY,
-			plan_id VARCHAR(100) NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
-			name VARCHAR(255) NOT NULL,
-			duration_seconds INTEGER NOT NULL,
-			budget_usd DOUBLE PRECISION NOT NULL,
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
-		`CREATE TABLE IF NOT EXISTS users (
-			id VARCHAR(100) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL,
-			email VARCHAR(255) NOT NULL UNIQUE,
-			plan_id VARCHAR(100) NOT NULL REFERENCES plans(id),
-			status VARCHAR(50) NOT NULL CHECK (status IN ('active', 'suspended')),
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			plan_assigned_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
-		`CREATE TABLE IF NOT EXISTS virtual_keys (
-			id VARCHAR(100) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL,
-			user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			status VARCHAR(50) NOT NULL CHECK (status IN ('active', 'revoked')),
-			expires_at TIMESTAMP WITH TIME ZONE,
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
-		`CREATE TABLE IF NOT EXISTS providers (
-			id VARCHAR(100) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL,
-			api_key TEXT NOT NULL,
-			base_url TEXT NOT NULL,
-			anthropic_base_url TEXT NOT NULL DEFAULT '',
-			status VARCHAR(50) NOT NULL CHECK (status IN ('active', 'inactive')),
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
-		`CREATE TABLE IF NOT EXISTS models (
-			id VARCHAR(100) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL UNIQUE,
-			provider_id VARCHAR(100) NOT NULL REFERENCES providers(id),
-			target_model VARCHAR(255) NOT NULL,
-			input_cost_per_million DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-			output_cost_per_million DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-			cache_read_cost_per_million DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-			cache_write_cost_per_million DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-			status VARCHAR(50) NOT NULL CHECK (status IN ('active', 'inactive')),
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
-		`CREATE TABLE IF NOT EXISTS request_logs (
-			id VARCHAR(100) PRIMARY KEY,
-			virtual_key_id VARCHAR(100) NOT NULL REFERENCES virtual_keys(id) ON DELETE CASCADE,
-			user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			model_id VARCHAR(100) REFERENCES models(id),
-			provider_id VARCHAR(100) REFERENCES providers(id),
-			request_path VARCHAR(255) NOT NULL,
-			status_code INTEGER NOT NULL,
-			input_tokens INTEGER NOT NULL DEFAULT 0,
-			output_tokens INTEGER NOT NULL DEFAULT 0,
-			cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-			cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-			cost DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-			latency_ms INTEGER NOT NULL,
-			error_message TEXT,
-			client_app VARCHAR(255),
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
-		`CREATE TABLE IF NOT EXISTS system_settings (
-			key VARCHAR(255) PRIMARY KEY,
-			value TEXT NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS user_topups (
-			id VARCHAR(100) PRIMARY KEY,
-			user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			credits DOUBLE PRECISION NOT NULL,
-			used_credits DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);`,
+	if err := RunMigrations(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
-
-	for _, schema := range schemas {
-		if _, err := conn.Exec(schema); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("failed to execute schema: %w", err)
-		}
-	}
-
-	// Run schema migrations for newer AI Router fields
-	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS routing_tier VARCHAR(50) DEFAULT 'none';")
-	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS model_type VARCHAR(50) DEFAULT 'llm';")
-	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS price_per_minute DOUBLE PRECISION DEFAULT 0.0;")
-	_, _ = conn.Exec("ALTER TABLE models ADD COLUMN IF NOT EXISTS transcribe BOOLEAN DEFAULT FALSE;")
-	_, _ = conn.Exec("UPDATE models SET model_type = 'llm' WHERE model_type IS NULL;")
-	_, _ = conn.Exec("UPDATE models SET price_per_minute = 0.0 WHERE price_per_minute IS NULL;")
-	_, _ = conn.Exec("UPDATE models SET transcribe = FALSE WHERE transcribe IS NULL;")
-	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS requested_model VARCHAR(255) DEFAULT '';")
-	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS complexity VARCHAR(50) DEFAULT '';")
-	_, _ = conn.Exec("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS failover_attempts INTEGER DEFAULT 0;")
-
-	// Migrate foreign keys to support SET NULL on delete for logs, and CASCADE on delete for models
-	_, _ = conn.Exec("ALTER TABLE request_logs DROP CONSTRAINT IF EXISTS request_logs_model_id_fkey;")
-	_, _ = conn.Exec("ALTER TABLE request_logs ADD CONSTRAINT request_logs_model_id_fkey FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE SET NULL;")
-	_, _ = conn.Exec("ALTER TABLE request_logs DROP CONSTRAINT IF EXISTS request_logs_provider_id_fkey;")
-	_, _ = conn.Exec("ALTER TABLE request_logs ADD CONSTRAINT request_logs_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL;")
-	_, _ = conn.Exec("ALTER TABLE models DROP CONSTRAINT IF EXISTS models_provider_id_fkey;")
-	_, _ = conn.Exec("ALTER TABLE models ADD CONSTRAINT models_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE;")
 
 	db := &DB{conn: conn}
 	if err := db.seedDefaults(); err != nil {
@@ -296,10 +185,15 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) seedDefaults() error {
-	// Check if already seeded to prevent overwriting deleted models/providers or user changes on restart
 	var exists bool
 	err := db.conn.QueryRow("SELECT EXISTS(SELECT 1 FROM system_settings WHERE key = 'seeded_defaults')").Scan(&exists)
 	if err == nil && exists {
+		return nil
+	}
+
+	var count int
+	err = db.conn.QueryRow("SELECT COUNT(*) FROM plans").Scan(&count)
+	if err == nil && count > 0 {
 		return nil
 	}
 
@@ -309,7 +203,6 @@ func (db *DB) seedDefaults() error {
 	}
 	defer tx.Rollback()
 
-	// Seed system settings
 	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING", "gateway_name", "MuhiyaLLM Gateway")
 	if err != nil {
 		return err
@@ -319,7 +212,6 @@ func (db *DB) seedDefaults() error {
 		return err
 	}
 
-	// Seed plans
 	plans := []Plan{
 		{ID: "plan-dev", Name: "MuhiyaCode Free", RPMLimit: 30, TPMLimit: 300000},
 		{ID: "yalla", Name: "MuhiyaCode Yalla", RPMLimit: 60, TPMLimit: 1200000},
@@ -336,24 +228,10 @@ func (db *DB) seedDefaults() error {
 		}
 	}
 
-	// Update users on legacy plan IDs to new IDs
-	_, _ = tx.Exec("UPDATE users SET plan_id = 'plan-dev' WHERE plan_id = 'free'")
-	_, _ = tx.Exec("UPDATE users SET plan_id = 'yalla' WHERE plan_id IN ('plan-unlimited', 'yalla-annual')")
-	_, _ = tx.Exec("UPDATE users SET plan_id = 'max' WHERE plan_id IN ('plan-prod', 'max-annual')")
-
-	// Clean up legacy plans to prevent conflicts
-	_, _ = tx.Exec("DELETE FROM plans WHERE id IN ('free', 'plan-prod', 'plan-unlimited', 'yalla-annual', 'max-annual')")
-
-	// Seed budget windows
 	budgetWindows := []BudgetWindow{
-		// Free plan: 0.5 USD per 5 hours
 		{ID: "budget-plan-dev-5h", PlanID: "plan-dev", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 0.50},
-
-		// Yalla plan: 25 USD per 5 hours and 31 days
 		{ID: "budget-yalla-5h", PlanID: "yalla", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 25.00},
 		{ID: "budget-yalla-31d", PlanID: "yalla", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 25.00},
-
-		// Max plan: 50 USD per 5 hours and 31 days
 		{ID: "budget-max-5h", PlanID: "max", Name: "Short Term (5 Hours)", DurationSeconds: 18000, BudgetUSD: 50.00},
 		{ID: "budget-max-31d", PlanID: "max", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
 	}
@@ -368,16 +246,6 @@ func (db *DB) seedDefaults() error {
 		}
 	}
 
-	// Clean up legacy budget windows that are not in the seed list
-	_, _ = tx.Exec(`
-		DELETE FROM budget_windows 
-		WHERE id NOT IN (
-			'budget-plan-dev-5h',
-			'budget-yalla-5h', 'budget-yalla-31d',
-			'budget-max-5h', 'budget-max-31d'
-		)`)
-
-	// Seed providers
 	providers := []Provider{
 		{ID: "openai", Name: "OpenAI", APIKey: "mock-openai-key", BaseURL: "https://api.openai.com/v1", AnthropicBaseURL: "", Status: "active"},
 		{ID: "anthropic", Name: "Anthropic", APIKey: "mock-anthropic-key", BaseURL: "", AnthropicBaseURL: "https://api.anthropic.com", Status: "active"},
@@ -394,7 +262,6 @@ func (db *DB) seedDefaults() error {
 		}
 	}
 
-	// Seed models (excluding internal virtual/alias model rows)
 	models := []Model{
 		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false},
 		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false},
@@ -406,31 +273,18 @@ func (db *DB) seedDefaults() error {
 		_, err := tx.Exec(`
 			INSERT INTO models (
 				id, name, provider_id, target_model, input_cost_per_million, 
-				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, model_type, price_per_minute, transcribe
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
-			ON CONFLICT (id) DO UPDATE SET 
-				name = EXCLUDED.name,
-				provider_id = EXCLUDED.provider_id,
-				target_model = EXCLUDED.target_model,
-				input_cost_per_million = EXCLUDED.input_cost_per_million,
-				output_cost_per_million = EXCLUDED.output_cost_per_million,
-				cache_read_cost_per_million = EXCLUDED.cache_read_cost_per_million,
-				cache_write_cost_per_million = EXCLUDED.cache_write_cost_per_million,
-				status = EXCLUDED.status,
-				model_type = EXCLUDED.model_type,
-				price_per_minute = EXCLUDED.price_per_minute,
-				transcribe = EXCLUDED.transcribe`,
+				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
+				routing_tier, model_type, price_per_minute, transcribe
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
+			ON CONFLICT (id) DO NOTHING`,
 			m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.ModelType, m.PricePerMinute, m.Transcribe)
+			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
+			m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Clean up legacy alias/virtual model records from the database
-	_, _ = tx.Exec("DELETE FROM models WHERE id IN ('model-claude-alias', 'model-openai-alias', 'model-deepseek-alias')")
-
-	// Mark database as seeded
 	_, err = tx.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value", "seeded_defaults", "true")
 	if err != nil {
 		return err
@@ -531,7 +385,6 @@ func (db *DB) GetPlan(id string) (*Plan, error) {
 		return nil, err
 	}
 
-	// Load budget windows for this plan
 	budgets, err := db.ListBudgetWindowsByPlan(p.ID)
 	if err != nil {
 		return nil, err
@@ -555,7 +408,6 @@ func (db *DB) ListPlans() ([]Plan, error) {
 			return nil, err
 		}
 
-		// Load budget windows for this plan
 		budgets, err := db.ListBudgetWindowsByPlan(p.ID)
 		if err != nil {
 			return nil, err
@@ -579,7 +431,6 @@ func (db *DB) CreatePlan(p Plan) error {
 		return err
 	}
 
-	// Insert budget windows
 	for _, bw := range p.BudgetWindows {
 		if bw.ID == "" {
 			bw.ID = "budget-" + uuid.New().String()
@@ -606,13 +457,11 @@ func (db *DB) UpdatePlan(p Plan) error {
 		return err
 	}
 
-	// Delete existing budget windows
 	_, err = tx.Exec("DELETE FROM budget_windows WHERE plan_id = $1", p.ID)
 	if err != nil {
 		return err
 	}
 
-	// Insert new budget windows
 	for _, bw := range p.BudgetWindows {
 		if bw.ID == "" {
 			bw.ID = "budget-" + uuid.New().String()
@@ -1024,7 +873,6 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	return list, nil
 }
 
-// Get spending of a user inside a fixed duration window starting from plan assignment
 func (db *DB) GetUserSpendingInWindow(userID string, durationSeconds int) (float64, error) {
 	var planAssignedAt time.Time
 	err := db.conn.QueryRow("SELECT plan_assigned_at FROM users WHERE id = $1", userID).Scan(&planAssignedAt)
@@ -1056,18 +904,15 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 	if costUSD <= 0 {
 		return nil
 	}
-	// 1. Fetch user's plan
 	var planID string
 	err := db.conn.QueryRow("SELECT plan_id FROM users WHERE id = $1", userID).Scan(&planID)
 	if err != nil {
 		return err
 	}
-	// 2. Fetch budget windows
 	windows, err := db.ListBudgetWindowsByPlan(planID)
 	if err != nil {
 		return err
 	}
-	// 3. Compute max exceeded portion
 	var maxExceeded float64
 	for _, w := range windows {
 		if w.BudgetUSD <= 0 {
@@ -1079,7 +924,7 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 		}
 		previousSpending := currentSpending - costUSD
 		limit := w.BudgetUSD
-		
+
 		var prevExceeded float64
 		if previousSpending > limit {
 			prevExceeded = previousSpending
@@ -1094,25 +939,24 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 			maxExceeded = exceeded
 		}
 	}
-	
+
 	if maxExceeded <= 0 {
 		return nil
 	}
-	
-	deductCredits := maxExceeded * 100.0 // 1 credit = $0.01 USD
-	
-	// 4. Deduct in FIFO order
+
+	deductCredits := maxExceeded * 100.0
+
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	
+
 	rows, err := tx.Query("SELECT id, credits, used_credits FROM user_topups WHERE user_id = $1 AND used_credits < credits ORDER BY created_at ASC FOR UPDATE", userID)
 	if err != nil {
 		return err
 	}
-	
+
 	type topupRow struct {
 		id          string
 		credits     float64
@@ -1128,7 +972,7 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 		activeTopups = append(activeTopups, r)
 	}
 	rows.Close()
-	
+
 	for _, r := range activeTopups {
 		if deductCredits <= 0 {
 			break
@@ -1147,7 +991,7 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 			return err
 		}
 	}
-	
+
 	return tx.Commit()
 }
 
@@ -1157,7 +1001,7 @@ func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var list []UserTopup
 	for rows.Next() {
 		var u UserTopup

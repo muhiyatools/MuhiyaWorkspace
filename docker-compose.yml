@@ -1,20 +1,6 @@
 version: '3.8'
 
 services:
-  # 1. PostgreSQL Database
-  db:
-    image: postgres:15-alpine
-    restart: always
-    environment:
-      POSTGRES_USER: ${DB_USER:-muhiya}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_here}
-      POSTGRES_DB: ${DB_NAME:-gateway_db}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    # We do NOT expose ports to the outside world for security.
-    # It is only accessible to the gateway container internally.
-
-  # 2. MuhiyaLLM Go Gateway
   muhiyallm:
     build:
       context: .
@@ -24,13 +10,8 @@ services:
       - "8090:8090"
     environment:
       - PORT=8090
-      # Connect to the db service using its container name
-      - DATABASE_URL=postgres://${DB_USER:-muhiya}:${DB_PASSWORD:-secure_password_here}@db:5432/${DB_NAME:-gateway_db}?sslmode=disable
+      # External PostgreSQL connection string
+      # Set this in your CI/CD pipeline or elest.io environment variables
+      - DATABASE_URL=${DATABASE_URL}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpassword}
-    depends_on:
-      - db
-
-volumes:
-  # Persistent volume for PostgreSQL data
-  postgres_data:

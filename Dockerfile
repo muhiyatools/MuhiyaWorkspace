@@ -19,8 +19,8 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Install CA certificates for making HTTPS requests to OpenAI/Anthropic/DeepSeek
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# Install CA certificates for HTTPS requests + curl for health checks
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary and static files from the builder
 COPY --from=builder /app/muhiyallm .
@@ -28,6 +28,10 @@ COPY --from=builder /app/static ./static
 
 # Expose the port your app runs on
 EXPOSE 8090
+
+# Health check — verifies DB is connected and app is serving
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -f http://localhost:8090/health || exit 1
 
 # Run the executable
 CMD ["./muhiyallm"]

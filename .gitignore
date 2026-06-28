@@ -1,0 +1,15 @@
+# SQLite local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Compiled binaries
+*.exe
+*.zip
+
+# Environment files
+.env
+
+# IDE
+.vscode/
+.idea/

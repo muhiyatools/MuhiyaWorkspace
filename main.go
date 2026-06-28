@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"gateway/admin"
 	"gateway/db"
@@ -16,17 +18,20 @@ import (
 //go:embed static/*
 var staticFS embed.FS
 
+var dbReady atomic.Bool
+
 func main() {
-	// 1. Initialize PostgreSQL Database
+	// 1. Initialize PostgreSQL Database with retry
 	dsn := "host=localhost port=5432 user=postgres password=postgres dbname=gateway sslmode=disable"
 	if envDSN := os.Getenv("DATABASE_URL"); envDSN != "" {
 		dsn = envDSN
 	}
 
-	database, err := db.Open(dsn)
+	database, err := connectWithRetry(dsn, 30)
 	if err != nil {
 		log.Fatalf("Fatal: failed to initialize database: %v", err)
 	}
+	dbReady.Store(true)
 	defer database.Close()
 
 	// 2. Initialize Rate Limiter
@@ -43,6 +48,19 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+
+	// Health check — used by Docker HEALTHCHECK and elest.io
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if !dbReady.Load() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"not_ready"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
 
 	// Redirect root / to /admin/
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +123,6 @@ func main() {
 				return
 			}
 
-			// Detect Content Type
 			contentType := "text/plain"
 			if strings.HasSuffix(path, ".css") {
 				contentType = "text/css"
@@ -159,15 +176,15 @@ func main() {
  / /  / / /_/ / / / / / /_/ / /_/ / // /___/ /___/ /  / /  
 /_/  /_/\',_/_/ /_/_/\',_\',_/_//_____/_____/_/  /_/   
 ==================================================
- MuhiyaLLM Gateway is running locally!
- Dashboard: http://localhost:8090/admin/
- OpenAI Endpoint: http://localhost:8090/v1/chat/completions
- 
+ MuhiyaLLM Gateway is running!
+ Dashboard: http://localhost:` + port + `/admin/
+ OpenAI Endpoint: http://localhost:` + port + `/v1/chat/completions
+
  [SECURITY CREDENTIALS]
  Username: ` + adminUser + `
  Password: ` + adminPass + `
- 
- Database DSN: ` + dsn + `
+
+ Database: External (DATABASE_URL)
 ==================================================
 `)
 
@@ -175,6 +192,23 @@ func main() {
 	if err := http.ListenAndServe(":"+port, pathNormalizationMiddleware(loggerMiddleware(mux))); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
+}
+
+func connectWithRetry(dsn string, maxAttempts int) (*db.DB, error) {
+	var lastErr error
+	for i := 1; i <= maxAttempts; i++ {
+		database, err := db.Open(dsn)
+		if err == nil {
+			if i > 1 {
+				log.Printf("Database connected successfully after %d attempts", i)
+			}
+			return database, nil
+		}
+		lastErr = err
+		log.Printf("Database connection attempt %d/%d failed: %v", i, maxAttempts, err)
+		time.Sleep(2 * time.Second)
+	}
+	return nil, fmt.Errorf("failed to connect to database after %d attempts: %w", maxAttempts, lastErr)
 }
 
 func loggerMiddleware(next http.Handler) http.Handler {
