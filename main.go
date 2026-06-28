@@ -42,6 +42,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Dynamic handler wrappers so we can register paths immediately at startup
+	var apiMuxHandler http.Handler
+	var adminMuxHandler http.Handler
+	var proxyMuxHandler http.Handler
+
 	// Health endpoint — responds immediately so elest.io proxy never 502s
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !dbReady.Load() {
@@ -63,6 +68,78 @@ func main() {
 		}
 		http.NotFound(w, r)
 	})
+
+	// Register API wrapper
+	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !dbReady.Load() || apiMuxHandler == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":{"message":"Database is connecting. Please wait.","type":"service_unavailable"}}`))
+			return
+		}
+		apiMuxHandler.ServeHTTP(w, r)
+	}))
+
+	// Register Admin wrappers
+	dbConnectingHTML := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Database Connecting | MuhiyaLLM</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #1e293b; padding: 2.5rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); border: 1px solid #334155; text-align: center; max-width: 500px; }
+        h1 { color: #10b981; font-size: 1.8rem; margin-top: 0; }
+        p { color: #94a3b8; line-height: 1.6; }
+        .spinner { border: 4px solid rgba(255,255,255,0.1); width: 36px; height: 36px; border-radius: 50%; border-left-color: #10b981; animation: spin 1s linear infinite; margin: 1.5rem auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+    <meta http-equiv="refresh" content="5">
+</head>
+<body>
+    <div class="card">
+        <div class="spinner"></div>
+        <h1>Connecting to Database...</h1>
+        <p>MuhiyaLLM is currently connecting to your PostgreSQL database. This page will automatically refresh once the connection is established.</p>
+        <p><small style="color: #64748b;">Verify your <code>DATABASE_URL</code> environment variable if this takes too long.</small></p>
+    </div>
+</body>
+</html>`
+
+	adminWrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !dbReady.Load() || adminMuxHandler == nil {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(dbConnectingHTML))
+			return
+		}
+		adminMuxHandler.ServeHTTP(w, r)
+	})
+	mux.Handle("/admin", adminWrapper)
+	mux.Handle("/admin/", adminWrapper)
+
+	// Register Proxy wrappers
+	proxyWrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !dbReady.Load() || proxyMuxHandler == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":{"message":"Database is connecting. Please wait.","type":"service_unavailable"}}`))
+			return
+		}
+		proxyMuxHandler.ServeHTTP(w, r)
+	})
+
+	mux.Handle("/v1/chat/completions", proxyWrapper)
+	mux.Handle("/chat/completions", proxyWrapper)
+	mux.Handle("/v1/completions", proxyWrapper)
+	mux.Handle("/completions", proxyWrapper)
+	mux.Handle("/v1/messages", proxyWrapper)
+	mux.Handle("/messages", proxyWrapper)
+	mux.Handle("/v1/audio/transcriptions", proxyWrapper)
+	mux.Handle("/audio/transcriptions", proxyWrapper)
+	mux.Handle("/v1/models", proxyWrapper)
+	mux.Handle("/v1/models/", proxyWrapper)
+	mux.Handle("/models", proxyWrapper)
+	mux.Handle("/models/", proxyWrapper)
 
 	// v1 health checks
 	mux.Handle("/v1", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,10 +178,10 @@ func main() {
 	// Initialize rate limiter
 	limiter := proxy.NewRateLimiter(database)
 
-	// Register all API + Admin + Proxy handlers now that DB is connected
+	// Instantiate actual sub-routers now that DB is connected
 	apiMux := http.NewServeMux()
 	admin.RegisterRoutes(apiMux, database)
-	mux.Handle("/api/", basicAuth(adminUser, adminPass, apiMux))
+	apiMuxHandler = basicAuth(adminUser, adminPass, apiMux)
 
 	adminMux := http.NewServeMux()
 	adminMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -154,23 +231,9 @@ func main() {
 
 		http.NotFound(w, r)
 	})
-	mux.Handle("/admin", basicAuth(adminUser, adminPass, adminMux))
-	mux.Handle("/admin/", basicAuth(adminUser, adminPass, adminMux))
+	adminMuxHandler = basicAuth(adminUser, adminPass, adminMux)
 
-	// Register proxy handlers
-	proxyHandler := proxy.NewProxyHandler(database, limiter)
-	mux.Handle("/v1/chat/completions", corsMiddleware(proxyHandler))
-	mux.Handle("/chat/completions", corsMiddleware(proxyHandler))
-	mux.Handle("/v1/completions", corsMiddleware(proxyHandler))
-	mux.Handle("/completions", corsMiddleware(proxyHandler))
-	mux.Handle("/v1/messages", corsMiddleware(proxyHandler))
-	mux.Handle("/messages", corsMiddleware(proxyHandler))
-	mux.Handle("/v1/audio/transcriptions", corsMiddleware(proxyHandler))
-	mux.Handle("/audio/transcriptions", corsMiddleware(proxyHandler))
-	mux.Handle("/v1/models", corsMiddleware(proxyHandler))
-	mux.Handle("/v1/models/", corsMiddleware(proxyHandler))
-	mux.Handle("/models", corsMiddleware(proxyHandler))
-	mux.Handle("/models/", corsMiddleware(proxyHandler))
+	proxyMuxHandler = corsMiddleware(proxy.NewProxyHandler(database, limiter))
 
 	fmt.Println(`
     __  ___      __    _               __    __    __  ___
