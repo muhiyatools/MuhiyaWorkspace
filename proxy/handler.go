@@ -661,6 +661,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		reader := bufio.NewReader(resp.Body)
 		var textAccumulator strings.Builder
 		var finalUsage *OpenAIUsage
+		normalClose := false
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -671,7 +672,9 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 
 			if strings.HasPrefix(line, "data:") {
 				dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-				if dataStr != "[DONE]" && dataStr != "" {
+				if dataStr == "[DONE]" {
+					normalClose = true
+				} else if dataStr != "" {
 					var chunk OpenAIChunk
 					if err := json.Unmarshal([]byte(dataStr), &chunk); err == nil {
 						if len(chunk.Choices) > 0 {
@@ -683,6 +686,11 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 					}
 				}
 			}
+		}
+
+		if !normalClose {
+			w.Write([]byte("data: {\"error\": {\"message\": \"Upstream connection disconnected prematurely.\", \"type\": \"api_error\"}}\n\n"))
+			flusher.Flush()
 		}
 
 		completionTokens := estimateTokens(textAccumulator.String())
@@ -705,6 +713,8 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		_ = h.db.InsertRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
+		
+		sendMuhiyaMetaChunk(w, &log, model.Name)
 	} else {
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -786,6 +796,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		var usageTracker OpenAIUsage
 		msgID := "chatcmpl-" + uuid.New().String()
 
+		normalClose := false
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -805,10 +816,16 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 				flusher.Flush()
 			}
 			if done {
+				normalClose = true
 				w.Write([]byte("data: [DONE]\n\n"))
 				flusher.Flush()
 				break
 			}
+		}
+
+		if !normalClose {
+			w.Write([]byte("data: {\"error\": {\"message\": \"Upstream connection disconnected prematurely.\", \"type\": \"api_error\"}}\n\n"))
+			flusher.Flush()
 		}
 
 		log.StatusCode = http.StatusOK
@@ -824,6 +841,8 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		_ = h.db.InsertRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.CompletionTokens)
+
+		sendMuhiyaMetaChunk(w, &log, model.Name)
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		var anthResp AnthropicResponse
@@ -894,6 +913,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		var usageTracker AnthropicUsage
 		msgID := "msg_" + uuid.New().String()
 
+		normalClose := false
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -913,10 +933,16 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 				flusher.Flush()
 			}
 			if done {
+				normalClose = true
 				w.Write([]byte("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"))
 				flusher.Flush()
 				break
 			}
+		}
+
+		if !normalClose {
+			w.Write([]byte("event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"api_error\", \"message\": \"Upstream connection disconnected prematurely.\"}}\n\n"))
+			flusher.Flush()
 		}
 
 		log.StatusCode = http.StatusOK
@@ -927,6 +953,8 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		_ = h.db.InsertRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.OutputTokens)
+
+		sendMuhiyaMetaChunk(w, &log, model.Name)
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		var oaiResp OpenAIResponse
@@ -997,6 +1025,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		reader := bufio.NewReader(resp.Body)
 		var usageTracker AnthropicUsage
 
+		normalClose := false
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -1012,7 +1041,9 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 				var event map[string]interface{}
 				if err := json.Unmarshal([]byte(dataStr), &event); err == nil {
 					eventType, _ := event["type"].(string)
-					if eventType == "message_start" {
+					if eventType == "message_stop" {
+						normalClose = true
+					} else if eventType == "message_start" {
 						if message, ok := event["message"].(map[string]interface{}); ok {
 							if usage, ok := message["usage"].(map[string]interface{}); ok {
 								if in, ok := usage["input_tokens"].(float64); ok {
@@ -1037,6 +1068,11 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 			}
 		}
 
+		if !normalClose {
+			w.Write([]byte("event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"api_error\", \"message\": \"Upstream connection disconnected prematurely.\"}}\n\n"))
+			flusher.Flush()
+		}
+
 		log.StatusCode = http.StatusOK
 		log.InputTokens = usageTracker.InputTokens
 		log.OutputTokens = usageTracker.OutputTokens
@@ -1046,6 +1082,8 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		_ = h.db.InsertRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
+
+		sendMuhiyaMetaChunk(w, &log, model.Name)
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		var anthResp AnthropicResponse
@@ -1228,8 +1266,39 @@ func estimateTokens(text string) int {
 	if text == "" {
 		return 0
 	}
-	charCount := len(text)
-	tokens := (charCount + 3) / 4
+	
+	tokens := 0
+	words := strings.Fields(text)
+	
+	for _, word := range words {
+		isArabic := false
+		for _, r := range word {
+			if r >= 0x0600 && r <= 0x06FF { // Arabic unicode block
+				isArabic = true
+				break
+			}
+		}
+		
+		if isArabic {
+			// Arabic words average ~2.5 tokens
+			tokens += 3
+		} else {
+			// English words average ~1.3 tokens (approx 4 chars per token)
+			wordLen := len(word)
+			tokens += (wordLen + 3) / 4
+		}
+	}
+	
+	// Add tokens for common code punctuations that might be stripped by Fields
+	punctuations := []string{"{", "}", "(", ")", "[", "]", ";", ",", ".", "=", "+", "-", "*", "/", "<", ">", "!", "&", "|"}
+	for _, p := range punctuations {
+		tokens += strings.Count(text, p)
+	}
+	
+	// Add tokens for indentation (4 spaces = 1 token)
+	spaces := strings.Count(text, " ")
+	tokens += spaces / 4
+	
 	if tokens == 0 {
 		return 1
 	}
@@ -1417,4 +1486,33 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(respBody)
+}
+
+func sendMuhiyaMetaChunk(w http.ResponseWriter, log *db.RequestLog, modelName string) {
+	if log.ClientApp != "MuhiyaChat" {
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return
+	}
+
+	metaBytes, err := json.Marshal(map[string]interface{}{
+		"id":     log.ID,
+		"object": "chat.completion.chunk",
+		"model":  modelName,
+		"usage": map[string]interface{}{
+			"prompt_tokens":     log.InputTokens,
+			"completion_tokens": log.OutputTokens,
+			"total_tokens":      log.InputTokens + log.OutputTokens,
+		},
+		"muhiya_log": map[string]interface{}{
+			"cost":   log.Cost,
+			"log_id": log.ID,
+		},
+	})
+	if err == nil {
+		w.Write([]byte(fmt.Sprintf("data: %s\n\n", string(metaBytes))))
+		flusher.Flush()
+	}
 }

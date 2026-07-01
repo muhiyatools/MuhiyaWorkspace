@@ -1,11 +1,17 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"gateway/db"
+	"github.com/redis/go-redis/v9"
 )
 
 type reqRecord struct {
@@ -24,16 +30,39 @@ type KeyLimiter struct {
 }
 
 type RateLimiter struct {
-	mu       sync.RWMutex
-	limiters map[string]*KeyLimiter
-	db       *db.DB
+	mu          sync.RWMutex
+	limiters    map[string]*KeyLimiter
+	db          *db.DB
+	redisClient *redis.Client
+	useRedis    bool
 }
 
 func NewRateLimiter(database *db.DB) *RateLimiter {
-	return &RateLimiter{
+	rl := &RateLimiter{
 		limiters: make(map[string]*KeyLimiter),
 		db:       database,
 	}
+
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL != "" {
+		opt, err := redis.ParseURL(redisURL)
+		if err == nil {
+			rl.redisClient = redis.NewClient(opt)
+			// Ping Redis to verify connection
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := rl.redisClient.Ping(ctx).Err(); err == nil {
+				rl.useRedis = true
+				log.Println("[LIMITER] Connected to Redis for distributed rate limiting.")
+			} else {
+				log.Printf("[LIMITER-WARNING] Failed to ping Redis: %v. Falling back to in-memory.", err)
+			}
+		} else {
+			log.Printf("[LIMITER-WARNING] Failed to parse REDIS_URL %s: %v. Falling back to in-memory.", redisURL, err)
+		}
+	}
+
+	return rl
 }
 
 func (rl *RateLimiter) getLimiter(keyID string) *KeyLimiter {
@@ -104,15 +133,97 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 		}
 	}
 
-	// 4. In-Memory RPM & TPM checks (Still tracked at key level)
-	kl := rl.getLimiter(key.ID)
+	if rl.useRedis {
+		return rl.checkRedisLimits(key.ID, plan.RPMLimit, plan.TPMLimit, promptTokens)
+	}
+
+	return rl.checkInMemoryLimits(key.ID, plan.RPMLimit, plan.TPMLimit, promptTokens)
+}
+
+func (rl *RateLimiter) checkRedisLimits(keyID string, rpmLimit, tpmLimit, promptTokens int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	nowMs := now.UnixMilli()
+	oneMinAgoMs := nowMs - 60000
+
+	rpmKey := fmt.Sprintf("ratelimit:rpm:%s", keyID)
+	tpmKey := fmt.Sprintf("ratelimit:tpm:%s", keyID)
+
+	pipe := rl.redisClient.Pipeline()
+
+	// RPM check: prune old requests, add current request, get count
+	pipe.ZRemRangeByScore(ctx, rpmKey, "0", strconv.FormatInt(oneMinAgoMs, 10))
+	pipe.ZCard(ctx, rpmKey)
+
+	// TPM check: prune old tokens, get all current tokens
+	pipe.ZRemRangeByScore(ctx, tpmKey, "0", strconv.FormatInt(oneMinAgoMs, 10))
+	pipe.ZRangeWithScores(ctx, tpmKey, 0, -1)
+
+	cmds, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("redis operation failed: %w", err)
+	}
+
+	// 1. RPM check
+	rpmCount, _ := cmds[1].(*redis.IntCmd).Result()
+	if rpmLimit > 0 && int(rpmCount) >= rpmLimit {
+		return fmt.Errorf("requests per minute (RPM) limit of %d exceeded", rpmLimit)
+	}
+
+	// 2. TPM check
+	tpmRanges, _ := cmds[3].(*redis.ZSliceCmd).Result()
+	currentTPM := 0
+	for _, z := range tpmRanges {
+		memberStr, ok := z.Member.(string)
+		if ok {
+			parts := strings.Split(memberStr, ":")
+			if len(parts) >= 2 {
+				if tokens, err := strconv.Atoi(parts[1]); err == nil {
+					currentTPM += tokens
+				}
+			}
+		}
+	}
+
+	if tpmLimit > 0 && currentTPM+promptTokens > tpmLimit {
+		return fmt.Errorf("tokens per minute (TPM) limit of %d exceeded (current sliding TPM: %d, requested: %d)", tpmLimit, currentTPM, promptTokens)
+	}
+
+	// 3. Commit new request and token records to Redis
+	pipe2 := rl.redisClient.Pipeline()
+	pipe2.ZAdd(ctx, rpmKey, redis.Z{
+		Score:  float64(nowMs),
+		Member: fmt.Sprintf("%d", now.UnixNano()),
+	})
+	pipe2.Expire(ctx, rpmKey, 75*time.Second)
+
+	if promptTokens > 0 {
+		pipe2.ZAdd(ctx, tpmKey, redis.Z{
+			Score:  float64(nowMs),
+			Member: fmt.Sprintf("%d:%d", now.UnixNano(), promptTokens),
+		})
+		pipe2.Expire(ctx, tpmKey, 75*time.Second)
+	}
+
+	_, err = pipe2.Exec(ctx)
+	if err != nil {
+		log.Printf("[LIMITER-WARNING] Failed to commit limits to Redis: %v", err)
+	}
+
+	return nil
+}
+
+func (rl *RateLimiter) checkInMemoryLimits(keyID string, rpmLimit, tpmLimit, promptTokens int) error {
+	kl := rl.getLimiter(keyID)
 	kl.mu.Lock()
 	defer kl.mu.Unlock()
 
 	now := time.Now()
 	oneMinAgo := now.Add(-60 * time.Second)
 
-	// Prune request records older than 1 minute
+	// Prune requests older than 1 minute
 	reqIdx := 0
 	for i, r := range kl.requests {
 		if r.timestamp.After(oneMinAgo) {
@@ -125,7 +236,7 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 	}
 	kl.requests = kl.requests[reqIdx:]
 
-	// Prune token records older than 1 minute
+	// Prune tokens older than 1 minute
 	tokIdx := 0
 	for i, t := range kl.tokens {
 		if t.timestamp.After(oneMinAgo) {
@@ -139,8 +250,8 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 	kl.tokens = kl.tokens[tokIdx:]
 
 	// RPM check
-	if plan.RPMLimit > 0 && len(kl.requests) >= plan.RPMLimit {
-		return fmt.Errorf("requests per minute (RPM) limit of %d exceeded", plan.RPMLimit)
+	if rpmLimit > 0 && len(kl.requests) >= rpmLimit {
+		return fmt.Errorf("requests per minute (RPM) limit of %d exceeded", rpmLimit)
 	}
 
 	// TPM check
@@ -148,11 +259,11 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 	for _, t := range kl.tokens {
 		currentTPM += t.tokens
 	}
-	if plan.TPMLimit > 0 && currentTPM+promptTokens > plan.TPMLimit {
-		return fmt.Errorf("tokens per minute (TPM) limit of %d exceeded (current sliding TPM: %d, requested: %d)", plan.TPMLimit, currentTPM, promptTokens)
+	if tpmLimit > 0 && currentTPM+promptTokens > tpmLimit {
+		return fmt.Errorf("tokens per minute (TPM) limit of %d exceeded (current sliding TPM: %d, requested: %d)", tpmLimit, currentTPM, promptTokens)
 	}
 
-	// Admission accepted
+	// Record request and tokens
 	kl.requests = append(kl.requests, reqRecord{timestamp: now})
 	if promptTokens > 0 {
 		kl.tokens = append(kl.tokens, tokenRecord{timestamp: now, tokens: promptTokens})
@@ -165,6 +276,20 @@ func (rl *RateLimiter) RecordTokens(keyID string, tokens int) {
 	if tokens <= 0 {
 		return
 	}
+
+	if rl.useRedis {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		tpmKey := fmt.Sprintf("ratelimit:tpm:%s", keyID)
+		now := time.Now()
+		rl.redisClient.ZAdd(ctx, tpmKey, redis.Z{
+			Score:  float64(now.UnixMilli()),
+			Member: fmt.Sprintf("%d:%d", now.UnixNano(), tokens),
+		})
+		rl.redisClient.Expire(ctx, tpmKey, 75*time.Second)
+		return
+	}
+
 	kl := rl.getLimiter(keyID)
 	kl.mu.Lock()
 	defer kl.mu.Unlock()
