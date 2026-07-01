@@ -16,3 +16,4 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpassword}
+      - REDIS_URL=${REDIS_URL}
