@@ -419,24 +419,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Load Dashboard Stats
     function loadDashboardStats() {
-        fetch('/api/stats')
-            .then(res => res.json())
-            .then(data => {
-                document.getElementById('stat-requests').innerText = data.total_requests.toLocaleString();
-                document.getElementById('stat-cost').innerText = '$' + data.total_cost.toFixed(6);
-                document.getElementById('stat-tokens').innerText = data.total_tokens.toLocaleString();
-                document.getElementById('stat-latency').innerText = Math.round(data.avg_latency) + ' ms';
-                document.getElementById('stat-success').innerText = data.success_rate.toFixed(1) + '%';
-                
-                // Caching stats
-                document.getElementById('stat-cache-hit-rate').innerText = data.cache_hit_rate.toFixed(1) + '%';
-                document.getElementById('stat-cache-reads').innerText = data.cache_read_tokens.toLocaleString();
-                document.getElementById('stat-cache-writes').innerText = data.cache_write_tokens.toLocaleString();
-                
-                renderCharts(data);
-                loadBudgetWindowsDashboard();
-            })
-            .catch(err => console.error('Error loading dashboard stats:', err));
+        Promise.all([
+            fetch('/api/stats').then(res => res.json()),
+            fetch('/api/users').then(res => res.json()),
+            fetch('/api/keys').then(res => res.json())
+        ]).then(([data, users, keys]) => {
+            state.users = users;
+            state.keys = keys;
+
+            document.getElementById('stat-requests').innerText = data.total_requests.toLocaleString();
+            document.getElementById('stat-cost').innerText = '$' + data.total_cost.toFixed(6);
+            document.getElementById('stat-tokens').innerText = data.total_tokens.toLocaleString();
+            document.getElementById('stat-latency').innerText = Math.round(data.avg_latency) + ' ms';
+            document.getElementById('stat-success').innerText = data.success_rate.toFixed(1) + '%';
+            
+            // Caching stats
+            document.getElementById('stat-cache-hit-rate').innerText = data.cache_hit_rate.toFixed(1) + '%';
+            document.getElementById('stat-cache-reads').innerText = data.cache_read_tokens.toLocaleString();
+            document.getElementById('stat-cache-writes').innerText = data.cache_write_tokens.toLocaleString();
+
+            // 4 New Dashboard stats
+            document.getElementById('stat-active-keys').innerText = keys.length.toLocaleString();
+            document.getElementById('stat-active-users').innerText = users.length.toLocaleString();
+            
+            const costPer1K = data.total_requests > 0 ? (data.total_cost / data.total_requests * 1000) : 0;
+            document.getElementById('stat-cost-1k').innerText = '$' + costPer1K.toFixed(4);
+
+            const avgTokensReq = data.total_requests > 0 ? Math.round(data.total_tokens / data.total_requests) : 0;
+            document.getElementById('stat-avg-tokens-req').innerText = avgTokensReq.toLocaleString();
+            
+            renderCharts(data);
+            renderBudgetWindows(users);
+        })
+        .catch(err => console.error('Error loading dashboard stats:', err));
     }
 
     function renderCharts(data) {
@@ -528,50 +543,46 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function loadBudgetWindowsDashboard() {
-        fetch('/api/users')
-            .then(res => res.json())
-            .then(users => {
-                const container = document.getElementById('dashboard-budget-windows');
-                container.innerHTML = '';
+    function renderBudgetWindows(users) {
+        const container = document.getElementById('dashboard-budget-windows');
+        if (!container) return;
+        container.innerHTML = '';
 
-                let hasWindows = false;
+        let hasWindows = false;
 
-                users.forEach(u => {
-                    if (!u.budget_usage || u.budget_usage.length === 0) return;
+        users.forEach(u => {
+            if (!u.budget_usage || u.budget_usage.length === 0) return;
 
-                    hasWindows = true;
-                    u.budget_usage.forEach(bu => {
-                        const spent = bu.current_spent;
-                        const percentage = Math.min((spent / bu.budget_usd) * 100, 100);
-                        let colorClass = '';
-                        if (percentage >= 90) colorClass = 'danger';
-                        else if (percentage >= 70) colorClass = 'warning';
+            hasWindows = true;
+            u.budget_usage.forEach(bu => {
+                const spent = bu.current_spent;
+                const percentage = Math.min((spent / bu.budget_usd) * 100, 100);
+                let colorClass = '';
+                if (percentage >= 90) colorClass = 'danger';
+                else if (percentage >= 70) colorClass = 'warning';
 
-                        const card = document.createElement('div');
-                        card.className = 'budget-progress-card';
-                        card.innerHTML = `
-                            <div class="budget-progress-header">
-                                <span class="budget-user-name">${u.name}</span>
-                                <span class="budget-window-label">${bu.name}</span>
-                            </div>
-                            <div class="budget-progress-bar-container">
-                                <div class="budget-progress-bar ${colorClass}" style="width: ${percentage}%"></div>
-                            </div>
-                            <div class="budget-progress-footer">
-                                <span class="budget-spent">$${spent.toFixed(6)} spent</span>
-                                <span class="budget-total">limit $${bu.budget_usd.toFixed(2)}</span>
-                            </div>
-                        `;
-                        container.appendChild(card);
-                    });
-                });
+                const card = document.createElement('div');
+                card.className = 'budget-progress-card';
+                card.innerHTML = `
+                    <div class="budget-progress-header">
+                        <span class="budget-user-name">${u.name}</span>
+                        <span class="budget-window-label">${bu.name}</span>
+                    </div>
+                    <div class="budget-progress-bar-container">
+                        <div class="budget-progress-bar ${colorClass}" style="width: ${percentage}%"></div>
+                    </div>
+                    <div class="budget-progress-footer">
+                        <span class="budget-spent">$${spent.toFixed(6)} spent</span>
+                        <span class="budget-total">limit $${bu.budget_usd.toFixed(2)}</span>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        });
 
-                if (!hasWindows) {
-                    container.innerHTML = `<div class="text-muted">No budget windows configured for active user plans. Set them up in the Plans tab.</div>`;
-                }
-            })
-            .catch(err => console.error("Error loading dashboard budgets:", err));
+        if (!hasWindows) {
+            container.innerHTML = `<div class="text-muted">No budget windows configured for active user plans. Set them up in the Plans tab.</div>`;
+        }
     }
 
     // --- Users CRUD ---
@@ -965,64 +976,107 @@ document.addEventListener('DOMContentLoaded', () => {
         ]).then(([logs, users]) => {
             state.logs = logs;
             state.users = users;
-            const tbody = document.querySelector('#logs-table tbody');
-            if (!logs || logs.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="12" class="text-muted text-center" style="text-align: center;">No gateway request logs audited yet.</td></tr>`;
-                return;
+
+            // Dynamically populate model filters
+            const modelFilterSelect = document.getElementById('log-filter-model');
+            if (modelFilterSelect) {
+                const currentVal = modelFilterSelect.value;
+                const models = [...new Set(logs.map(l => l.model_id))].filter(Boolean);
+                modelFilterSelect.innerHTML = '<option value="all">All Models</option>' + 
+                    models.map(m => `<option value="${m}">${m}</option>`).join('');
+                modelFilterSelect.value = currentVal;
             }
-            tbody.innerHTML = logs.map(l => {
-                const statusClass = l.status_code >= 200 && l.status_code < 300 ? 'success' : 'error';
-                const timeStr = new Date(l.created_at).toLocaleTimeString();
-                
-                const ownerUser = users.find(u => u.id === l.user_id);
-                const ownerName = ownerUser ? ownerUser.name : 'Unknown User';
 
-                // Format cost to 6 decimals
-                const costFormatted = '$' + l.cost.toFixed(6);
-
-                // Display token breakdown
-                const tokensText = `${l.input_tokens} / ${l.output_tokens} <small style="color:var(--text-muted-dark)">(R:${l.cache_read_tokens} W:${l.cache_write_tokens})</small>`;
-
-                // Dynamic client app badge
-                const app = l.client_app || 'API Client';
-                const appLower = app.toLowerCase();
-                let clientAppBadge = '';
-                if (appLower.includes('muhiyaachat') || appLower.includes('muhiya chat')) {
-                    clientAppBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); text-transform:none;"><i class="fa-solid fa-comment-dots" style="margin-right: 4px;"></i>${app}</span>`;
-                } else if (appLower.includes('claude code') || appLower.includes('claude-code') || appLower.includes('claude')) {
-                    clientAppBadge = `<span class="badge" style="background: rgba(168, 85, 247, 0.1); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.2); text-transform:none;">${app}</span>`;
-                } else if (appLower.includes('curl')) {
-                    clientAppBadge = `<span class="badge" style="background: rgba(113, 113, 122, 0.1); color: #d4d4d8; border: 1px solid rgba(113, 113, 122, 0.2); text-transform:none;">${app}</span>`;
-                } else if (appLower.includes('browser') || appLower.includes('mozilla') || appLower.includes('chrome')) {
-                    clientAppBadge = `<span class="badge" style="background: rgba(245, 158, 11, 0.1); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.2); text-transform:none;">${app}</span>`;
-                } else if (appLower.includes('openai')) {
-                    clientAppBadge = `<span class="badge" style="background: rgba(59, 130, 246, 0.1); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.2); text-transform:none;">${app}</span>`;
-                } else if (appLower.includes('postman')) {
-                    clientAppBadge = `<span class="badge" style="background: rgba(236, 72, 153, 0.1); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.2); text-transform:none;">${app}</span>`;
-                } else {
-                    clientAppBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.1); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.2); text-transform:none;">${app}</span>`;
-                }
-
-                return `
-                    <tr>
-                        <td>${timeStr}</td>
-                        <td><small><code>${l.virtual_key_id}</code></small></td>
-                        <td><strong>${ownerName}</strong></td>
-                        <td>${clientAppBadge}</td>
-                        <td><strong>${l.model_id}</strong></td>
-                        <td><code>${l.request_path}</code></td>
-                        <td><span class="status-pill ${statusClass}">${l.status_code}</span></td>
-                        <td>${tokensText}</td>
-                        <td><strong>${l.latency_ms} ms</strong></td>
-                        <td><strong style="color:#10b981;">${costFormatted}</strong></td>
-                        <td><small class="text-muted" style="color:var(--danger); font-size:0.75rem;">${l.error_message ? l.error_message.substring(0, 30) + '...' : '-'}</small></td>
-                        <td>
-                            <button class="btn btn-secondary btn-sm" onclick="showLogDetails('${l.id}')"><i class="fa-solid fa-circle-info"></i> Details</button>
-                        </td>
-                    </tr>
-                `;
-            }).join('');
+            filterAndRenderLogs();
         }).catch(err => console.error("Error loading logs:", err));
+    }
+
+    function filterAndRenderLogs() {
+        const search = (document.getElementById('log-search')?.value || '').toLowerCase();
+        const status = document.getElementById('log-filter-status')?.value || 'all';
+        const model = document.getElementById('log-filter-model')?.value || 'all';
+        const tbody = document.querySelector('#logs-table tbody');
+        if (!tbody) return;
+
+        const filtered = (state.logs || []).filter(l => {
+            const ownerUser = (state.users || []).find(u => u.id === l.user_id);
+            const ownerName = ownerUser ? ownerUser.name.toLowerCase() : '';
+            const app = (l.client_app || '').toLowerCase();
+            const err = (l.error_message || '').toLowerCase();
+            
+            const matchesSearch = 
+                l.virtual_key_id.toLowerCase().includes(search) || 
+                l.request_path.toLowerCase().includes(search) || 
+                l.model_id.toLowerCase().includes(search) ||
+                ownerName.includes(search) ||
+                app.includes(search) ||
+                err.includes(search);
+            
+            const matchesStatus = 
+                status === 'all' || 
+                (status === 'success' && l.status_code >= 200 && l.status_code < 300) || 
+                (status === 'error' && l.status_code >= 400);
+            
+            const matchesModel = 
+                model === 'all' || 
+                l.model_id === model;
+            
+            return matchesSearch && matchesStatus && matchesModel;
+        });
+
+        if (filtered.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="12" class="text-muted text-center" style="text-align: center;">No matching gateway request logs found.</td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = filtered.map(l => {
+            const statusClass = l.status_code >= 200 && l.status_code < 300 ? 'success' : 'error';
+            const timeStr = new Date(l.created_at).toLocaleTimeString();
+            
+            const ownerUser = (state.users || []).find(u => u.id === l.user_id);
+            const ownerName = ownerUser ? ownerUser.name : 'Unknown User';
+
+            const costFormatted = '$' + l.cost.toFixed(6);
+            const tokensText = `${l.input_tokens} / ${l.output_tokens} <small style="color:var(--text-muted-dark)">(R:${l.cache_read_tokens} W:${l.cache_write_tokens})</small>`;
+
+            const app = l.client_app || 'API Client';
+            const appLower = app.toLowerCase();
+            let clientAppBadge = '';
+            if (appLower.includes('muhiyaachat') || appLower.includes('muhiya chat')) {
+                clientAppBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); text-transform:none;"><i class="fa-solid fa-comment-dots" style="margin-right: 4px;"></i>${app}</span>`;
+            } else if (appLower.includes('claude code') || appLower.includes('claude-code') || appLower.includes('claude')) {
+                clientAppBadge = `<span class="badge" style="background: rgba(168, 85, 247, 0.1); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.2); text-transform:none;">${app}</span>`;
+            } else if (appLower.includes('curl')) {
+                clientAppBadge = `<span class="badge" style="background: rgba(113, 113, 122, 0.1); color: #d4d4d8; border: 1px solid rgba(113, 113, 122, 0.2); text-transform:none;">${app}</span>`;
+            } else if (appLower.includes('browser') || appLower.includes('mozilla') || appLower.includes('chrome')) {
+                clientAppBadge = `<span class="badge" style="background: rgba(245, 158, 11, 0.1); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.2); text-transform:none;">${app}</span>`;
+            } else if (appLower.includes('openai')) {
+                clientAppBadge = `<span class="badge" style="background: rgba(59, 130, 246, 0.1); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.2); text-transform:none;">${app}</span>`;
+            } else if (appLower.includes('postman')) {
+                clientAppBadge = `<span class="badge" style="background: rgba(236, 72, 153, 0.1); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.2); text-transform:none;">${app}</span>`;
+            } else {
+                clientAppBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.1); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.2); text-transform:none;">${app}</span>`;
+            }
+
+            return `
+                <tr>
+                    <td>${timeStr}</td>
+                    <td><small><code>${l.virtual_key_id}</code></small></td>
+                    <td><strong>${ownerName}</strong></td>
+                    <td>${clientAppBadge}</td>
+                    <td><strong>${l.model_id}</strong></td>
+                    <td><code>${l.request_path}</code></td>
+                    <td><span class="status-pill ${statusClass}">${l.status_code}</span></td>
+                    <td>${tokensText}</td>
+                    <td><strong>${l.latency_ms} ms</strong></td>
+                    <td><strong style="color:#10b981;">${costFormatted}</strong></td>
+                    <td><small class="text-muted" style="color:var(--danger); font-size:0.75rem;">${l.error_message ? l.error_message.substring(0, 30) + '...' : '-'}</small></td>
+                    <td>
+                        <button class="btn btn-secondary btn-sm" onclick="showLogDetails('${l.id}')"><i class="fa-solid fa-circle-info"></i> Details</button>
+                    </td>
+                </tr>
+            `;
+        }).join('');
     }
 
     // --- System Settings ---
@@ -1387,4 +1441,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Load initial tab data
     loadTabData('dashboard');
+
+    // Setup request log filters event listeners
+    document.getElementById('log-search')?.addEventListener('input', filterAndRenderLogs);
+    document.getElementById('log-filter-status')?.addEventListener('change', filterAndRenderLogs);
+    document.getElementById('log-filter-model')?.addEventListener('change', filterAndRenderLogs);
+
+    // Real-time auto-refresh: polls active tab stats/logs every 5 seconds
+    setInterval(() => {
+        const activeTab = document.querySelector('.nav-item.active');
+        if (!activeTab) return;
+        const tab = activeTab.getAttribute('data-tab');
+        if (tab === 'dashboard') {
+            loadDashboardStats();
+        } else if (tab === 'logs') {
+            loadLogs();
+        }
+    }, 5000);
 });
