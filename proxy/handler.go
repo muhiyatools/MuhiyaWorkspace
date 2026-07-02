@@ -281,6 +281,16 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// MuhiyaChat native agent loop: when tools are configured and the client is
+	// MuhiyaChat, run the in-gateway tool loop. It returns false (and does not
+	// write a response) when the resolved provider is Anthropic-format, so the
+	// standard proxy path below handles it. All other traffic skips this.
+	if toolSettings := LoadToolSettings(h.db); h.shouldRunAgentLoop(r, &oaiReq, toolSettings) {
+		if h.serveMuhiyaAgent(w, r, &oaiReq, key, toolSettings) {
+			return
+		}
+	}
+
 	isRouterRequest := oaiReq.Model == "muhiya-ai-router"
 	var targetModel *db.Model
 	var fallbackModels []*db.Model

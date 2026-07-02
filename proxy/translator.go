@@ -19,8 +19,9 @@ type OpenAIMessage struct {
 }
 
 type OpenAIToolCall struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"` // "function"
+	Index    *int               `json:"index,omitempty"` // set on streaming deltas; nil on complete calls
+	ID       string             `json:"id"`
+	Type     string             `json:"type"` // "function"
 	Function OpenAIFunctionCall `json:"function"`
 }
 
