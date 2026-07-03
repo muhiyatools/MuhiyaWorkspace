@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -98,9 +99,8 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	tc := &ToolContext{DB: h.db, Settings: settings, Complexity: complexity}
 	tools := BuildToolSchemas(settings)
 
-	// Build the working message list: inject tool-use guidance so the model
-	// knows the tools exist and how to cite results.
-	messages := injectToolGuidance(oaiReq.Messages)
+	sourcesSkill := h.loadSearchSourcesSkill()
+	messages := injectToolGuidance(oaiReq.Messages, sourcesSkill)
 
 	// Set up the SSE stream once.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -375,8 +375,11 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 
 // injectToolGuidance appends tool-usage guidance to the system prompt (or adds
 // a system message if none exists) without disturbing the rest of the history.
-func injectToolGuidance(messages []OpenAIMessage) []OpenAIMessage {
-	guidance := "You have a live tool available: `web_search` for current information (news, prices, weather, anything recent or uncertain). When a question is time-sensitive, factual, or requires real-time information, CALL the `web_search` tool instead of guessing. After a web_search, cite sources inline as [1], [2]. Never invent facts."
+func injectToolGuidance(messages []OpenAIMessage, sourcesSkill string) []OpenAIMessage {
+	guidance := "You have a live tool available: `web_search` for current information. When a question is time-sensitive, factual, or requires real-time information, CALL the `web_search` tool instead of guessing. After a web_search, cite sources inline as [1], [2]. Never invent facts.\n\n"
+	if sourcesSkill != "" {
+		guidance += "IMPORTANT: When calling `web_search`, you MUST format your search query to target the trusted sources defined below using the `site:domain` Google Search syntax (e.g., `query (site:imf.org OR site:worldbank.org)`). If no specific topic matches, search normally. Only search once.\n\n" + sourcesSkill
+	}
 
 	out := make([]OpenAIMessage, len(messages))
 	copy(out, messages)
@@ -392,6 +395,70 @@ func injectToolGuidance(messages []OpenAIMessage) []OpenAIMessage {
 	// No string system message found — prepend one.
 	return append([]OpenAIMessage{{Role: "system", Content: guidance}}, out...)
 }
+
+func (h *ProxyHandler) loadSearchSourcesSkill() string {
+	// 1. Try to read from db
+	val, _ := h.db.GetSetting("muhiya_chat_search_sources")
+	if val != "" {
+		return val
+	}
+
+	// 2. Try to read from file
+	var content []byte
+	var err error
+	paths := []string{
+		"proxy/skills/search_sources.md",
+		"./proxy/skills/search_sources.md",
+		"skills/search_sources.md",
+		"../proxy/skills/search_sources.md",
+	}
+	for _, p := range paths {
+		content, err = os.ReadFile(p)
+		if err == nil {
+			break
+		}
+	}
+
+	skillContent := ""
+	if len(content) > 0 {
+		skillContent = string(content)
+	} else {
+		skillContent = defaultSearchSourcesSkill
+	}
+
+	// Save to db so it is editable
+	_ = h.db.SetSetting("muhiya_chat_search_sources", skillContent)
+	return skillContent
+}
+
+const defaultSearchSourcesSkill = `# Trusted Search Sources & Scoping Guidance
+
+Use these domain targets (with ` + "`site:domain`" + `) to retrieve high-quality, relevant data based on query categories:
+
+## 1. Biography, History & General Reference
+*   **Target Domains**: ` + "`wikipedia.org`, `britannica.com`, `imdb.com`, `biography.com`" + `
+*   **Intent**: Biography queries (\"Who is X\"), historical events, entities, cast details, definitions, general facts.
+*   **Query Example**: ` + "`site:wikipedia.org OR site:britannica.com albert einstein biography`" + `
+
+## 2. Economy, Finance & Markets
+*   **Target Domains**: ` + "`imf.org`, `worldbank.org`, `tradingeconomics.com`, `bloomberg.com`, `reuters.com`, `investopedia.com`, `finance.yahoo.com`" + `
+*   **Intent**: GDP figures, inflation, interest rates, currency exchange, company revenue, financial market trends.
+*   **Query Example**: ` + "`site:imf.org OR site:tradingeconomics.com egypt gdp growth`" + `
+
+## 3. Sports & Football
+*   **Target Domains**: ` + "`fifa.com`, `uefa.com`, `espn.com`, `skysports.com`, `goal.com`, `whoscored.com`, `transfermarkt.com`, `kooora.com`" + `
+*   **Intent**: Real-time scores, standings, league tables, fixture schedules, transfer news, player stats.
+*   **Query Example**: ` + "`site:kooora.com OR site:goal.com el ahly match results`" + `
+
+## 4. Politics, Government & Global News
+*   **Target Domains**: ` + "`reuters.com`, `apnews.com`, `bbc.com`, `aljazeera.com`, `cnn.com`" + `
+*   **Intent**: Elections, state policies, treaties, global conflicts, governmental updates, breaking news.
+*   **Query Example**: ` + "`site:reuters.com OR site:apnews.com france presidential election results`" + `
+
+## 5. Technology, Coding & Science
+*   **Target Domains**: ` + "`techcrunch.com`, `wired.com`, `theverge.com`, `github.com`, `nature.com`, `arxiv.org`" + `
+*   **Intent**: AI/ML research papers, programming repositories, hardware specs, space/physics news, tech announcements.
+*   **Query Example**: ` + "`site:arxiv.org machine learning transformer architecture`" + ``
 
 // --- Streaming helpers ------------------------------------------------------
 

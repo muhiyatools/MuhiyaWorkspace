@@ -76,27 +76,20 @@ func TestParseSerperOrganic(t *testing.T) {
 	}
 }
 
-func TestGetScopedQuery(t *testing.T) {
+func TestStripSiteFilters(t *testing.T) {
 	testCases := []struct {
-		query    string
-		isScoped bool
-		contains string
+		input    string
+		expected string
 	}{
-		{"Egypt GDP growth", true, "imf.org"},
-		{"الدوري المصري الممتاز", true, "kooora.com"},
-		{"Who is the president of France?", true, "wikipedia.org"},
-		{"latest news about election", true, "reuters.com"},
-		{"machine learning research papers", true, "arxiv.org"},
-		{"weather in Cairo", false, ""},
+		{"Egypt GDP growth (site:imf.org OR site:worldbank.org)", "Egypt GDP growth"},
+		{"latest news site:reuters.com", "latest news"},
+		{"weather in Cairo", "weather in Cairo"},
 	}
 
 	for _, tc := range testCases {
-		got, ok := getScopedQuery(tc.query)
-		if ok != tc.isScoped {
-			t.Errorf("query %q: expected isScoped = %v, got %v", tc.query, tc.isScoped, ok)
-		}
-		if tc.isScoped && !strings.Contains(got, tc.contains) {
-			t.Errorf("query %q: expected scoped query to contain %q, got %q", tc.query, tc.contains, got)
+		got := stripSiteFilters(tc.input)
+		if got != tc.expected {
+			t.Errorf("stripSiteFilters(%q) = %q; expected %q", tc.input, got, tc.expected)
 		}
 	}
 }

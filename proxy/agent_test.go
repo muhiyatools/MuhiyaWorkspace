@@ -75,7 +75,7 @@ func TestInjectToolGuidanceAppendsToSystem(t *testing.T) {
 		{Role: "system", Content: "You are Muhiya."},
 		{Role: "user", Content: "hi"},
 	}
-	out := injectToolGuidance(msgs)
+	out := injectToolGuidance(msgs, "dummy skill")
 	if len(out) != 2 {
 		t.Fatalf("should not add a message when a system prompt exists, got %d", len(out))
 	}
@@ -91,7 +91,7 @@ func TestInjectToolGuidanceAppendsToSystem(t *testing.T) {
 
 func TestInjectToolGuidancePrependsWhenNoSystem(t *testing.T) {
 	msgs := []OpenAIMessage{{Role: "user", Content: "hi"}}
-	out := injectToolGuidance(msgs)
+	out := injectToolGuidance(msgs, "dummy skill")
 	if len(out) != 2 || out[0].Role != "system" {
 		t.Fatalf("expected a prepended system message, got %+v", out)
 	}
