@@ -32,16 +32,16 @@ func TestToolCallAccumulatorIndexed(t *testing.T) {
 
 func TestToolCallAccumulatorTwoIndexed(t *testing.T) {
 	a := newToolCallAccumulator()
-	a.add([]OpenAIToolCall{{Index: iptr(0), ID: "c1", Function: OpenAIFunctionCall{Name: "football_standings"}}})
+	a.add([]OpenAIToolCall{{Index: iptr(0), ID: "c1", Function: OpenAIFunctionCall{Name: "search_places"}}})
 	a.add([]OpenAIToolCall{{Index: iptr(1), ID: "c2", Function: OpenAIFunctionCall{Name: "web_search"}}})
-	a.add([]OpenAIToolCall{{Index: iptr(0), Function: OpenAIFunctionCall{Arguments: `{"league":"EPL"}`}}})
+	a.add([]OpenAIToolCall{{Index: iptr(0), Function: OpenAIFunctionCall{Arguments: `{"query":"restaurants"}`}}})
 	a.add([]OpenAIToolCall{{Index: iptr(1), Function: OpenAIFunctionCall{Arguments: `{"query":"x"}`}}})
 
 	calls := a.finalize()
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 calls, got %d", len(calls))
 	}
-	if calls[0].Function.Name != "football_standings" || calls[1].Function.Name != "web_search" {
+	if calls[0].Function.Name != "search_places" || calls[1].Function.Name != "web_search" {
 		t.Fatalf("order/name wrong: %+v", calls)
 	}
 }
@@ -49,14 +49,14 @@ func TestToolCallAccumulatorTwoIndexed(t *testing.T) {
 func TestToolCallAccumulatorSequentialNoIndex(t *testing.T) {
 	a := newToolCallAccumulator()
 	// No index provided — rely on the sequential heuristic.
-	a.add([]OpenAIToolCall{{ID: "c1", Function: OpenAIFunctionCall{Name: "football_live_scores"}}})
+	a.add([]OpenAIToolCall{{ID: "c1", Function: OpenAIFunctionCall{Name: "get_weather"}}})
 	a.add([]OpenAIToolCall{{Function: OpenAIFunctionCall{Arguments: `{}`}}})
 
 	calls := a.finalize()
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].Function.Name != "football_live_scores" || calls[0].Function.Arguments != "{}" {
+	if calls[0].Function.Name != "get_weather" || calls[0].Function.Arguments != "{}" {
 		t.Fatalf("sequential accumulation failed: %+v", calls[0])
 	}
 }

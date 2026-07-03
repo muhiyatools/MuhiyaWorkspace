@@ -13,19 +13,19 @@ import (
 // ============================================================================
 // Native Tool Layer
 // ----------------------------------------------------------------------------
-// This file defines the gateway's built-in agentic tools (web search + live
-// football data). Tools are executed INSIDE the gateway during the MuhiyaChat
+// This file defines the gateway's built-in agentic tools (web search).
+// Tools are executed INSIDE the gateway during the MuhiyaChat
 // agent loop (see agent.go). Each executor returns:
 //   - LLMContent: compact text fed back to the model as the tool result
 //   - ClientEvent: an optional structured payload streamed to the MuhiyaChat
-//     UI (rendered as source citations or live football cards)
+//     UI (rendered as source citations)
 //
 // These files are additive and are only invoked when a request opts into the
 // agent loop (X-Client-App: MuhiyaChat). All other proxy paths are untouched.
 // ============================================================================
 
-// toolHTTPClient is a short-timeout client for external tool APIs (search,
-// football). It is intentionally separate from the long-lived LLM httpClient.
+// toolHTTPClient is a short-timeout client for external tool APIs (search).
+// It is intentionally separate from the long-lived LLM httpClient.
 var toolHTTPClient = &http.Client{
 	Timeout: 12 * time.Second,
 }

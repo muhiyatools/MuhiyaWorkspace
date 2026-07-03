@@ -116,9 +116,14 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	msgID := "chatcmpl-" + uuid.New().String()
 	var totalInput, totalOutput, totalCacheRead int
 	var streamError string
+	hasSearched := false
 
 	for iter := 0; iter < maxAgentIterations; iter++ {
-		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, tools)
+		var activeTools []OpenAITool
+		if !hasSearched {
+			activeTools = tools
+		}
+		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, activeTools)
 		totalInput += turn.usage.PromptTokens
 		totalOutput += turn.usage.CompletionTokens
 		if turn.usage.PromptTokensDetails != nil {
@@ -146,6 +151,9 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 		// Execute each tool call in order, streaming status + result events.
 		for _, call := range turn.toolCalls {
+			if call.Function.Name == "web_search" {
+				hasSearched = true
+			}
 			label := toolStatusLabels[call.Function.Name]
 			if label == "" {
 				label = "Working"
@@ -276,7 +284,10 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 
 	temperature := 0.7
 	maxTokens := 4096
-	toolChoice := interface{}("auto")
+	var toolChoice interface{}
+	if len(tools) > 0 {
+		toolChoice = "auto"
+	}
 	upstreamReq := OpenAIRequest{
 		Model:         model.TargetModel,
 		Messages:      messages,
@@ -365,7 +376,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 // injectToolGuidance appends tool-usage guidance to the system prompt (or adds
 // a system message if none exists) without disturbing the rest of the history.
 func injectToolGuidance(messages []OpenAIMessage) []OpenAIMessage {
-	guidance := "You have live tools available: `web_search` for current information (news, prices, weather, anything recent or uncertain) and the `football_*` tools for real-time football data (live scores, fixtures, standings, teams, head-to-head). When a question is time-sensitive, factual, or about football, CALL the appropriate tool instead of guessing. After a web_search, cite sources inline as [1], [2]. Never invent scores, standings, or facts."
+	guidance := "You have a live tool available: `web_search` for current information (news, prices, weather, anything recent or uncertain). When a question is time-sensitive, factual, or requires real-time information, CALL the `web_search` tool instead of guessing. After a web_search, cite sources inline as [1], [2]. Never invent facts."
 
 	out := make([]OpenAIMessage, len(messages))
 	copy(out, messages)
