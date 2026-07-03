@@ -45,6 +45,9 @@ var toolStatusLabels = map[string]string{
 // client must not have supplied its own tools, and at least one tool key must
 // be configured.
 func (h *ProxyHandler) shouldRunAgentLoop(r *http.Request, oaiReq *OpenAIRequest, settings ToolSettings) bool {
+	if oaiReq.WebSearch != nil && !*oaiReq.WebSearch {
+		return false
+	}
 	return getClientAppName(r) == "MuhiyaChat" &&
 		oaiReq.Stream &&
 		len(oaiReq.Tools) == 0 &&

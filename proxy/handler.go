@@ -626,6 +626,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(origBody, &bodyMap)
 	bodyMap["model"] = model.TargetModel
+	delete(bodyMap, "web_search")
 
 	stream, _ := bodyMap["stream"].(bool)
 	if stream {

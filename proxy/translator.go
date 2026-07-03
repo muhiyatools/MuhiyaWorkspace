@@ -62,6 +62,7 @@ type OpenAIRequest struct {
 	ToolChoice          interface{}          `json:"tool_choice,omitempty"`
 	ReasoningEffort     *string              `json:"reasoning_effort,omitempty"`
 	Thinking            *AnthropicThinking   `json:"thinking,omitempty"`
+	WebSearch           *bool                `json:"web_search,omitempty"`
 }
 
 type PromptTokensDetail struct {
