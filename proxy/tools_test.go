@@ -75,3 +75,28 @@ func TestParseSerperOrganic(t *testing.T) {
 		t.Fatalf("expected date prefixed in snippet, got %q", sources[0].Snippet)
 	}
 }
+
+func TestGetScopedQuery(t *testing.T) {
+	testCases := []struct {
+		query    string
+		isScoped bool
+		contains string
+	}{
+		{"Egypt GDP growth", true, "imf.org"},
+		{"الدوري المصري الممتاز", true, "kooora.com"},
+		{"Who is the president of France?", true, "wikipedia.org"},
+		{"latest news about election", true, "reuters.com"},
+		{"machine learning research papers", true, "arxiv.org"},
+		{"weather in Cairo", false, ""},
+	}
+
+	for _, tc := range testCases {
+		got, ok := getScopedQuery(tc.query)
+		if ok != tc.isScoped {
+			t.Errorf("query %q: expected isScoped = %v, got %v", tc.query, tc.isScoped, ok)
+		}
+		if tc.isScoped && !strings.Contains(got, tc.contains) {
+			t.Errorf("query %q: expected scoped query to contain %q, got %q", tc.query, tc.contains, got)
+		}
+	}
+}

@@ -65,7 +65,13 @@ func (tc *ToolContext) execWebSearch(args map[string]interface{}) ToolExecution 
 	var err error
 
 	if tc.Settings.SerperAPIKey != "" {
-		sources, answer, err = tc.serperSearch(query, recency)
+		scopedQuery, isScoped := getScopedQuery(query)
+		if isScoped {
+			sources, answer, err = tc.serperSearch(scopedQuery, recency)
+		}
+		if !isScoped || err != nil || len(sources) == 0 {
+			sources, answer, err = tc.serperSearch(query, recency)
+		}
 	} else {
 		err = fmt.Errorf("no search provider configured")
 	}
@@ -273,4 +279,91 @@ func truncate(s string, limit int) string {
 		return s
 	}
 	return s[:limit-3] + "..."
+}
+
+// getScopedQuery classifies the search query by matching keywords (English and Arabic)
+// with word boundaries and returns a modified query targeting specific high-quality domains.
+func getScopedQuery(query string) (string, bool) {
+	lower := strings.ToLower(query)
+
+	// 1. Biography, General Facts & Entities (Checked first to prioritize "who is <politician>")
+	biographyKeywords := []string{
+		"who is", "born", "died", "biography", "founder", "ceo", "actor", "history", "wikipedia", "britannica",
+		"من هو", "من هي", "ولد", "توفي", "سيرة", "ويكيبيديا", "تاريخ", "مؤسس",
+	}
+	for _, k := range biographyKeywords {
+		if containsWord(lower, k) {
+			return query + " (site:wikipedia.org OR site:britannica.com OR site:imdb.com OR site:biography.com)", true
+		}
+	}
+
+	// 2. Sports & Football
+	sportsKeywords := []string{
+		"football", "soccer", "match", "fixture", "standing", "league", "cup", "score", "vs", "versus", "player", "goals", "transfer",
+		"كرة", "كورة", "الدوري", "ترتيب", "مباراة", "مباريات", "الاهلي", "الزمالك", "اهداف", "كاس",
+	}
+	for _, k := range sportsKeywords {
+		if containsWord(lower, k) {
+			return query + " (site:fifa.com OR site:uefa.com OR site:espn.com OR site:skysports.com OR site:goal.com OR site:whoscored.com OR site:transfermarkt.com OR site:kooora.com)", true
+		}
+	}
+
+	// 3. Economy & Finance
+	economyKeywords := []string{
+		"gdp", "inflation", "economy", "economic", "tradingeconomics", "stock", "finance", "currency", "exchange", "revenue", "debt",
+		"اقتصاد", "تضخم", "فائدة", "سعر", "اسهم", "بورصة", "عملة", "نمو", "ديون",
+	}
+	for _, k := range economyKeywords {
+		if containsWord(lower, k) {
+			return query + " (site:imf.org OR site:worldbank.org OR site:tradingeconomics.com OR site:bloomberg.com OR site:reuters.com OR site:investopedia.com OR site:yahoo.com)", true
+		}
+	}
+
+	// 4. Politics & Global News
+	politicsKeywords := []string{
+		"politics", "political", "election", "president", "minister", "government", "parliament", "treaty", "war", "summit", "protest", "un", "united nations",
+		"رئيس", "وزير", "حكومة", "انتخابات", "سياسة", "برلمان", "حرب", "معاهدة", "الامم المتحدة",
+	}
+	for _, k := range politicsKeywords {
+		if containsWord(lower, k) {
+			return query + " (site:reuters.com OR site:apnews.com OR site:bbc.com OR site:aljazeera.com OR site:cnn.com)", true
+		}
+	}
+
+	// 5. Technology & Science
+	techKeywords := []string{
+		"technology", "ai", "software", "programming", "science", "physics", "chemistry", "space", "nasa", "scientific", "research", "paper", "github", "arxiv",
+		"تكنولوجيا", "برمجة", "برنامج", "ذكاء اصطناعي", "فيزياء", "كيمياء", "فضاء", "ناسا", "علمي", "بحث",
+	}
+	for _, k := range techKeywords {
+		if containsWord(lower, k) {
+			return query + " (site:techcrunch.com OR site:wired.com OR site:theverge.com OR site:github.com OR site:nature.com OR site:arxiv.org)", true
+		}
+	}
+
+	return query, false
+}
+
+func containsWord(s, word string) bool {
+	idx := strings.Index(s, word)
+	if idx == -1 {
+		return false
+	}
+	for idx != -1 {
+		startBound := idx == 0 || isBoundary(s[idx-1])
+		endBound := idx+len(word) == len(s) || isBoundary(s[idx+len(word)])
+		if startBound && endBound {
+			return true
+		}
+		nextIdx := strings.Index(s[idx+1:], word)
+		if nextIdx == -1 {
+			break
+		}
+		idx = idx + 1 + nextIdx
+	}
+	return false
+}
+
+func isBoundary(b byte) bool {
+	return b == ' ' || b == '.' || b == ',' || b == '?' || b == '!' || b == ';' || b == '-' || b == '_' || b == '(' || b == ')' || b == '/' || b == '\\'
 }
