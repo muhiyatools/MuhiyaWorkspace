@@ -72,7 +72,13 @@ func (tc *ToolContext) execWebSearch(args map[string]interface{}) ToolExecution 
 
 	// Fallback to DuckDuckGo if the primary provider failed or returned nothing.
 	if (err != nil || len(sources) == 0) {
-		if ddg, ans2 := tc.duckDuckGoSearch(query); len(ddg) > 0 {
+		limit := 8
+		if tc.Complexity == "simple" {
+			limit = 3
+		} else if tc.Complexity == "medium" {
+			limit = 5
+		}
+		if ddg, ans2 := tc.duckDuckGoSearch(query, limit); len(ddg) > 0 {
 			sources = ddg
 			if answer == "" {
 				answer = ans2
@@ -108,9 +114,16 @@ func (tc *ToolContext) execWebSearch(args map[string]interface{}) ToolExecution 
 
 // serperSearch queries the Serper Google Search API.
 func (tc *ToolContext) serperSearch(query, recency string) ([]WebSource, string, error) {
+	limit := 8
+	if tc.Complexity == "simple" {
+		limit = 3
+	} else if tc.Complexity == "medium" {
+		limit = 5
+	}
+
 	payload := map[string]interface{}{
 		"q":   query,
-		"num": 8,
+		"num": limit,
 	}
 	switch recency {
 	case "day":
@@ -192,7 +205,7 @@ func parseSerperOrganic(sr serperResponse) []WebSource {
 // duckDuckGoSearch is a keyless best-effort fallback using the Instant Answer
 // API. It only reliably yields an abstract + related topics, not full web
 // results, but it keeps search working without a Serper key.
-func (tc *ToolContext) duckDuckGoSearch(query string) ([]WebSource, string) {
+func (tc *ToolContext) duckDuckGoSearch(query string, limit int) ([]WebSource, string) {
 	u := "https://api.duckduckgo.com/?" + url.Values{
 		"q":                 {query},
 		"format":            {"json"},
@@ -248,9 +261,16 @@ func (tc *ToolContext) duckDuckGoSearch(query string) ([]WebSource, string) {
 			Snippet: rt.Text,
 		})
 		idx++
-		if idx > 6 {
+		if idx > limit {
 			break
 		}
 	}
 	return sources, ddg.AbstractText
+}
+
+func truncate(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit-3] + "..."
 }

@@ -32,12 +32,7 @@ const maxAgentIterations = 5
 
 // toolStatusLabels gives each tool a short human label for the UI status line.
 var toolStatusLabels = map[string]string{
-	"web_search":            "Searching the web",
-	"football_live_scores":  "Checking live scores",
-	"football_fixtures":     "Looking up fixtures",
-	"football_standings":    "Fetching the league table",
-	"football_team":         "Looking up team info",
-	"football_head_to_head": "Comparing head-to-head",
+	"web_search": "Searching the web",
 }
 
 // shouldRunAgentLoop reports whether this request should use the native agent
@@ -100,7 +95,7 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		CreatedAt:      startTime,
 	}
 
-	tc := &ToolContext{DB: h.db, Settings: settings, teamIDCache: map[string]int{}, leagueIDCache: map[string]int{}}
+	tc := &ToolContext{DB: h.db, Settings: settings, Complexity: complexity}
 	tools := BuildToolSchemas(settings)
 
 	// Build the working message list: inject tool-use guidance so the model
