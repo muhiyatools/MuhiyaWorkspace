@@ -210,37 +210,46 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasSuffix(r.URL.Path, "/capabilities") {
+		if r.Method != http.MethodGet {
+			h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error")
+			return
+		}
+		key, ok := h.authenticateVirtualKey(w, r)
+		if !ok {
+			return
+		}
+		h.handleCapabilities(w, r, key)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/tools/web_search") {
+		if r.Method != http.MethodPost {
+			h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error")
+			return
+		}
+		key, ok := h.authenticateVirtualKey(w, r)
+		if !ok {
+			return
+		}
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "Failed to read request body", "invalid_request_error")
+			return
+		}
+		r.Body.Close()
+		h.handleGatewayWebSearch(w, r, bodyBytes, key)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error")
 		return
 	}
 
 	// 1. Authenticate Virtual Key (Support Authorization: Bearer OR x-api-key)
-	keyID := ""
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
-		keyID = strings.TrimPrefix(authHeader, "Bearer ")
-	} else {
-		keyID = r.Header.Get("x-api-key")
-	}
-
-	if keyID == "" {
-		h.writeError(w, http.StatusUnauthorized, "Missing or invalid credentials. Use Bearer token or x-api-key.", "invalid_request_error")
-		return
-	}
-
-	key, err := h.db.GetVirtualKey(keyID)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
-		return
-	}
-	if key == nil || key.Status != "active" {
-		h.writeError(w, http.StatusUnauthorized, "Invalid or revoked virtual key.", "invalid_request_error")
-		return
-	}
-
-	if key.ExpiresAt != nil && key.ExpiresAt.Before(time.Now()) {
-		h.writeError(w, http.StatusUnauthorized, "Virtual key has expired.", "invalid_request_error")
+	key, ok := h.authenticateVirtualKey(w, r)
+	if !ok {
 		return
 	}
 
@@ -263,6 +272,87 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		h.serveOpenAIClient(w, r, bodyBytes, key)
 	}
+}
+
+func (h *ProxyHandler) authenticateVirtualKey(w http.ResponseWriter, r *http.Request) (*db.VirtualKey, bool) {
+	keyID := ""
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		keyID = strings.TrimPrefix(authHeader, "Bearer ")
+	} else {
+		keyID = r.Header.Get("x-api-key")
+	}
+
+	if keyID == "" {
+		h.writeError(w, http.StatusUnauthorized, "Missing or invalid credentials. Use Bearer token or x-api-key.", "invalid_request_error")
+		return nil, false
+	}
+
+	key, err := h.db.GetVirtualKey(keyID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+		return nil, false
+	}
+	if key == nil || key.Status != "active" {
+		h.writeError(w, http.StatusUnauthorized, "Invalid or revoked virtual key.", "invalid_request_error")
+		return nil, false
+	}
+
+	if key.ExpiresAt != nil && key.ExpiresAt.Before(time.Now()) {
+		h.writeError(w, http.StatusUnauthorized, "Virtual key has expired.", "invalid_request_error")
+		return nil, false
+	}
+	return key, true
+}
+
+func (h *ProxyHandler) handleCapabilities(w http.ResponseWriter, _ *http.Request, _ *db.VirtualKey) {
+	settings := LoadToolSettings(h.db)
+	schemas := BuildToolSchemas(settings)
+	tools := make([]map[string]interface{}, 0, len(schemas))
+	for _, schema := range schemas {
+		tools = append(tools, map[string]interface{}{
+			"name":        schema.Function.Name,
+			"available":   true,
+			"description": schema.Function.Description,
+			"parameters":  schema.Function.Parameters,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"object":  "muhiya.capabilities",
+		"gateway": "MuhiyaLLM Gateway",
+		"features": map[string]interface{}{
+			"web_search": settings.WebSearchEnabled(),
+		},
+		"tools": tools,
+	})
+}
+
+func (h *ProxyHandler) handleGatewayWebSearch(w http.ResponseWriter, _ *http.Request, bodyBytes []byte, _ *db.VirtualKey) {
+	settings := LoadToolSettings(h.db)
+	if !settings.WebSearchEnabled() {
+		h.writeError(w, http.StatusNotImplemented, "web_search is not configured on this gateway.", "unsupported_feature")
+		return
+	}
+	var req WebSearchRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		h.writeError(w, http.StatusBadRequest, "Invalid web_search JSON body: "+err.Error(), "invalid_request_error")
+		return
+	}
+	tc := &ToolContext{DB: h.db, Settings: settings, Complexity: "medium"}
+	result, err := tc.RunWebSearch(req)
+	if err != nil {
+		status := http.StatusBadGateway
+		if strings.Contains(err.Error(), "query is required") {
+			status = http.StatusBadRequest
+		}
+		h.writeError(w, status, err.Error(), "api_error")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // ------------------------------------------
@@ -724,7 +814,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		_ = h.db.InsertRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
-		
+
 		sendMuhiyaMetaChunk(w, &log, model.Name)
 	} else {
 		respBody, err := io.ReadAll(resp.Body)
@@ -1277,10 +1367,10 @@ func estimateTokens(text string) int {
 	if text == "" {
 		return 0
 	}
-	
+
 	tokens := 0
 	words := strings.Fields(text)
-	
+
 	for _, word := range words {
 		isArabic := false
 		for _, r := range word {
@@ -1289,7 +1379,7 @@ func estimateTokens(text string) int {
 				break
 			}
 		}
-		
+
 		if isArabic {
 			// Arabic words average ~2.5 tokens
 			tokens += 3
@@ -1299,17 +1389,17 @@ func estimateTokens(text string) int {
 			tokens += (wordLen + 3) / 4
 		}
 	}
-	
+
 	// Add tokens for common code punctuations that might be stripped by Fields
 	punctuations := []string{"{", "}", "(", ")", "[", "]", ";", ",", ".", "=", "+", "-", "*", "/", "<", ">", "!", "&", "|"}
 	for _, p := range punctuations {
 		tokens += strings.Count(text, p)
 	}
-	
+
 	// Add tokens for indentation (4 spaces = 1 token)
 	spaces := strings.Count(text, " ")
 	tokens += spaces / 4
-	
+
 	if tokens == 0 {
 		return 1
 	}

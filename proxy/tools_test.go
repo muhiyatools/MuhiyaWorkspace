@@ -36,7 +36,7 @@ func TestBuildToolSchemasGating(t *testing.T) {
 		t.Fatalf("expected 0 tools with no keys, got %d", len(got))
 	}
 	// Only search key -> only web_search.
-	search := BuildToolSchemas(ToolSettings{SerperAPIKey: "x"})
+	search := BuildToolSchemas(ToolSettings{TavilyAPIKey: "x"})
 	if len(search) != 1 || search[0].Function.Name != "web_search" {
 		t.Fatalf("expected only web_search, got %+v", search)
 	}
@@ -46,8 +46,11 @@ func TestToolsEnabled(t *testing.T) {
 	if (ToolSettings{}).ToolsEnabled() {
 		t.Fatalf("no keys should mean tools disabled")
 	}
-	if !(ToolSettings{SerperAPIKey: "x"}).ToolsEnabled() {
+	if !(ToolSettings{TavilyAPIKey: "x"}).ToolsEnabled() {
 		t.Fatalf("a search key should enable tools")
+	}
+	if !(ToolSettings{SerperAPIKey: "x"}).ToolsEnabled() {
+		t.Fatalf("serper fallback key should enable tools")
 	}
 }
 
@@ -64,7 +67,7 @@ func TestParseSerperOrganic(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &sr); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
-	sources := parseSerperOrganic(sr)
+	sources := parseSerperOrganic(sr, 8)
 	if len(sources) != 2 {
 		t.Fatalf("expected 2 sources (empty link skipped), got %d", len(sources))
 	}

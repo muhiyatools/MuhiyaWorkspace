@@ -10,25 +10,45 @@ import (
 	"strings"
 )
 
-// ============================================================================
-// Web search tool executor.
-//   Primary provider: Serper (https://google.serper.dev/search) — Google
-//   results incl. answer boxes & knowledge graph, which is excellent for
-//   sports, news and factual queries.
-//   Fallback: DuckDuckGo Instant Answer API (keyless) for a best-effort
-//   abstract when Serper is not configured or fails.
-// ============================================================================
-
-// WebSource is a single ranked search result surfaced to both the model and
-// the UI (as a citation card).
+// WebSource is a single ranked search result surfaced to both the model and UI.
 type WebSource struct {
-	Index   int    `json:"index"`
-	Title   string `json:"title"`
-	URL     string `json:"url"`
-	Snippet string `json:"snippet"`
+	Index       int     `json:"index"`
+	Title       string  `json:"title"`
+	URL         string  `json:"url"`
+	Snippet     string  `json:"snippet"`
+	PublishedAt string  `json:"publishedAt,omitempty"`
+	Score       float64 `json:"score,omitempty"`
 }
 
-// --- Serper response shapes -------------------------------------------------
+type WebSearchRequest struct {
+	Query          string   `json:"query"`
+	Recency        string   `json:"recency,omitempty"`
+	MaxResults     int      `json:"maxResults,omitempty"`
+	Topic          string   `json:"topic,omitempty"`
+	IncludeDomains []string `json:"includeDomains,omitempty"`
+	ExcludeDomains []string `json:"excludeDomains,omitempty"`
+}
+
+type WebSearchResult struct {
+	Query    string      `json:"query"`
+	Answer   string      `json:"answer,omitempty"`
+	Provider string      `json:"provider"`
+	Sources  []WebSource `json:"sources"`
+	Content  string      `json:"content"`
+}
+
+type tavilyResponse struct {
+	Query   string `json:"query"`
+	Answer  string `json:"answer"`
+	Results []struct {
+		Title       string  `json:"title"`
+		URL         string  `json:"url"`
+		Content     string  `json:"content"`
+		RawContent  string  `json:"raw_content"`
+		PublishedAt string  `json:"published_date"`
+		Score       float64 `json:"score"`
+	} `json:"results"`
+}
 
 type serperResponse struct {
 	AnswerBox *struct {
@@ -51,88 +71,135 @@ type serperResponse struct {
 	} `json:"organic"`
 }
 
-// execWebSearch runs a web search and returns cited context for the model
-// plus a muhiya_sources event for the UI.
 func (tc *ToolContext) execWebSearch(args map[string]interface{}) ToolExecution {
-	query := argString(args, "query")
-	if query == "" {
-		return ToolExecution{LLMContent: "No search query was provided."}
+	result, err := tc.RunWebSearch(webSearchRequestFromArgs(args))
+	if err != nil {
+		return ToolExecution{LLMContent: "Web search failed: " + err.Error()}
 	}
-	recency := strings.ToLower(argString(args, "recency"))
-
-	var sources []WebSource
-	var answer string
-	var err error
-
-	if tc.Settings.SerperAPIKey != "" {
-		sources, answer, err = tc.serperSearch(query, recency)
-		if err != nil || len(sources) == 0 {
-			stripped := stripSiteFilters(query)
-			if stripped != query {
-				sources, answer, err = tc.serperSearch(stripped, recency)
-			}
-		}
-	} else {
-		err = fmt.Errorf("no search provider configured")
+	return ToolExecution{
+		LLMContent:  result.Content,
+		ClientEvent: map[string]interface{}{"muhiya_sources": result.Sources},
 	}
-
-	// Fallback to DuckDuckGo if the primary provider failed or returned nothing.
-	if (err != nil || len(sources) == 0) {
-		limit := 8
-		if tc.Complexity == "simple" {
-			limit = 3
-		} else if tc.Complexity == "medium" {
-			limit = 5
-		}
-		stripped := stripSiteFilters(query)
-		if ddg, ans2 := tc.duckDuckGoSearch(stripped, limit); len(ddg) > 0 {
-			sources = ddg
-			if answer == "" {
-				answer = ans2
-			}
-			err = nil
-		}
-	}
-
-	if len(sources) == 0 {
-		msg := "The web search returned no usable results."
-		if err != nil {
-			msg = "Web search failed: " + err.Error()
-		}
-		return ToolExecution{LLMContent: msg}
-	}
-
-	// Build the cited context block for the model.
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Web search results for %q:\n", query)
-	if answer != "" {
-		fmt.Fprintf(&sb, "[Answer] %s\n", truncate(answer, 500))
-	}
-	for _, s := range sources {
-		fmt.Fprintf(&sb, "[%d] %s — %s\n%s\n", s.Index, s.Title, s.URL, truncate(s.Snippet, 400))
-	}
-	sb.WriteString("\nGround your answer in these sources and cite them inline as [n].")
-
-	event := map[string]interface{}{
-		"muhiya_sources": sources,
-	}
-	return ToolExecution{LLMContent: strings.TrimSpace(sb.String()), ClientEvent: event}
 }
 
-// serperSearch queries the Serper Google Search API.
-func (tc *ToolContext) serperSearch(query, recency string) ([]WebSource, string, error) {
-	limit := 8
-	if tc.Complexity == "simple" {
-		limit = 3
-	} else if tc.Complexity == "medium" {
-		limit = 5
+func (tc *ToolContext) RunWebSearch(req WebSearchRequest) (*WebSearchResult, error) {
+	req.Query = strings.TrimSpace(req.Query)
+	if req.Query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	req.MaxResults = clampSearchResults(req.MaxResults, tc.Complexity)
+	req.Recency = normalizeRecency(req.Recency)
+	req.Topic = normalizeTopic(req.Topic)
+	req.IncludeDomains = cleanDomains(req.IncludeDomains, 300)
+	req.ExcludeDomains = cleanDomains(req.ExcludeDomains, 150)
+
+	var lastErr error
+	if tc.Settings.TavilyAPIKey != "" {
+		result, err := tc.tavilySearch(req)
+		if err == nil && len(result.Sources) > 0 {
+			return result, nil
+		}
+		lastErr = err
+	}
+	if tc.Settings.SerperAPIKey != "" {
+		result, err := tc.serperSearch(req)
+		if err == nil && len(result.Sources) > 0 {
+			return result, nil
+		}
+		lastErr = err
 	}
 
-	payload := map[string]interface{}{
-		"q":   query,
-		"num": limit,
+	ddg, answer := tc.duckDuckGoSearch(stripSiteFilters(req.Query), req.MaxResults)
+	if len(ddg) > 0 {
+		return buildWebSearchResult(req.Query, "duckduckgo", answer, ddg), nil
 	}
-	switch recency {
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no search provider is configured")
+}
+
+func webSearchRequestFromArgs(args map[string]interface{}) WebSearchRequest {
+	maxResults, _ := argInt(args, "maxResults")
+	return WebSearchRequest{
+		Query:          argString(args, "query"),
+		Recency:        argString(args, "recency"),
+		MaxResults:     maxResults,
+		Topic:          argString(args, "topic"),
+		IncludeDomains: argStringSlice(args, "includeDomains"),
+		ExcludeDomains: argStringSlice(args, "excludeDomains"),
+	}
+}
+
+func (tc *ToolContext) tavilySearch(req WebSearchRequest) (*WebSearchResult, error) {
+	payload := map[string]interface{}{
+		"query":               req.Query,
+		"topic":               req.Topic,
+		"search_depth":        "basic",
+		"max_results":         req.MaxResults,
+		"include_answer":      true,
+		"include_raw_content": false,
+	}
+	if req.Recency != "any" {
+		payload["time_range"] = req.Recency
+	}
+	if len(req.IncludeDomains) > 0 {
+		payload["include_domains"] = req.IncludeDomains
+	}
+	if len(req.ExcludeDomains) > 0 {
+		payload["exclude_domains"] = req.ExcludeDomains
+	}
+
+	body, _ := json.Marshal(payload)
+	httpReq, err := http.NewRequest(http.MethodPost, "https://api.tavily.com/search", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+tc.Settings.TavilyAPIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := toolHTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("tavily search provider unreachable")
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("tavily returned status %d: %s", resp.StatusCode, truncate(string(raw), 240))
+	}
+
+	var tr tavilyResponse
+	if err := json.Unmarshal(raw, &tr); err != nil {
+		return nil, fmt.Errorf("could not parse tavily results")
+	}
+
+	var sources []WebSource
+	for _, item := range tr.Results {
+		if strings.TrimSpace(item.URL) == "" {
+			continue
+		}
+		snippet := firstNonEmpty(item.Content, item.RawContent)
+		sources = append(sources, WebSource{
+			Index:       len(sources) + 1,
+			Title:       strings.TrimSpace(item.Title),
+			URL:         strings.TrimSpace(item.URL),
+			Snippet:     truncate(strings.TrimSpace(snippet), 500),
+			PublishedAt: strings.TrimSpace(item.PublishedAt),
+			Score:       item.Score,
+		})
+		if len(sources) >= req.MaxResults {
+			break
+		}
+	}
+	return buildWebSearchResult(req.Query, "tavily", tr.Answer, sources), nil
+}
+
+func (tc *ToolContext) serperSearch(req WebSearchRequest) (*WebSearchResult, error) {
+	payload := map[string]interface{}{
+		"q":   req.Query,
+		"num": req.MaxResults,
+	}
+	switch req.Recency {
 	case "day":
 		payload["tbs"] = "qdr:d"
 	case "week":
@@ -144,89 +211,76 @@ func (tc *ToolContext) serperSearch(query, recency string) ([]WebSource, string,
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest(http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(body))
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	req.Header.Set("X-API-KEY", tc.Settings.SerperAPIKey)
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-KEY", tc.Settings.SerperAPIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := toolHTTPClient.Do(req)
+	resp, err := toolHTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, "", fmt.Errorf("search provider unreachable")
+		return nil, fmt.Errorf("serper search provider unreachable")
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode >= 400 {
-		return nil, "", fmt.Errorf("search provider returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("serper returned status %d", resp.StatusCode)
 	}
 
 	var sr serperResponse
 	if err := json.Unmarshal(raw, &sr); err != nil {
-		return nil, "", fmt.Errorf("could not parse search results")
+		return nil, fmt.Errorf("could not parse serper results")
 	}
 
-	var answer string
+	answer := ""
 	if sr.AnswerBox != nil {
-		if sr.AnswerBox.Answer != "" {
-			answer = sr.AnswerBox.Answer
-		} else if sr.AnswerBox.Snippet != "" {
-			answer = sr.AnswerBox.Snippet
-		}
+		answer = firstNonEmpty(sr.AnswerBox.Answer, sr.AnswerBox.Snippet)
 	}
-	if answer == "" && sr.KnowledgeGraph != nil && sr.KnowledgeGraph.Description != "" {
+	if answer == "" && sr.KnowledgeGraph != nil {
 		answer = sr.KnowledgeGraph.Description
 	}
-
-	sources := parseSerperOrganic(sr)
-	return sources, answer, nil
+	return buildWebSearchResult(req.Query, "serper", answer, parseSerperOrganic(sr, req.MaxResults)), nil
 }
 
-// parseSerperOrganic converts Serper organic results into ranked WebSources.
-// Extracted as a pure function so it can be unit-tested without HTTP.
-func parseSerperOrganic(sr serperResponse) []WebSource {
+func parseSerperOrganic(sr serperResponse, limit int) []WebSource {
 	var sources []WebSource
-	idx := 1
 	for _, o := range sr.Organic {
 		if o.Link == "" {
 			continue
 		}
-		snippet := o.Snippet
+		snippet := strings.TrimSpace(o.Snippet)
 		if o.Date != "" {
-			snippet = o.Date + " — " + snippet
+			snippet = strings.TrimSpace(o.Date) + " - " + snippet
 		}
 		sources = append(sources, WebSource{
-			Index:   idx,
+			Index:   len(sources) + 1,
 			Title:   strings.TrimSpace(o.Title),
-			URL:     o.Link,
-			Snippet: strings.TrimSpace(snippet),
+			URL:     strings.TrimSpace(o.Link),
+			Snippet: snippet,
 		})
-		idx++
-		if idx > 8 {
+		if len(sources) >= limit {
 			break
 		}
 	}
 	return sources
 }
 
-// duckDuckGoSearch is a keyless best-effort fallback using the Instant Answer
-// API. It only reliably yields an abstract + related topics, not full web
-// results, but it keeps search working without a Serper key.
 func (tc *ToolContext) duckDuckGoSearch(query string, limit int) ([]WebSource, string) {
 	u := "https://api.duckduckgo.com/?" + url.Values{
-		"q":                 {query},
-		"format":            {"json"},
-		"no_html":           {"1"},
-		"no_redirect":       {"1"},
-		"skip_disambig":     {"1"},
+		"q":             {query},
+		"format":        {"json"},
+		"no_html":       {"1"},
+		"no_redirect":   {"1"},
+		"skip_disambig": {"1"},
 	}.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	httpReq, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, ""
 	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := toolHTTPClient.Do(req)
+	httpReq.Header.Set("Accept", "application/json")
+	resp, err := toolHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, ""
 	}
@@ -247,42 +301,145 @@ func (tc *ToolContext) duckDuckGoSearch(query string, limit int) ([]WebSource, s
 	}
 
 	var sources []WebSource
-	idx := 1
 	if ddg.AbstractText != "" && ddg.AbstractURL != "" {
 		sources = append(sources, WebSource{
-			Index:   idx,
+			Index:   1,
 			Title:   ddg.Heading,
 			URL:     ddg.AbstractURL,
 			Snippet: ddg.AbstractText,
 		})
-		idx++
 	}
 	for _, rt := range ddg.RelatedTopics {
 		if rt.FirstURL == "" || rt.Text == "" {
 			continue
 		}
 		sources = append(sources, WebSource{
-			Index:   idx,
+			Index:   len(sources) + 1,
 			Title:   truncate(rt.Text, 80),
 			URL:     rt.FirstURL,
 			Snippet: rt.Text,
 		})
-		idx++
-		if idx > limit {
+		if len(sources) >= limit {
 			break
 		}
 	}
 	return sources, ddg.AbstractText
 }
 
+func buildWebSearchResult(query, provider, answer string, sources []WebSource) *WebSearchResult {
+	result := &WebSearchResult{
+		Query:    query,
+		Answer:   strings.TrimSpace(answer),
+		Provider: provider,
+		Sources:  sources,
+	}
+	result.Content = formatSearchContent(result)
+	return result
+}
+
+func formatSearchContent(result *WebSearchResult) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Web search results for %q (provider: %s):\n", result.Query, result.Provider)
+	if result.Answer != "" {
+		fmt.Fprintf(&sb, "[Answer] %s\n", truncate(result.Answer, 700))
+	}
+	for _, s := range result.Sources {
+		fmt.Fprintf(&sb, "[%d] %s - %s\n", s.Index, s.Title, s.URL)
+		if s.PublishedAt != "" {
+			fmt.Fprintf(&sb, "Published: %s\n", s.PublishedAt)
+		}
+		fmt.Fprintf(&sb, "%s\n", truncate(s.Snippet, 500))
+	}
+	sb.WriteString("\nGround your answer in these sources and cite them inline as [n].")
+	return strings.TrimSpace(sb.String())
+}
+
+func clampSearchResults(value int, complexity string) int {
+	if value <= 0 {
+		switch complexity {
+		case "simple":
+			value = 3
+		case "medium":
+			value = 5
+		default:
+			value = 8
+		}
+	}
+	if value < 1 {
+		return 1
+	}
+	if value > 10 {
+		return 10
+	}
+	return value
+}
+
+func normalizeRecency(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "day", "week", "month", "year":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "any"
+	}
+}
+
+func normalizeTopic(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "news", "finance":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "general"
+	}
+}
+
+func cleanDomains(values []string, limit int) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		value = strings.TrimPrefix(value, "https://")
+		value = strings.TrimPrefix(value, "http://")
+		value = strings.TrimSuffix(value, "/")
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func argStringSlice(args map[string]interface{}, key string) []string {
+	raw, ok := args[key]
+	if !ok {
+		return nil
+	}
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, item := range items {
+		if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	return out
+}
+
 func truncate(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
+	if limit <= 3 {
+		return s[:limit]
+	}
 	return s[:limit-3] + "..."
 }
 
-// stripSiteFilters removes " (site:...)" or " site:..." constraints from search queries.
 func stripSiteFilters(query string) string {
 	lower := strings.ToLower(query)
 	idx := strings.Index(lower, " (site:")

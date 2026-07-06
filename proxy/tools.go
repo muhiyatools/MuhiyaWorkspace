@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -40,7 +41,8 @@ type ToolContext struct {
 // ToolSettings holds the external API keys, loaded once per request from the
 // gateway's system_settings table.
 type ToolSettings struct {
-	SerperAPIKey    string // Serper (google search) key — primary web search
+	TavilyAPIKey string // Tavily search key, preferred for gateway web search
+	SerperAPIKey string // Serper search key, retained as fallback when configured
 }
 
 // ToolExecution is the result of running a single tool call.
@@ -60,7 +62,8 @@ func LoadToolSettings(database *db.DB) ToolSettings {
 		return strings.TrimSpace(v)
 	}
 	return ToolSettings{
-		SerperAPIKey:    get("serper_api_key"),
+		TavilyAPIKey: firstNonEmpty(get("tavily_api_key"), strings.TrimSpace(os.Getenv("TAVILY_API_KEY"))),
+		SerperAPIKey: get("serper_api_key"),
 	}
 }
 
@@ -75,7 +78,11 @@ func NewToolContext(database *db.DB) *ToolContext {
 // ToolsEnabled reports whether at least one tool can run given current config.
 // If no keys are configured the agent loop is skipped entirely.
 func (s ToolSettings) ToolsEnabled() bool {
-	return s.SerperAPIKey != ""
+	return s.WebSearchEnabled()
+}
+
+func (s ToolSettings) WebSearchEnabled() bool {
+	return s.TavilyAPIKey != "" || s.SerperAPIKey != ""
 }
 
 // ----------------------------------------------------------------------------
@@ -88,12 +95,12 @@ func (s ToolSettings) ToolsEnabled() bool {
 func BuildToolSchemas(s ToolSettings) []OpenAITool {
 	var tools []OpenAITool
 
-	if s.SerperAPIKey != "" {
+	if s.WebSearchEnabled() {
 		tools = append(tools, OpenAITool{
 			Type: "function",
 			Function: OpenAIFunctionDef{
 				Name:        "web_search",
-				Description: "Search the live web for current information: news, prices, weather, general facts, anything after your training cutoff. Returns ranked sources with snippets. Use for anything time-sensitive or that you are not certain about.",
+				Description: "Search the live web through the MuhiyaLLM gateway for current or uncertain facts. Returns ranked sources with titles, URLs, snippets, and optional answer text. Use for time-sensitive information and cite returned sources.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -105,6 +112,27 @@ func BuildToolSchemas(s ToolSettings) []OpenAITool {
 							"type":        "string",
 							"enum":        []string{"day", "week", "month", "year", "any"},
 							"description": "Bias results toward this recency window. Use 'day' or 'week' for breaking news.",
+						},
+						"maxResults": map[string]interface{}{
+							"type":        "number",
+							"minimum":     1,
+							"maximum":     10,
+							"description": "Maximum source count. Defaults to 5.",
+						},
+						"topic": map[string]interface{}{
+							"type":        "string",
+							"enum":        []string{"general", "news", "finance"},
+							"description": "Optional topic hint for the search provider.",
+						},
+						"includeDomains": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "Optional domains to include or prefer.",
+						},
+						"excludeDomains": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "Optional domains to exclude.",
 						},
 					},
 					"required": []string{"query"},
@@ -171,4 +199,13 @@ func argInt(args map[string]interface{}, key string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

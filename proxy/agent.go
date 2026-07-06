@@ -194,10 +194,6 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// Emit terminal marker.
-	w.Write([]byte("data: [DONE]\n\n"))
-	flusher.Flush()
-
 	// Finalize billing: one aggregated request log for the whole loop.
 	if totalInput == 0 {
 		totalInput = promptTokens
@@ -215,6 +211,8 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	h.limiter.RecordTokens(reqLog.VirtualKeyID, totalOutput)
 
 	sendMuhiyaMetaChunk(w, &reqLog, model.Name)
+	w.Write([]byte("data: [DONE]\n\n"))
+	flusher.Flush()
 	return true
 }
 
