@@ -1086,26 +1086,50 @@ document.addEventListener('DOMContentLoaded', () => {
             .then(settings => {
                 const nameObj = settings.find(s => s.key === 'gateway_name');
                 if (nameObj) document.getElementById('setting-gateway-name').value = nameObj.value;
+                const tavilyObj = settings.find(s => s.key === 'tavily_api_key');
+                if (tavilyObj) document.getElementById('setting-tavily-key').value = tavilyObj.value;
             })
             .catch(err => console.error("Error loading settings:", err));
 
-        // Submit listener
         const form = document.getElementById('settings-form');
+        if (form.dataset.bound === 'true') return;
+        form.dataset.bound = 'true';
         form.addEventListener('submit', (e) => {
             e.preventDefault();
             const gatewayName = document.getElementById('setting-gateway-name').value;
+            const tavilyKey = document.getElementById('setting-tavily-key').value.trim();
 
-            fetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key: 'gateway_name', value: gatewayName })
+            const saves = [
+                fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'gateway_name', value: gatewayName })
+                }),
+                fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: 'tavily_api_key', value: tavilyKey })
+                })
+            ];
+
+            Promise.all(saves).then((responses) => {
+                const failed = responses.find(res => !res.ok);
+                if (failed) throw new Error(`Settings request failed with ${failed.status}`);
             })
             .then(() => {
-                alert('System settings applied successfully!');
+                alert('System settings applied successfully.');
                 loadSettings();
             })
-            .catch(err => alert('Failed to apply settings: ' + err));
+            .catch(err => alert('Failed to apply settings: ' + err.message));
         });
+    }
+
+    function saveSetting(key, value) {
+        return fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key, value })
+            });
     }
 
     // Copy virtual key identifier helper
