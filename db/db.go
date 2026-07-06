@@ -83,6 +83,11 @@ type Model struct {
 	ModelType                string    `json:"model_type"` // llm, transcript
 	PricePerMinute           float64   `json:"price_per_minute"`
 	Transcribe               bool      `json:"transcribe"`
+	ContextWindow            int       `json:"context_window"`
+	MaxOutputTokens          int       `json:"max_output_tokens"`
+	DisplayName              string    `json:"display_name"`
+	Description              string    `json:"description"`
+	OwnedBy                  string    `json:"owned_by"`
 	CreatedAt                time.Time `json:"created_at"`
 }
 
@@ -263,24 +268,26 @@ func (db *DB) seedDefaults() error {
 	}
 
 	models := []Model{
-		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false},
-		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false},
-		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false},
-		{ID: "model-deepseek-r1", Name: "deepseek-reasoner", ProviderID: "deepseek", TargetModel: "deepseek-reasoner", InputCostPerMillion: 0.55, OutputCostPerMillion: 2.19, CacheReadCostPerMillion: 0.14, CacheWriteCostPerMillion: 0.55, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false},
-		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false},
-		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", InputCostPerMillion: 0.00, OutputCostPerMillion: 0.00, CacheReadCostPerMillion: 0.00, CacheWriteCostPerMillion: 0.00, Status: "active", ModelType: "transcript", PricePerMinute: 0.006, Transcribe: true},
+		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false, ContextWindow: 128000, MaxOutputTokens: 4096, DisplayName: "GPT-4o", Description: "OpenAI flagship model", OwnedBy: "openai"},
+		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false, ContextWindow: 200000, MaxOutputTokens: 8192, DisplayName: "Claude 3.5 Sonnet", Description: "Anthropic high-intelligence model", OwnedBy: "anthropic"},
+		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false, ContextWindow: 64000, MaxOutputTokens: 8192, DisplayName: "DeepSeek Chat", Description: "DeepSeek cheap general-purpose model", OwnedBy: "deepseek"},
+		{ID: "model-deepseek-r1", Name: "deepseek-reasoner", ProviderID: "deepseek", TargetModel: "deepseek-reasoner", InputCostPerMillion: 0.55, OutputCostPerMillion: 2.19, CacheReadCostPerMillion: 0.14, CacheWriteCostPerMillion: 0.55, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false, ContextWindow: 64000, MaxOutputTokens: 8192, DisplayName: "DeepSeek Reasoner", Description: "DeepSeek reasoning model (R1)", OwnedBy: "deepseek"},
+		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "active", ModelType: "llm", PricePerMinute: 0.0, Transcribe: false, ContextWindow: 64000, MaxOutputTokens: 8192, DisplayName: "DeepSeek v4 Flash", Description: "DeepSeek flash model", OwnedBy: "deepseek"},
+		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", InputCostPerMillion: 0.00, OutputCostPerMillion: 0.00, CacheReadCostPerMillion: 0.00, CacheWriteCostPerMillion: 0.00, Status: "active", ModelType: "transcript", PricePerMinute: 0.006, Transcribe: true, ContextWindow: 0, MaxOutputTokens: 0, DisplayName: "Whisper 1", Description: "OpenAI speech-to-text model", OwnedBy: "openai"},
 	}
 	for _, m := range models {
 		_, err := tx.Exec(`
 			INSERT INTO models (
 				id, name, provider_id, target_model, input_cost_per_million, 
 				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-				routing_tier, model_type, price_per_minute, transcribe
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
+				routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
+				display_name, description, owned_by
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
 			ON CONFLICT (id) DO NOTHING`,
 			m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
-			m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe)
+			m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
+			m.DisplayName, m.Description, m.OwnedBy)
 		if err != nil {
 			return err
 		}
@@ -677,10 +684,14 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), COALESCE(transcribe, FALSE), created_at 
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
+		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '') 
 		FROM models WHERE name = $1 AND status = 'active'`, normalizedName).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.Transcribe, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, 
+			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
+			&m.DisplayName, &m.Description, &m.OwnedBy)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -694,10 +705,14 @@ func (db *DB) GetModel(id string) (*Model, error) {
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), COALESCE(transcribe, FALSE), created_at 
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
+		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '') 
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.Transcribe, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, 
+			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
+			&m.DisplayName, &m.Description, &m.OwnedBy)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -710,7 +725,9 @@ func (db *DB) GetModel(id string) (*Model, error) {
 func (db *DB) ListModels() ([]Model, error) {
 	rows, err := db.conn.Query(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), COALESCE(transcribe, FALSE), created_at 
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
+		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '') 
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -721,7 +738,9 @@ func (db *DB) ListModels() ([]Model, error) {
 	for rows.Next() {
 		var m Model
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.Transcribe, &m.CreatedAt)
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, 
+			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
+			&m.DisplayName, &m.Description, &m.OwnedBy)
 		if err != nil {
 			return nil, err
 		}
@@ -739,10 +758,14 @@ func (db *DB) CreateModel(m Model) error {
 	}
 	_, err := db.conn.Exec(`INSERT INTO models (
 		id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, routing_tier, model_type, price_per_minute, transcribe
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
+		routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
+		display_name, description, owned_by
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe)
+		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, 
+		m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
+		m.DisplayName, m.Description, m.OwnedBy)
 	return err
 }
 
@@ -756,9 +779,12 @@ func (db *DB) UpdateModel(m Model) error {
 	_, err := db.conn.Exec(`UPDATE models SET name = $1, provider_id = $2, target_model = $3, 
 		input_cost_per_million = $4, output_cost_per_million = $5, 
 		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9,
-		model_type = $10, price_per_minute = $11, transcribe = $12 WHERE id = $13`,
+		model_type = $10, price_per_minute = $11, transcribe = $12, context_window = $13, max_output_tokens = $14,
+		display_name = $15, description = $16, owned_by = $17 WHERE id = $18`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
-		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ID)
+		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType, 
+		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description, 
+		m.OwnedBy, m.ID)
 	return err
 }
 

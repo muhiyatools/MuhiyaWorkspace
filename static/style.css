@@ -712,6 +712,8 @@ code, pre {
     padding: 2rem;
     width: 100%;
     max-width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
     position: relative;
     transform: scale(0.95) translateY(10px);
     transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);

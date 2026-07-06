@@ -353,21 +353,33 @@ document.addEventListener('DOMContentLoaded', () => {
         const status = document.getElementById('model-status').value || 'active';
         const routing_tier = document.getElementById('model-routing-tier').value || 'none';
 
-        const payload = {
+        const display_name = document.getElementById('model-display-name').value || '';
+        const owned_by = document.getElementById('model-owned-by').value || '';
+        const context_window = parseInt(document.getElementById('model-context-window').value) || 0;
+        const max_output_tokens = parseInt(document.getElementById('model-max-output-tokens').value) || 0;
+        const description = document.getElementById('model-description').value || '';
+
+        const body = {
             id, name, provider_id, target_model, model_type, price_per_minute, transcribe,
             input_cost_per_million: inCost,
             output_cost_per_million: outCost,
             cache_read_cost_per_million: readCost,
             cache_write_cost_per_million: writeCost,
             status,
-            routing_tier
+            routing_tier,
+            display_name,
+            owned_by,
+            context_window,
+            max_output_tokens,
+            description
         };
+
         const method = id ? 'PUT' : 'POST';
 
         fetch('/api/models', {
             method: method,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(body)
         })
         .then(res => res.json())
         .then(() => {
@@ -887,7 +899,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     const isTrans = (m.model_type || 'llm') === 'transcription' || (m.model_type || 'llm') === 'transcript';
                     return `
                     <tr>
-                        <td><strong>${m.name}</strong></td>
+                        <td>
+                            <div style="font-weight: 600;">${m.name}</div>
+                            ${m.display_name ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 1px;">${m.display_name}</div>` : ''}
+                            ${!isTrans ? `<div style="font-size: 0.68rem; color: var(--text-muted-dark); margin-top: 3px;">Ctx: ${m.context_window ? m.context_window.toLocaleString() : 'N/A'} | Out: ${m.max_output_tokens ? m.max_output_tokens.toLocaleString() : 'N/A'}</div>` : ''}
+                        </td>
                         <td><span class="badge" style="background:#27272a;">${m.provider_id}</span></td>
                         <td><code>${m.target_model}</code></td>
                         <td><span class="badge" style="background:${isTrans ? '#0f766e' : '#1e3a8a'};">${(m.model_type || 'llm').toUpperCase()}</span></td>
@@ -952,6 +968,12 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-cost-read').value = m.cache_read_cost_per_million;
             document.getElementById('model-cost-write').value = m.cache_write_cost_per_million;
             document.getElementById('model-routing-tier').value = m.routing_tier || 'none';
+
+            document.getElementById('model-display-name').value = m.display_name || '';
+            document.getElementById('model-owned-by').value = m.owned_by || '';
+            document.getElementById('model-context-window').value = m.context_window || '';
+            document.getElementById('model-max-output-tokens').value = m.max_output_tokens || '';
+            document.getElementById('model-description').value = m.description || '';
 
             document.getElementById('model-status-group').style.display = 'block';
             document.getElementById('model-status').value = m.status;

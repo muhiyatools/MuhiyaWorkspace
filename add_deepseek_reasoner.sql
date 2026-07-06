@@ -4,7 +4,8 @@ INSERT INTO models (
     id, name, provider_id, target_model, 
     input_cost_per_million, output_cost_per_million, 
     cache_read_cost_per_million, cache_write_cost_per_million, 
-    status, routing_tier, model_type, price_per_minute, transcribe
+    status, routing_tier, model_type, price_per_minute, transcribe,
+    context_window, max_output_tokens, display_name, description, owned_by
 ) VALUES (
     'model-deepseek-r1', 
     'deepseek-reasoner', 
@@ -18,6 +19,11 @@ INSERT INTO models (
     'none', 
     'llm', 
     0.0, 
-    false
+    false,
+    64000,
+    8192,
+    'DeepSeek Reasoner',
+    'DeepSeek reasoning model (R1)',
+    'deepseek'
 )
 ON CONFLICT (id) DO NOTHING;

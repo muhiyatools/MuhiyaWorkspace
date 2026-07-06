@@ -1227,7 +1227,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 	// If asking for a specific model details
 	pathParts := strings.Split(r.URL.Path, "/models/")
 	if len(pathParts) > 1 && pathParts[1] != "" {
-		modelID := pathParts[1]
+		modelID := strings.TrimSuffix(pathParts[1], "/")
 		var matchedModel *db.Model
 		for _, m := range models {
 			if m.Name == modelID && !m.Transcribe {
@@ -1241,21 +1241,51 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
+		displayName := matchedModel.DisplayName
+		if displayName == "" {
+			if clientIsAnthropic {
+				displayName = matchedModel.Name + " (via MuhiyaLLM)"
+			} else {
+				displayName = matchedModel.Name
+			}
+		}
+
+		ownedBy := matchedModel.OwnedBy
+		if ownedBy == "" {
+			ownedBy = "MuhiyaLLM"
+		}
+
 		if clientIsAnthropic {
 			response := map[string]interface{}{
-				"type":         "model",
-				"id":           matchedModel.Name,
-				"display_name": matchedModel.Name + " (via MuhiyaLLM)",
-				"created_at":   matchedModel.CreatedAt.Format(time.RFC3339),
+				"type":              "model",
+				"id":                matchedModel.Name,
+				"display_name":      displayName,
+				"description":       matchedModel.Description,
+				"context_window":    matchedModel.ContextWindow,
+				"max_output_tokens": matchedModel.MaxOutputTokens,
+				"created_at":        matchedModel.CreatedAt.Format(time.RFC3339),
 			}
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
 		} else {
 			response := map[string]interface{}{
-				"id":       matchedModel.Name,
-				"object":   "model",
-				"created":  matchedModel.CreatedAt.Unix(),
-				"owned_by": "MuhiyaLLM",
+				"id":                matchedModel.Name,
+				"object":            "model",
+				"created":           matchedModel.CreatedAt.Unix(),
+				"owned_by":          ownedBy,
+				"display_name":      displayName,
+				"description":       matchedModel.Description,
+				"context_window":    matchedModel.ContextWindow,
+				"max_output_tokens": matchedModel.MaxOutputTokens,
+				"max_tokens":        matchedModel.MaxOutputTokens,
+				"info": map[string]interface{}{
+					"context_window":    matchedModel.ContextWindow,
+					"max_output_tokens": matchedModel.MaxOutputTokens,
+					"max_tokens":        matchedModel.MaxOutputTokens,
+					"display_name":      displayName,
+					"description":       matchedModel.Description,
+					"owned_by":          ownedBy,
+				},
 			}
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
@@ -1268,11 +1298,18 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		var data []map[string]interface{}
 		for _, m := range models {
 			if m.Status == "active" && !m.Transcribe {
+				displayName := m.DisplayName
+				if displayName == "" {
+					displayName = m.Name + " (via MuhiyaLLM)"
+				}
 				data = append(data, map[string]interface{}{
-					"type":         "model",
-					"id":           m.Name,
-					"display_name": m.Name + " (via MuhiyaLLM)",
-					"created_at":   m.CreatedAt.Format(time.RFC3339),
+					"type":              "model",
+					"id":                m.Name,
+					"display_name":      displayName,
+					"description":       m.Description,
+					"context_window":    m.ContextWindow,
+					"max_output_tokens": m.MaxOutputTokens,
+					"created_at":        m.CreatedAt.Format(time.RFC3339),
 				})
 			}
 		}
@@ -1289,11 +1326,32 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		var data []map[string]interface{}
 		for _, m := range models {
 			if m.Status == "active" && !m.Transcribe {
+				displayName := m.DisplayName
+				if displayName == "" {
+					displayName = m.Name
+				}
+				ownedBy := m.OwnedBy
+				if ownedBy == "" {
+					ownedBy = "MuhiyaLLM"
+				}
 				data = append(data, map[string]interface{}{
-					"id":       m.Name,
-					"object":   "model",
-					"created":  m.CreatedAt.Unix(),
-					"owned_by": "MuhiyaLLM",
+					"id":                m.Name,
+					"object":            "model",
+					"created":           m.CreatedAt.Unix(),
+					"owned_by":          ownedBy,
+					"display_name":      displayName,
+					"description":       m.Description,
+					"context_window":    m.ContextWindow,
+					"max_output_tokens": m.MaxOutputTokens,
+					"max_tokens":        m.MaxOutputTokens,
+					"info": map[string]interface{}{
+						"context_window":    m.ContextWindow,
+						"max_output_tokens": m.MaxOutputTokens,
+						"max_tokens":        m.MaxOutputTokens,
+						"display_name":      displayName,
+						"description":       m.Description,
+						"owned_by":          ownedBy,
+					},
 				})
 			}
 		}

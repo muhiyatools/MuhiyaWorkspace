@@ -671,6 +671,30 @@
                         <input type="number" step="0.0001" id="model-cost-write" required placeholder="3.75">
                     </div>
                 </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="model-display-name">Display Name</label>
+                        <input type="text" id="model-display-name" placeholder="e.g. GPT-4o">
+                    </div>
+                    <div class="form-group">
+                        <label for="model-owned-by">Owned By</label>
+                        <input type="text" id="model-owned-by" placeholder="e.g. openai">
+                    </div>
+                </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="model-context-window">Context Window (tokens)</label>
+                        <input type="number" id="model-context-window" placeholder="e.g. 128000">
+                    </div>
+                    <div class="form-group">
+                        <label for="model-max-output-tokens">Max Output Tokens</label>
+                        <input type="number" id="model-max-output-tokens" placeholder="e.g. 4096">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="model-description">Description</label>
+                    <textarea id="model-description" placeholder="Brief model description..." rows="2" style="background:#09090b; border:1px solid var(--panel-border); border-radius:6px; padding:0.65rem 0.85rem; color:#fff; font-family:var(--font-body); font-size:0.85rem; outline:none; transition:var(--transition); resize:vertical;"></textarea>
+                </div>
                 <div class="form-group">
                     <label for="model-routing-tier">Router Routing Tier</label>
                     <select id="model-routing-tier" required>
