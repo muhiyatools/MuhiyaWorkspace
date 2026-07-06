@@ -63,7 +63,7 @@ func LoadToolSettings(database *db.DB) ToolSettings {
 	}
 	return ToolSettings{
 		TavilyAPIKey: firstNonEmpty(get("tavily_api_key"), strings.TrimSpace(os.Getenv("TAVILY_API_KEY"))),
-		SerperAPIKey: get("serper_api_key"),
+		SerperAPIKey: firstNonEmpty(get("serper_api_key"), strings.TrimSpace(os.Getenv("SERPER_API_KEY"))),
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -21,9 +22,9 @@ var staticFS embed.FS
 var dbReady atomic.Bool
 
 func main() {
-	dsn := "host=localhost port=5432 user=postgres password=postgres dbname=gateway sslmode=disable"
+	dsn := withPostgresConnectTimeout("host=127.0.0.1 port=5432 user=postgres password=postgres dbname=gateway sslmode=disable")
 	if envDSN := os.Getenv("DATABASE_URL"); envDSN != "" {
-		dsn = envDSN
+		dsn = withPostgresConnectTimeout(envDSN)
 	}
 
 	port := "8090"
@@ -128,18 +129,7 @@ func main() {
 		proxyMuxHandler.ServeHTTP(w, r)
 	})
 
-	mux.Handle("/v1/chat/completions", proxyWrapper)
-	mux.Handle("/chat/completions", proxyWrapper)
-	mux.Handle("/v1/completions", proxyWrapper)
-	mux.Handle("/completions", proxyWrapper)
-	mux.Handle("/v1/messages", proxyWrapper)
-	mux.Handle("/messages", proxyWrapper)
-	mux.Handle("/v1/audio/transcriptions", proxyWrapper)
-	mux.Handle("/audio/transcriptions", proxyWrapper)
-	mux.Handle("/v1/models", proxyWrapper)
-	mux.Handle("/v1/models/", proxyWrapper)
-	mux.Handle("/models", proxyWrapper)
-	mux.Handle("/models/", proxyWrapper)
+	registerProxyRoutes(mux, proxyWrapper)
 
 	// v1 health checks
 	mux.Handle("/v1", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -273,6 +263,43 @@ func connectWithRetry(dsn string, maxAttempts int) (*db.DB, error) {
 		time.Sleep(2 * time.Second)
 	}
 	return nil, fmt.Errorf("failed to connect to database after %d attempts: %w", maxAttempts, lastErr)
+}
+
+func withPostgresConnectTimeout(dsn string) string {
+	if strings.TrimSpace(dsn) == "" || strings.Contains(dsn, "connect_timeout") {
+		return dsn
+	}
+
+	parsed, err := url.Parse(dsn)
+	if err == nil && (parsed.Scheme == "postgres" || parsed.Scheme == "postgresql") {
+		query := parsed.Query()
+		if query.Get("connect_timeout") == "" {
+			query.Set("connect_timeout", "5")
+			parsed.RawQuery = query.Encode()
+		}
+		return parsed.String()
+	}
+
+	return strings.TrimSpace(dsn) + " connect_timeout=5"
+}
+
+func registerProxyRoutes(mux *http.ServeMux, proxyWrapper http.Handler) {
+	mux.Handle("/v1/chat/completions", proxyWrapper)
+	mux.Handle("/chat/completions", proxyWrapper)
+	mux.Handle("/v1/completions", proxyWrapper)
+	mux.Handle("/completions", proxyWrapper)
+	mux.Handle("/v1/messages", proxyWrapper)
+	mux.Handle("/messages", proxyWrapper)
+	mux.Handle("/v1/audio/transcriptions", proxyWrapper)
+	mux.Handle("/audio/transcriptions", proxyWrapper)
+	mux.Handle("/v1/models", proxyWrapper)
+	mux.Handle("/v1/models/", proxyWrapper)
+	mux.Handle("/models", proxyWrapper)
+	mux.Handle("/models/", proxyWrapper)
+	mux.Handle("/v1/capabilities", proxyWrapper)
+	mux.Handle("/capabilities", proxyWrapper)
+	mux.Handle("/v1/tools/web_search", proxyWrapper)
+	mux.Handle("/tools/web_search", proxyWrapper)
 }
 
 func loggerMiddleware(next http.Handler) http.Handler {

@@ -54,6 +54,18 @@ func TestToolsEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadToolSettingsReadsEnvironmentFallbacks(t *testing.T) {
+	t.Setenv("TAVILY_API_KEY", "tavily-env")
+	t.Setenv("SERPER_API_KEY", "serper-env")
+	settings := LoadToolSettings(nil)
+	if settings.TavilyAPIKey != "tavily-env" {
+		t.Fatalf("expected tavily env fallback, got %q", settings.TavilyAPIKey)
+	}
+	if settings.SerperAPIKey != "serper-env" {
+		t.Fatalf("expected serper env fallback, got %q", settings.SerperAPIKey)
+	}
+}
+
 func TestParseSerperOrganic(t *testing.T) {
 	raw := `{
 		"answerBox": {"answer": "2-1", "snippet": "Arsenal beat Chelsea"},
