@@ -26,6 +26,23 @@ var httpClient = &http.Client{
 	},
 }
 
+// maxChatRequestBytes bounds chat/messages request bodies. Large coding-agent
+// contexts fit comfortably; this only stops memory-exhaustion abuse.
+const maxChatRequestBytes = 24 << 20 // 24 MiB
+
+type noopFlusher struct{}
+
+func (noopFlusher) Flush() {}
+
+// asFlusher returns the writer's Flusher or a no-op, so streaming paths never
+// panic on an unchecked type assertion if the writer chain ever changes.
+func asFlusher(w http.ResponseWriter) http.Flusher {
+	if f, ok := w.(http.Flusher); ok {
+		return f
+	}
+	return noopFlusher{}
+}
+
 type ProxyHandler struct {
 	db      *db.DB
 	limiter *RateLimiter
@@ -253,9 +270,17 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Read Request Body
+	// 2. Read Request Body (bounded to prevent memory-exhaustion DoS).
+	// Transcription (multipart audio) is capped separately in its handler.
+	if !strings.Contains(r.URL.Path, "/audio/transcriptions") {
+		r.Body = http.MaxBytesReader(w, r.Body, maxChatRequestBytes)
+	}
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		if strings.Contains(err.Error(), "http: request body too large") {
+			h.writeError(w, http.StatusRequestEntityTooLarge, "Request body exceeds the maximum allowed size.", "invalid_request_error")
+			return
+		}
 		h.writeError(w, http.StatusBadRequest, "Failed to read request body", "invalid_request_error")
 		return
 	}
@@ -429,6 +454,19 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		candidates = append(candidates, fallbackModels...)
 	}
 
+	// Estimate prompt tokens once: the prompt is identical across failover
+	// candidates (only the target model changes), so the rate/budget check must
+	// run a single time. Checking per-candidate double-counted RPM/TPM on retry.
+	var textBuilder strings.Builder
+	for _, m := range oaiReq.Messages {
+		textBuilder.WriteString(GetMessageContentString(m.Content))
+	}
+	promptTokens := estimateTokens(textBuilder.String())
+	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+		return
+	}
+
 	var lastBuffer *BufferedResponseWriter
 	success := false
 
@@ -445,19 +483,6 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		if provider == nil || provider.Status != "active" {
 			log.Printf("[ROUTER-WARNING] Provider %s is inactive for model %s", model.ProviderID, model.Name)
 			continue
-		}
-
-		// Estimate prompt tokens
-		var textBuilder strings.Builder
-		for _, m := range reqCopy.Messages {
-			textBuilder.WriteString(GetMessageContentString(m.Content))
-		}
-		promptTokens := estimateTokens(textBuilder.String())
-
-		// Check Rate Limits and Budgets
-		if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
-			h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
-			return
 		}
 
 		requestedModel := oaiReq.Model
@@ -603,6 +628,22 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		candidates = append(candidates, fallbackModels...)
 	}
 
+	// Estimate prompt tokens and check limits once (identical across failover
+	// candidates); checking per-candidate double-counted RPM/TPM on retry.
+	var textBuilder strings.Builder
+	textBuilder.WriteString(string(anthReq.System))
+	for _, m := range anthReq.Messages {
+		for _, b := range m.Content {
+			textBuilder.WriteString(b.Text)
+			textBuilder.WriteString(b.Thinking)
+		}
+	}
+	promptTokens := estimateTokens(textBuilder.String())
+	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+		return
+	}
+
 	var lastBuffer *BufferedResponseWriter
 	success := false
 
@@ -619,23 +660,6 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		if provider == nil || provider.Status != "active" {
 			log.Printf("[ROUTER-WARNING] Provider %s is inactive for model %s", model.ProviderID, model.Name)
 			continue
-		}
-
-		// Estimate prompt tokens
-		var textBuilder strings.Builder
-		textBuilder.WriteString(string(reqCopy.System))
-		for _, m := range reqCopy.Messages {
-			for _, b := range m.Content {
-				textBuilder.WriteString(b.Text)
-				textBuilder.WriteString(b.Thinking)
-			}
-		}
-		promptTokens := estimateTokens(textBuilder.String())
-
-		// Check limits
-		if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
-			h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
-			return
 		}
 
 		requestedModel := anthReq.Model
@@ -757,7 +781,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
+		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
 		var textAccumulator strings.Builder
@@ -891,7 +915,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
+		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
 		var usageTracker OpenAIUsage
@@ -1008,7 +1032,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
+		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
 		var usageTracker AnthropicUsage
@@ -1121,7 +1145,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
+		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
 		var usageTracker AnthropicUsage

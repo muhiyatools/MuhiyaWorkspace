@@ -360,6 +360,24 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Providers Handler ---
+// providerView is the browser-safe projection of a provider: the upstream API
+// key is never serialized, only whether one is configured.
+type providerView struct {
+	db.Provider
+	APIKey    string `json:"api_key"` // always "" — shadows the embedded secret
+	HasAPIKey bool   `json:"has_api_key"`
+}
+
+func redactProviderKeys(list []db.Provider) []providerView {
+	out := make([]providerView, 0, len(list))
+	for _, p := range list {
+		hasKey := strings.TrimSpace(p.APIKey) != ""
+		p.APIKey = ""
+		out = append(out, providerView{Provider: p, APIKey: "", HasAPIKey: hasKey})
+	}
+	return out
+}
+
 func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -368,7 +386,10 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		api.jsonResponse(w, http.StatusOK, list)
+		// Never ship upstream API keys to the browser. Redact the secret and
+		// expose only whether one is configured; the edit form preserves the
+		// stored key when the field is left blank (see PUT below).
+		api.jsonResponse(w, http.StatusOK, redactProviderKeys(list))
 
 	case http.MethodPost:
 		var p db.Provider
@@ -387,7 +408,7 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		api.jsonResponse(w, http.StatusCreated, p)
+		api.jsonResponse(w, http.StatusCreated, redactProviderKeys([]db.Provider{p})[0])
 
 	case http.MethodPut:
 		var p db.Provider
@@ -414,12 +435,17 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 		if p.CreatedAt.IsZero() {
 			p.CreatedAt = existing.CreatedAt
 		}
+		// A blank incoming key means "unchanged" (the GET response redacts it),
+		// so preserve the stored secret instead of wiping it.
+		if strings.TrimSpace(p.APIKey) == "" {
+			p.APIKey = existing.APIKey
+		}
 		p.UpdatedAt = time.Now()
 		if err := api.db.UpdateProvider(p); err != nil {
 			api.errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		api.jsonResponse(w, http.StatusOK, p)
+		api.jsonResponse(w, http.StatusOK, redactProviderKeys([]db.Provider{p})[0])
 
 	case http.MethodDelete:
 		id := r.URL.Query().Get("id")

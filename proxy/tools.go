@@ -43,6 +43,11 @@ type ToolContext struct {
 type ToolSettings struct {
 	TavilyAPIKey string // Tavily search key, preferred for gateway web search
 	SerperAPIKey string // Serper search key, retained as fallback when configured
+	// DDGFallback enables the key-less DuckDuckGo backend so web search works
+	// out of the box (and coding agents like MuhiyaCode see it as available)
+	// even when no paid key is configured. Admins can disable it by setting
+	// system_settings.web_search_ddg_fallback to "false".
+	DDGFallback bool
 }
 
 // ToolExecution is the result of running a single tool call.
@@ -64,6 +69,18 @@ func LoadToolSettings(database *db.DB) ToolSettings {
 	return ToolSettings{
 		TavilyAPIKey: firstNonEmpty(get("tavily_api_key"), strings.TrimSpace(os.Getenv("TAVILY_API_KEY"))),
 		SerperAPIKey: firstNonEmpty(get("serper_api_key"), strings.TrimSpace(os.Getenv("SERPER_API_KEY"))),
+		DDGFallback:  !isFalsey(firstNonEmpty(get("web_search_ddg_fallback"), strings.TrimSpace(os.Getenv("WEB_SEARCH_DDG_FALLBACK")))),
+	}
+}
+
+// isFalsey reports whether a setting string explicitly disables a feature.
+// An empty/unset value is treated as NOT falsey (features default on).
+func isFalsey(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "0", "off", "no", "disabled":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -82,7 +99,7 @@ func (s ToolSettings) ToolsEnabled() bool {
 }
 
 func (s ToolSettings) WebSearchEnabled() bool {
-	return s.TavilyAPIKey != "" || s.SerperAPIKey != ""
+	return s.TavilyAPIKey != "" || s.SerperAPIKey != "" || s.DDGFallback
 }
 
 // ----------------------------------------------------------------------------

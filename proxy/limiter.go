@@ -163,17 +163,28 @@ func (rl *RateLimiter) checkRedisLimits(keyID string, rpmLimit, tpmLimit, prompt
 
 	cmds, err := pipe.Exec(ctx)
 	if err != nil && err != redis.Nil {
-		return fmt.Errorf("redis operation failed: %w", err)
+		// A transient Redis failure must not take down all traffic. Fail open to
+		// the per-process in-memory limiter instead of returning an error.
+		log.Printf("[LIMITER-WARNING] Redis unavailable, falling back to in-memory limits: %v", err)
+		return rl.checkInMemoryLimits(keyID, rpmLimit, tpmLimit, promptTokens)
+	}
+
+	// Guard against a short/partial pipeline result before indexing.
+	rpmCmd, rpmOK := cmdAt[*redis.IntCmd](cmds, 1)
+	tpmCmd, tpmOK := cmdAt[*redis.ZSliceCmd](cmds, 3)
+	if !rpmOK || !tpmOK {
+		log.Printf("[LIMITER-WARNING] Unexpected Redis pipeline result, falling back to in-memory limits")
+		return rl.checkInMemoryLimits(keyID, rpmLimit, tpmLimit, promptTokens)
 	}
 
 	// 1. RPM check
-	rpmCount, _ := cmds[1].(*redis.IntCmd).Result()
+	rpmCount, _ := rpmCmd.Result()
 	if rpmLimit > 0 && int(rpmCount) >= rpmLimit {
 		return fmt.Errorf("requests per minute (RPM) limit of %d exceeded", rpmLimit)
 	}
 
 	// 2. TPM check
-	tpmRanges, _ := cmds[3].(*redis.ZSliceCmd).Result()
+	tpmRanges, _ := tpmCmd.Result()
 	currentTPM := 0
 	for _, z := range tpmRanges {
 		memberStr, ok := z.Member.(string)
@@ -213,6 +224,17 @@ func (rl *RateLimiter) checkRedisLimits(keyID string, rpmLimit, tpmLimit, prompt
 	}
 
 	return nil
+}
+
+// cmdAt safely retrieves and type-asserts a command from a Redis pipeline
+// result, returning ok=false instead of panicking on a short/partial slice.
+func cmdAt[T redis.Cmder](cmds []redis.Cmder, i int) (T, bool) {
+	var zero T
+	if i < 0 || i >= len(cmds) {
+		return zero, false
+	}
+	v, ok := cmds[i].(T)
+	return v, ok
 }
 
 func (rl *RateLimiter) checkInMemoryLimits(keyID string, rpmLimit, tpmLimit, promptTokens int) error {

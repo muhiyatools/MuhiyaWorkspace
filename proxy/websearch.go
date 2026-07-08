@@ -109,14 +109,16 @@ func (tc *ToolContext) RunWebSearch(req WebSearchRequest) (*WebSearchResult, err
 		lastErr = err
 	}
 
-	ddg, answer := tc.duckDuckGoSearch(stripSiteFilters(req.Query), req.MaxResults)
-	if len(ddg) > 0 {
-		return buildWebSearchResult(req.Query, "duckduckgo", answer, ddg), nil
+	if tc.Settings.DDGFallback {
+		ddg, answer := tc.duckDuckGoSearch(stripSiteFilters(req.Query), req.MaxResults)
+		if len(ddg) > 0 {
+			return buildWebSearchResult(req.Query, "duckduckgo", answer, ddg), nil
+		}
 	}
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("no search provider is configured")
+	return nil, fmt.Errorf("no search provider returned results")
 }
 
 func webSearchRequestFromArgs(args map[string]interface{}) WebSearchRequest {

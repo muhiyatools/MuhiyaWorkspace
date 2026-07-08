@@ -681,15 +681,23 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		normalizedName = "deepseek-chat"
 	}
 
+	// Resolve primarily by the virtual name (the routable slug clients should
+	// send). As defense-in-depth, also accept a case-insensitive display_name
+	// match so a client that mistakenly echoes back the human-readable label
+	// (e.g. "Deepseek V4 Pro") still resolves instead of 404ing. An exact
+	// name match is always preferred when both would match.
 	var m Model
-	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
+	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '') 
-		FROM models WHERE name = $1 AND status = 'active'`, normalizedName).
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '')
+		FROM models
+		WHERE status = 'active' AND (name = $1 OR lower(display_name) = lower($1))
+		ORDER BY (name = $1) DESC
+		LIMIT 1`, normalizedName).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, 
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy)
 	if err == sql.ErrNoRows {

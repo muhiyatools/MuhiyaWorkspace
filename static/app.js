@@ -1,3 +1,17 @@
+// Escape untrusted, DB-stored strings before interpolating into innerHTML.
+// Request logs capture attacker-controlled values (X-Client-App header, the
+// requested model name, the URL path, upstream error text); rendering them raw
+// is a stored-XSS vector reachable by any virtual-key holder.
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     let charts = {};
 
@@ -1061,8 +1075,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const costFormatted = '$' + l.cost.toFixed(6);
             const tokensText = `${l.input_tokens} / ${l.output_tokens} <small style="color:var(--text-muted-dark)">(R:${l.cache_read_tokens} W:${l.cache_write_tokens})</small>`;
 
-            const app = l.client_app || 'API Client';
-            const appLower = app.toLowerCase();
+            const app = escapeHtml(l.client_app || 'API Client');
+            const appLower = (l.client_app || 'API Client').toLowerCase();
             let clientAppBadge = '';
             if (appLower.includes('muhiyaachat') || appLower.includes('muhiya chat')) {
                 clientAppBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); text-transform:none;"><i class="fa-solid fa-comment-dots" style="margin-right: 4px;"></i>${app}</span>`;
@@ -1083,16 +1097,16 @@ document.addEventListener('DOMContentLoaded', () => {
             return `
                 <tr>
                     <td>${timeStr}</td>
-                    <td><small><code>${l.virtual_key_id}</code></small></td>
-                    <td><strong>${ownerName}</strong></td>
+                    <td><small><code>${escapeHtml(l.virtual_key_id)}</code></small></td>
+                    <td><strong>${escapeHtml(ownerName)}</strong></td>
                     <td>${clientAppBadge}</td>
-                    <td><strong>${l.model_id}</strong></td>
-                    <td><code>${l.request_path}</code></td>
-                    <td><span class="status-pill ${statusClass}">${l.status_code}</span></td>
+                    <td><strong>${escapeHtml(l.model_id)}</strong></td>
+                    <td><code>${escapeHtml(l.request_path)}</code></td>
+                    <td><span class="status-pill ${statusClass}">${escapeHtml(l.status_code)}</span></td>
                     <td>${tokensText}</td>
-                    <td><strong>${l.latency_ms} ms</strong></td>
+                    <td><strong>${escapeHtml(l.latency_ms)} ms</strong></td>
                     <td><strong style="color:#10b981;">${costFormatted}</strong></td>
-                    <td><small class="text-muted" style="color:var(--danger); font-size:0.75rem;">${l.error_message ? l.error_message.substring(0, 30) + '...' : '-'}</small></td>
+                    <td><small class="text-muted" style="color:var(--danger); font-size:0.75rem;">${l.error_message ? escapeHtml(l.error_message.substring(0, 30)) + '...' : '-'}</small></td>
                     <td>
                         <button class="btn btn-secondary btn-sm" onclick="showLogDetails('${l.id}')"><i class="fa-solid fa-circle-info"></i> Details</button>
                     </td>
@@ -1301,7 +1315,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <span>Complexity: <span class="tier-badge ${compClass}" style="font-size: 11px; padding: 2px 6px;">${complexityBadge}</span></span>
                     </div>
                     <div style="display: flex; gap: 2rem; margin-top: 0.75rem; font-size: 0.85rem;">
-                        <span><strong>Primary Target:</strong> <code>${l.model_id}</code></span>
+                        <span><strong>Primary Target:</strong> <code>${escapeHtml(l.model_id)}</code></span>
                         <span><strong>Retry Index:</strong> <code>${l.failover_attempts}</code> ${l.failover_attempts > 0 ? `<span class="text-warning" style="color:#fbbf24; font-weight:bold;"><i class="fa-solid fa-triangle-exclamation"></i> Fallback Used</span>` : `<span class="text-success" style="color:#10b981; font-weight:bold;"><i class="fa-solid fa-circle-check"></i> Primary Succeeded</span>`}</span>
                     </div>
                 </div>
@@ -1311,7 +1325,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const errorHTML = l.error_message ? `
             <div class="details-section error-info" style="background: rgba(239, 68, 68, 0.05); border: 1px solid rgba(239, 68, 68, 0.15); border-radius: 8px; padding: 1rem; margin-top: 1rem; color: var(--danger);">
                 <h4 style="margin-bottom: 0.5rem; font-size: 0.9rem; color:#ef4444;"><i class="fa-solid fa-triangle-exclamation"></i> Upstream Error Log</h4>
-                <pre style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; overflow-x: auto;">${l.error_message}</pre>
+                <pre style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; overflow-x: auto;">${escapeHtml(l.error_message)}</pre>
             </div>
         ` : '';
 
@@ -1325,9 +1339,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         <tr><td style="color:var(--text-muted); width:100px;">Log ID:</td><td><small><code>${l.id}</code></small></td></tr>
                         <tr><td style="color:var(--text-muted);">Timestamp:</td><td>${dateStr}</td></tr>
                         <tr><td style="color:var(--text-muted);">Virtual Key:</td><td><small><code>${l.virtual_key_id.substring(0,18)}...</code></small></td></tr>
-                        <tr><td style="color:var(--text-muted);">User:</td><td><strong>${ownerName}</strong></td></tr>
-                        <tr><td style="color:var(--text-muted);">Client App:</td><td><code>${l.client_app || 'API Client'}</code></td></tr>
-                        <tr><td style="color:var(--text-muted);">Path:</td><td><code>${l.request_path}</code></td></tr>
+                        <tr><td style="color:var(--text-muted);">User:</td><td><strong>${escapeHtml(ownerName)}</strong></td></tr>
+                        <tr><td style="color:var(--text-muted);">Client App:</td><td><code>${escapeHtml(l.client_app || 'API Client')}</code></td></tr>
+                        <tr><td style="color:var(--text-muted);">Path:</td><td><code>${escapeHtml(l.request_path)}</code></td></tr>
                     </table>
                 </div>
                 
@@ -1336,7 +1350,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <table class="details-subtable" style="width:100%; font-size: 0.8rem; line-height: 1.6;">
                         <tr><td style="color:var(--text-muted); width:100px;">HTTP Status:</td><td><span class="status-indicator-badge ${statusClass}" style="padding: 2px 6px; border-radius:4px; font-size: 10px;">${l.status_code} ${statusText}</span></td></tr>
                         <tr><td style="color:var(--text-muted);">Latency:</td><td><strong>${l.latency_ms} ms</strong></td></tr>
-                        <tr><td style="color:var(--text-muted);">Routed Model:</td><td><code>${l.model_id}</code></td></tr>
+                        <tr><td style="color:var(--text-muted);">Routed Model:</td><td><code>${escapeHtml(l.model_id)}</code></td></tr>
                         <tr><td style="color:var(--text-muted);">Precise Cost:</td><td><strong style="color:#10b981; font-size:1rem;">$${l.cost.toFixed(6)}</strong></td></tr>
                         <tr><td style="color:var(--text-muted);">Cache Hit Rate:</td><td><strong style="color:#3b82f6;">${cacheHitRate}%</strong></td></tr>
                     </table>

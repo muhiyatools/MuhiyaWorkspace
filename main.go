@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"embed"
 	"fmt"
 	"log"
@@ -39,6 +40,7 @@ func main() {
 	adminPass := os.Getenv("ADMIN_PASSWORD")
 	if adminPass == "" {
 		adminPass = "adminpassword"
+		log.Printf("[SECURITY] ADMIN_PASSWORD is not set; using the insecure default. Set ADMIN_PASSWORD before exposing this gateway.")
 	}
 
 	mux := http.NewServeMux()
@@ -162,7 +164,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Fatal: failed to initialize database: %v", err)
 	}
-	dbReady.Store(true)
 	defer database.Close()
 
 	// Initialize rate limiter
@@ -225,6 +226,12 @@ func main() {
 
 	proxyMuxHandler = corsMiddleware(proxy.NewProxyHandler(database, limiter))
 
+	// Publish readiness only after all sub-handlers are assigned. The atomic
+	// Store here happens-before the atomic Load in each request wrapper, so the
+	// handler assignments above are guaranteed visible and there is no window
+	// where dbReady is true but a handler is still nil.
+	dbReady.Store(true)
+
 	fmt.Println(`
     __  ___      __    _               __    __    __  ___
    /  |/  /_  __/ /_  (_)__  ______ _ / /   / /   /  |/  /
@@ -236,9 +243,9 @@ func main() {
  Dashboard: http://localhost:` + port + `/admin/
  OpenAI Endpoint: http://localhost:` + port + `/v1/chat/completions
 
- [SECURITY CREDENTIALS]
+ [ADMIN LOGIN]
  Username: ` + adminUser + `
- Password: ` + adminPass + `
+ Password: (configured via ADMIN_PASSWORD)
 
  Database: External (DATABASE_URL)
 ==================================================
@@ -304,16 +311,37 @@ func registerProxyRoutes(mux *http.ServeMux, proxyWrapper http.Handler) {
 
 func loggerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[REQ] %s %s (x-api-key: %q, Authorization: %q)",
-			r.Method, r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("Authorization"))
+		// Never log full credentials. Record only a redacted fingerprint so
+		// logs can correlate a caller without leaking the secret.
+		log.Printf("[REQ] %s %s (auth: %s)", r.Method, r.URL.Path, redactCredential(r))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// redactCredential returns a non-reversible hint about the presented key.
+func redactCredential(r *http.Request) string {
+	key := r.Header.Get("x-api-key")
+	if key == "" {
+		key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "none"
+	}
+	if len(key) <= 8 {
+		return "set(****)"
+	}
+	return "set(" + key[:4] + "…" + key[len(key)-2:] + ")"
 }
 
 func basicAuth(username, password string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
-		if !ok || u != username || p != password {
+		// Constant-time comparison avoids leaking credential length/prefix via
+		// response timing.
+		userOK := subtle.ConstantTimeCompare([]byte(u), []byte(username)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(p), []byte(password)) == 1
+		if !ok || !userOK || !passOK {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Admin Area"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
