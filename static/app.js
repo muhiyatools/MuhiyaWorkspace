@@ -25,6 +25,38 @@ document.addEventListener('DOMContentLoaded', () => {
         logs: []
     };
 
+    // --- Networking helpers ---
+    // Wraps fetch + JSON parsing so a non-2xx response or a backend
+    // `{"error": "..."}` payload becomes a real thrown Error carrying the
+    // actual server message, instead of silently flowing through as if it
+    // were success data (which used to crash later .map()/.length calls with
+    // no visible explanation — the "load error, no data shown" symptom).
+    function fetchJSON(url, options) {
+        return fetch(url, options).then((res) => {
+            return res.json().catch(() => null).then((body) => {
+                const looksLikeError = body && typeof body === 'object' && !Array.isArray(body) && 'error' in body;
+                if (!res.ok || looksLikeError) {
+                    const message = (body && body.error) ? body.error : `Request failed (HTTP ${res.status})`;
+                    throw new Error(message);
+                }
+                return body;
+            });
+        });
+    }
+
+    // Renders a visible, styled error row inside a <tbody>, replacing what
+    // used to be a silently blank table with no indication anything failed.
+    function renderTableError(tbody, colspan, message) {
+        if (!tbody) return;
+        tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-danger text-center" style="text-align:center;">⚠ Failed to load: ${escapeHtml(message)}</td></tr>`;
+    }
+
+    // Same idea for non-table containers (provider cards, router tier lists).
+    function renderContainerError(el, message) {
+        if (!el) return;
+        el.innerHTML = `<div class="text-danger" style="grid-column: 1/-1; text-align: center; padding: 1rem;">⚠ Failed to load: ${escapeHtml(message)}</div>`;
+    }
+
     // DOM Elements
     const navItems = document.querySelectorAll('.nav-item');
     const tabContents = document.querySelectorAll('.tab-content');
@@ -446,10 +478,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load Dashboard Stats
     function loadDashboardStats() {
         Promise.all([
-            fetch('/api/stats').then(res => res.json()),
-            fetch('/api/users').then(res => res.json()),
-            fetch('/api/keys').then(res => res.json())
+            fetchJSON('/api/stats'),
+            fetchJSON('/api/users'),
+            fetchJSON('/api/keys')
         ]).then(([data, users, keys]) => {
+            users = users || [];
+            keys = keys || [];
             state.users = users;
             state.keys = keys;
 
@@ -477,7 +511,17 @@ document.addEventListener('DOMContentLoaded', () => {
             renderCharts(data);
             renderBudgetWindows(users);
         })
-        .catch(err => console.error('Error loading dashboard stats:', err));
+        .catch(err => {
+            console.error('Error loading dashboard stats:', err);
+            ['stat-requests', 'stat-cost', 'stat-tokens', 'stat-latency', 'stat-success',
+             'stat-cache-hit-rate', 'stat-cache-reads', 'stat-cache-writes',
+             'stat-active-keys', 'stat-active-users', 'stat-cost-1k', 'stat-avg-tokens-req'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) el.innerText = 'Error';
+            });
+            const container = document.getElementById('dashboard-budget-windows');
+            if (container) renderContainerError(container, err.message);
+        });
     }
 
     function renderCharts(data) {
@@ -613,17 +657,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Users CRUD ---
     function loadUsers() {
+        const tbody = document.querySelector('#users-table tbody');
         Promise.all([
-            fetch('/api/plans').then(res => res.json()),
-            fetch('/api/users').then(res => res.json())
+            fetchJSON('/api/plans'),
+            fetchJSON('/api/users')
         ]).then(([plans, users]) => {
+            plans = plans || [];
+            users = users || [];
             state.plans = plans;
             state.users = users;
 
             const select = document.getElementById('user-plan-id');
             select.innerHTML = plans.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
 
-            const tbody = document.querySelector('#users-table tbody');
             if (!users || users.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="8" class="text-muted text-center" style="text-align: center;">No users registered yet.</td></tr>`;
                 return;
@@ -705,7 +751,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     </tr>
                 `;
             }).join('');
-        }).catch(err => console.error("Error loading users & budgets:", err));
+        }).catch(err => {
+            console.error("Error loading users & budgets:", err);
+            renderTableError(tbody, 8, err.message);
+        });
     }
 
     window.editUser = (id) => {
@@ -731,21 +780,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Virtual Keys CRUD ---
     function loadKeys() {
-        fetch('/api/users')
-            .then(res => res.json())
+        fetchJSON('/api/users')
             .then(users => {
+                users = users || [];
                 state.users = users;
                 const select = document.getElementById('key-user-id');
                 select.innerHTML = users.map(u => `<option value="${u.id}">${u.name} (${u.email})</option>`).join('');
-            });
+            })
+            .catch(err => console.error('Error loading users for key form:', err));
 
+        const tbody = document.querySelector('#keys-table tbody');
         Promise.all([
-            fetch('/api/keys').then(res => res.json()),
-            fetch('/api/users').then(res => res.json())
+            fetchJSON('/api/keys'),
+            fetchJSON('/api/users')
         ]).then(([keys, users]) => {
+            keys = keys || [];
+            users = users || [];
             state.keys = keys;
             state.users = users;
-            const tbody = document.querySelector('#keys-table tbody');
             if (!keys || keys.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center" style="text-align: center;">No virtual keys created yet.</td></tr>`;
                 return;
@@ -774,7 +826,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     </tr>
                 `;
             }).join('');
-        }).catch(err => console.error("Error listing keys:", err));
+        }).catch(err => {
+            console.error("Error listing keys:", err);
+            renderTableError(tbody, 7, err.message);
+        });
     }
 
     window.editKey = (id) => {
@@ -806,11 +861,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Plans CRUD ---
     function loadPlansAndBudgets() {
-        fetch('/api/plans')
-            .then(res => res.json())
+        const tbody = document.querySelector('#plans-table tbody');
+        fetchJSON('/api/plans')
             .then(plans => {
+                plans = plans || [];
                 state.plans = plans;
-                const tbody = document.querySelector('#plans-table tbody');
                 if (!plans || plans.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="6" class="text-muted text-center" style="text-align: center;">No plans registered.</td></tr>`;
                     return;
@@ -833,7 +888,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         </tr>
                     `;
                 }).join('');
-            }).catch(err => console.error("Error loading plans:", err));
+            }).catch(err => {
+                console.error("Error loading plans:", err);
+                renderTableError(tbody, 6, err.message);
+            });
     }
 
     window.editPlan = (id) => {
@@ -869,14 +927,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Providers & Models CRUD ---
     function loadProvidersAndModels() {
-        fetch('/api/providers')
-            .then(res => res.json())
+        const list = document.getElementById('providers-list');
+        fetchJSON('/api/providers')
             .then(providers => {
+                providers = providers || [];
                 state.providers = providers;
                 const select = document.getElementById('model-provider-id');
                 select.innerHTML = providers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
 
-                const list = document.getElementById('providers-list');
                 if (!providers || providers.length === 0) {
                     list.innerHTML = `<div class="text-muted" style="grid-column: 1/-1; text-align: center;">No providers connected.</div>`;
                     return;

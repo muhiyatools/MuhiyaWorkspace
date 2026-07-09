@@ -334,7 +334,7 @@ func (db *DB) ListUsers() ([]User, error) {
 	}
 	defer rows.Close()
 
-	var list []User
+	list := []User{}
 	for rows.Next() {
 		var u User
 		if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.PlanID, &u.Status, &u.CreatedAt, &u.PlanAssignedAt); err != nil {
@@ -410,7 +410,7 @@ func (db *DB) ListPlans() ([]Plan, error) {
 	}
 	defer rows.Close()
 
-	var list []Plan
+	list := []Plan{}
 	for rows.Next() {
 		var p Plan
 		if err := rows.Scan(&p.ID, &p.Name, &p.RPMLimit, &p.TPMLimit, &p.CreatedAt); err != nil {
@@ -512,7 +512,7 @@ func (db *DB) ListBudgetWindows() ([]BudgetWindow, error) {
 	}
 	defer rows.Close()
 
-	var list []BudgetWindow
+	list := []BudgetWindow{}
 	for rows.Next() {
 		var bw BudgetWindow
 		if err := rows.Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.CreatedAt); err != nil {
@@ -530,7 +530,7 @@ func (db *DB) ListBudgetWindowsByPlan(planID string) ([]BudgetWindow, error) {
 	}
 	defer rows.Close()
 
-	var list []BudgetWindow
+	list := []BudgetWindow{}
 	for rows.Next() {
 		var bw BudgetWindow
 		if err := rows.Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.CreatedAt); err != nil {
@@ -578,7 +578,7 @@ func (db *DB) ListVirtualKeys() ([]VirtualKey, error) {
 	}
 	defer rows.Close()
 
-	var list []VirtualKey
+	list := []VirtualKey{}
 	for rows.Next() {
 		var vk VirtualKey
 		if err := rows.Scan(&vk.ID, &vk.Name, &vk.UserID, &vk.Status, &vk.ExpiresAt, &vk.CreatedAt); err != nil {
@@ -596,7 +596,7 @@ func (db *DB) ListVirtualKeysByUserID(userID string) ([]VirtualKey, error) {
 	}
 	defer rows.Close()
 
-	var list []VirtualKey
+	list := []VirtualKey{}
 	for rows.Next() {
 		var vk VirtualKey
 		if err := rows.Scan(&vk.ID, &vk.Name, &vk.UserID, &vk.Status, &vk.ExpiresAt, &vk.CreatedAt); err != nil {
@@ -644,7 +644,7 @@ func (db *DB) ListProviders() ([]Provider, error) {
 	}
 	defer rows.Close()
 
-	var list []Provider
+	list := []Provider{}
 	for rows.Next() {
 		var p Provider
 		if err := rows.Scan(&p.ID, &p.Name, &p.APIKey, &p.BaseURL, &p.AnthropicBaseURL, &p.Status, &p.CreatedAt, &p.UpdatedAt); err != nil {
@@ -743,7 +743,7 @@ func (db *DB) ListModels() ([]Model, error) {
 	}
 	defer rows.Close()
 
-	var list []Model
+	list := []Model{}
 	for rows.Next() {
 		var m Model
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
@@ -820,7 +820,7 @@ func (db *DB) ListSettings() ([]SystemSetting, error) {
 	}
 	defer rows.Close()
 
-	var list []SystemSetting
+	list := []SystemSetting{}
 	for rows.Next() {
 		var s SystemSetting
 		if err := rows.Scan(&s.Key, &s.Value); err != nil {
@@ -898,7 +898,7 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	}
 	defer rows.Close()
 
-	var list []RequestLog
+	list := []RequestLog{}
 	for rows.Next() {
 		var r RequestLog
 		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
@@ -1041,7 +1041,7 @@ func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
 	}
 	defer rows.Close()
 
-	var list []UserTopup
+	list := []UserTopup{}
 	for rows.Next() {
 		var u UserTopup
 		if err := rows.Scan(&u.ID, &u.UserID, &u.Credits, &u.UsedCredits, &u.CreatedAt); err != nil {
