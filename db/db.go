@@ -863,8 +863,11 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 }
 
 func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string) ([]RequestLog, error) {
+	// virtual_key_id / user_id are COALESCEd because migration 005 makes them
+	// nullable (ON DELETE SET NULL): a log whose user or key was later deleted
+	// survives with a null reference and must still scan into a string.
 	query := `
-		SELECT request_logs.id, request_logs.virtual_key_id, request_logs.user_id, COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code, 
+		SELECT request_logs.id, COALESCE(request_logs.virtual_key_id, ''), COALESCE(request_logs.user_id, ''), COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code,
 		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
 		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, '')
 		FROM request_logs
