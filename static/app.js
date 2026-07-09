@@ -956,13 +956,17 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                     </div>
                 `).join('');
+            })
+            .catch(err => {
+                console.error('Error loading providers:', err);
+                renderContainerError(list, err.message);
             });
 
-        fetch('/api/models')
-            .then(res => res.json())
+        const tbody = document.querySelector('#models-table tbody');
+        fetchJSON('/api/models')
             .then(models => {
+                models = models || [];
                 state.models = models;
-                const tbody = document.querySelector('#models-table tbody');
                 if (!models || models.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="13" class="text-muted text-center" style="text-align: center;">No virtual model mappings configured.</td></tr>`;
                     return;
@@ -993,6 +997,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         </td>
                     </tr>
                 `; }).join('');
+            })
+            .catch(err => {
+                console.error('Error loading models:', err);
+                renderTableError(tbody, 13, err.message);
             });
     }
 
@@ -1065,9 +1073,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function loadLogs() {
         Promise.all([
-            fetch('/api/logs?limit=100').then(res => res.json()),
-            fetch('/api/users').then(res => res.json())
+            fetchJSON('/api/logs?limit=100'),
+            fetchJSON('/api/users')
         ]).then(([logs, users]) => {
+            logs = logs || [];
+            users = users || [];
             state.logs = logs;
             state.users = users;
 
@@ -1076,13 +1086,17 @@ document.addEventListener('DOMContentLoaded', () => {
             if (modelFilterSelect) {
                 const currentVal = modelFilterSelect.value;
                 const models = [...new Set(logs.map(l => l.model_id))].filter(Boolean);
-                modelFilterSelect.innerHTML = '<option value="all">All Models</option>' + 
+                modelFilterSelect.innerHTML = '<option value="all">All Models</option>' +
                     models.map(m => `<option value="${m}">${m}</option>`).join('');
                 modelFilterSelect.value = currentVal;
             }
 
             filterAndRenderLogs();
-        }).catch(err => console.error("Error loading logs:", err));
+        }).catch(err => {
+            console.error("Error loading logs:", err);
+            const tbody = document.querySelector('#logs-table tbody');
+            renderTableError(tbody, 12, err.message);
+        });
     }
 
     function filterAndRenderLogs() {
@@ -1175,9 +1189,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- System Settings ---
     function loadSettings() {
-        fetch('/api/settings')
-            .then(res => res.json())
+        fetchJSON('/api/settings')
             .then(settings => {
+                settings = settings || [];
                 const nameObj = settings.find(s => s.key === 'gateway_name');
                 if (nameObj) document.getElementById('setting-gateway-name').value = nameObj.value;
                 const tavilyObj = settings.find(s => s.key === 'tavily_api_key');
@@ -1458,12 +1472,16 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     function loadRouterData() {
+        const simpleListEl = document.getElementById('tier-list-simple');
+        const mediumListEl = document.getElementById('tier-list-medium');
+        const hardListEl = document.getElementById('tier-list-hard');
+
         // Fetch active models to populate routing tier columns dynamically
-        fetch('/api/models')
-            .then(res => res.json())
+        fetchJSON('/api/models')
             .then(models => {
+                models = models || [];
                 state.models = models;
-                
+
                 const simpleList = document.getElementById('tier-list-simple');
                 const mediumList = document.getElementById('tier-list-medium');
                 const hardList = document.getElementById('tier-list-hard');
@@ -1525,12 +1543,17 @@ document.addEventListener('DOMContentLoaded', () => {
                     hardList.innerHTML = '<div class="text-muted text-center" style="padding: 1.5rem; font-size:0.8rem; background:rgba(255,255,255,0.01); border: 1px dashed var(--panel-border); border-radius:8px;">No models assigned to Hard.</div>';
                 }
             })
-            .catch(err => console.error('Failed to load router models:', err));
+            .catch(err => {
+                console.error('Failed to load router models:', err);
+                renderContainerError(simpleListEl, err.message);
+                renderContainerError(mediumListEl, err.message);
+                renderContainerError(hardListEl, err.message);
+            });
 
         // Fetch logs to compute statistics and savings
-        fetch('/api/logs?limit=1000')
-            .then(res => res.json())
+        fetchJSON('/api/logs?limit=1000')
             .then(logs => {
+                logs = logs || [];
                 const routerLogs = logs.filter(log => log.requested_model === 'muhiya-ai-router');
                 const totalRequests = routerLogs.length;
                 
@@ -1567,8 +1590,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('router-stat-success').innerText = `${successRate.toFixed(1)}%`;
                 document.getElementById('router-stat-failovers').innerText = failoverCount.toLocaleString();
             })
-            .catch(err => console.error('Failed to load router logs:', err));
+            .catch(err => {
+                console.error('Failed to load router logs:', err);
+                ['router-stat-requests', 'router-stat-savings', 'router-stat-success', 'router-stat-failovers'].forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (el) el.innerText = 'Error';
+                });
+            });
     }
+
+    // Show the gateway's real reachable origin instead of a hardcoded
+    // "localhost:8090" — that string was static HTML and stayed wrong on
+    // every non-local deployment (e.g. the production elest.io host).
+    const openaiUrlEl = document.getElementById('api-openai-url');
+    const anthropicUrlEl = document.getElementById('api-anthropic-url');
+    if (openaiUrlEl) openaiUrlEl.innerText = `${window.location.origin}/v1`;
+    if (anthropicUrlEl) anthropicUrlEl.innerText = `${window.location.origin}/v1/messages`;
 
     // Load initial tab data
     loadTabData('dashboard');

@@ -81,6 +81,23 @@ body {
     color: var(--primary);
 }
 
+/* Utility text classes — referenced throughout app.js-generated markup
+   (empty-state placeholders, error rows, table hints) but previously had no
+   matching rule here, so they silently rendered as plain inherited-color text
+   instead of the intended muted/danger tone. */
+.text-muted {
+    color: var(--text-muted);
+}
+
+.text-danger {
+    color: var(--danger);
+    font-weight: 600;
+}
+
+.text-center {
+    text-align: center;
+}
+
 .badge {
     background: rgba(16, 185, 129, 0.1);
     color: var(--primary);
