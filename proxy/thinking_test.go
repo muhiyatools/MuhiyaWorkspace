@@ -109,21 +109,23 @@ func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
 		t.Errorf("thinking = %v", thinking)
 	}
 
+	// Thinking is NEVER disabled: DeepSeek supports high|max only, so
+	// low/medium ride the "high" floor and high/max ride "max".
 	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-flash", "low", nil)
-	if applied != "disabled" {
-		t.Fatalf("applied = %q", applied)
+	if applied != "high" || body["reasoning_effort"] != "high" {
+		t.Fatalf("low -> %q / %v", applied, body["reasoning_effort"])
 	}
-	if _, hasEffort := body["reasoning_effort"]; hasEffort {
-		t.Error("disabled thinking must not carry reasoning_effort")
-	}
-	if body["thinking"].(map[string]interface{})["type"] != "disabled" {
+	if body["thinking"].(map[string]interface{})["type"] != "enabled" {
 		t.Errorf("thinking = %v", body["thinking"])
 	}
 
-	// medium and high both land on DeepSeek "high".
 	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "medium", nil)
 	if applied != "high" || body["reasoning_effort"] != "high" {
 		t.Errorf("medium -> %q / %v", applied, body["reasoning_effort"])
+	}
+	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "high", nil)
+	if applied != "max" || body["reasoning_effort"] != "max" {
+		t.Errorf("high -> %q / %v", applied, body["reasoning_effort"])
 	}
 }
 
@@ -135,13 +137,19 @@ func TestApplyThinkingOpenAI_GLM(t *testing.T) {
 	if _, hasEffort := body["reasoning_effort"]; hasEffort {
 		t.Error("glm-4.x must not receive reasoning_effort")
 	}
+	// GLM-5 ladder is low|medium|high: max clamps to high, low rides low.
 	body, applied = applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-5.2", "max", nil)
-	if applied != "max" || body["reasoning_effort"] != "max" {
+	if applied != "high" || body["reasoning_effort"] != "high" {
 		t.Errorf("glm-5 max -> %q / %v", applied, body["reasoning_effort"])
 	}
+	body, applied = applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-5.2", "low", nil)
+	if applied != "low" || body["reasoning_effort"] != "low" {
+		t.Errorf("glm-5 low -> %q / %v", applied, body["reasoning_effort"])
+	}
+	// Never disabled, even at the lowest requested level.
 	body, _ = applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-4.5-air", "minimal", nil)
-	if body["thinking"].(map[string]interface{})["type"] != "disabled" {
-		t.Errorf("minimal must disable thinking, got %v", body["thinking"])
+	if body["thinking"].(map[string]interface{})["type"] != "enabled" {
+		t.Errorf("minimal must keep thinking enabled, got %v", body["thinking"])
 	}
 }
 
@@ -204,8 +212,9 @@ func TestApplyThinkingOpenAI_GrokQwenKimiGemini(t *testing.T) {
 		t.Errorf("grok-4.5 max -> %q", applied)
 	}
 
+	// Qwen only has a toggle - never disabled, regardless of level.
 	body, applied = applyOpenAI(t, "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3-max", "low", nil)
-	if applied != "disabled" || body["enable_thinking"] != false {
+	if applied != "enabled" || body["enable_thinking"] != true {
 		t.Errorf("qwen low -> %q / %v", applied, body["enable_thinking"])
 	}
 	body, applied = applyOpenAI(t, "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3-max", "high", nil)
@@ -294,13 +303,14 @@ func TestApplyThinkingAnthropic_Budget(t *testing.T) {
 		t.Error("unsupported models keep their sampling params untouched")
 	}
 
+	// Thinking is never disabled: low levels get the smallest real budget.
 	body = map[string]interface{}{"model": "claude-sonnet-4-5", "thinking": map[string]interface{}{"type": "enabled", "budget_tokens": 1024}}
 	applied = ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-4-5", "low")
-	if applied != "default" {
+	if applied != "budget-4096" {
 		t.Fatalf("low applied = %q", applied)
 	}
-	if _, has := body["thinking"]; has {
-		t.Error("low effort must omit the thinking object")
+	if body["thinking"].(map[string]interface{})["budget_tokens"] != 4096 {
+		t.Errorf("low budget = %v", body["thinking"])
 	}
 }
 
@@ -320,13 +330,27 @@ func TestApplyThinkingAnthropic_AdaptiveAndDeepseek(t *testing.T) {
 		t.Error("adaptive thinking must drop temperature")
 	}
 
+	// Adaptive models take the full ladder: medium maps to medium.
+	body = map[string]interface{}{"model": "claude-sonnet-5"}
+	applied = ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-5", "medium")
+	if applied != "adaptive-medium" {
+		t.Fatalf("adaptive medium applied = %q", applied)
+	}
+
+	// DeepSeek-Anthropic supports high|max only: high effort rides "max",
+	// low rides the "high" floor - never disabled.
 	body = map[string]interface{}{"model": "deepseek-v4-pro"}
 	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-pro", "high")
-	if applied != "high" {
-		t.Fatalf("deepseek anthropic applied = %q", applied)
+	if applied != "max" {
+		t.Fatalf("deepseek anthropic high applied = %q", applied)
 	}
-	if body["output_config"].(map[string]interface{})["effort"] != "high" {
+	if body["output_config"].(map[string]interface{})["effort"] != "max" {
 		t.Errorf("output_config = %v", body["output_config"])
+	}
+	body = map[string]interface{}{"model": "deepseek-v4-pro"}
+	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-pro", "low")
+	if applied != "high" || body["thinking"].(map[string]interface{})["type"] != "enabled" {
+		t.Fatalf("deepseek anthropic low applied = %q / %v", applied, body["thinking"])
 	}
 
 	// Unset level: client thinking object passes through untouched.

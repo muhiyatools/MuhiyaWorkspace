@@ -12,17 +12,20 @@ import (
 // Clients (MuhiyaCode, MuhiyaChat, third parties) express desired reasoning
 // depth ONCE, in gateway terms: an `X-Muhiya-Effort` header or a standard
 // `reasoning_effort` body field, normalized to the canonical levels below.
-// The gateway then speaks each provider's native dialect:
+// The gateway then maps the level onto each provider's SUPPORTED thinking
+// ladder. Thinking is NEVER disabled: a level below a provider's floor rides
+// the floor (e.g. DeepSeek supports only high|max, so low/medium effort ->
+// "high" and high/max effort -> "max").
 //
-//	DeepSeek  : thinking {type} + reasoning_effort high|max
-//	GLM       : thinking {type} (+ reasoning_effort on GLM-5+)
+//	DeepSeek  : thinking enabled + reasoning_effort high (low..medium) | max (high..max)
+//	GLM       : thinking enabled (+ reasoning_effort low|medium|high on GLM-5+)
 //	MiniMax   : always-on; only reasoning_split is useful
 //	OpenAI    : reasoning_effort minimal|low|medium|high (reasoning models ONLY - others 400)
-//	Qwen      : enable_thinking bool
-//	Kimi      : thinking {type} (k2.7-code: always-on, never send the param)
+//	Qwen      : enable_thinking true
+//	Kimi      : thinking enabled (k2.7-code: always-on, never send the param)
 //	Grok      : reasoning_effort low|high (3-mini) / low|medium|high (4.5+); grok-4 ERRORS on it
 //	Gemini    : reasoning_effort low|medium|high (never "none")
-//	Anthropic : thinking {enabled,budget_tokens} or {adaptive} + output_config effort
+//	Anthropic : thinking {enabled,budget_tokens 4096..24576} or {adaptive} + output_config effort
 //	Unknown   : strip everything - a silent no-op beats an upstream 400
 //
 // The client-facing fields are ALWAYS stripped from the forwarded body first:
@@ -219,14 +222,10 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 
 	switch family {
 	case famDeepseek:
-		// V3.2+/V4: thinking toggle plus effort high|max (lower values are
-		// remapped upstream anyway, so only send what is meaningful).
-		if rank <= 1 {
-			bodyMap["thinking"] = map[string]interface{}{"type": "disabled"}
-			return "disabled"
-		}
+		// DeepSeek reasoning supports exactly high|max. Thinking is never
+		// disabled: low/medium effort ride "high", high/max effort ride "max".
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
-		if level == ThinkingMax {
+		if rank >= 3 {
 			bodyMap["reasoning_effort"] = "max"
 			return "max"
 		}
@@ -234,15 +233,18 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 		return "high"
 
 	case famGLM:
-		// GLM-4.5+ honors the thinking toggle; GLM-5+ adds effort levels.
-		if rank <= 1 {
-			bodyMap["thinking"] = map[string]interface{}{"type": "disabled"}
-			return "disabled"
-		}
+		// GLM-4.5+ honors the thinking toggle (always enabled); GLM-5+ adds
+		// effort levels low|medium|high - map onto that ladder.
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
 		if strings.HasPrefix(model, "glm-5") {
-			bodyMap["reasoning_effort"] = level
-			return level
+			applied := "medium"
+			if rank <= 1 {
+				applied = "low"
+			} else if rank >= 3 {
+				applied = "high"
+			}
+			bodyMap["reasoning_effort"] = applied
+			return applied
 		}
 		return "enabled"
 
@@ -269,10 +271,7 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 		return applied
 
 	case famQwen:
-		if rank <= 1 {
-			bodyMap["enable_thinking"] = false
-			return "disabled"
-		}
+		// Thinking is never disabled; Qwen has no effort ladder, only a toggle.
 		bodyMap["enable_thinking"] = true
 		return "enabled"
 
@@ -280,10 +279,6 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 		if strings.Contains(model, "k2.7-code") {
 			// Always-on thinking; docs say do not pass the parameter at all.
 			return "always-on"
-		}
-		if rank <= 1 {
-			bodyMap["thinking"] = map[string]interface{}{"type": "disabled"}
-			return "disabled"
 		}
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
 		return "enabled"
@@ -357,28 +352,15 @@ func ApplyThinkingAnthropic(bodyMap map[string]interface{}, baseURL, targetModel
 	rank := thinkingRank(level)
 
 	if classifyUpstream(baseURL, targetModel) == famDeepseek {
-		// DeepSeek's Anthropic-compatible endpoint uses output_config.effort.
-		if rank <= 1 {
-			bodyMap["thinking"] = map[string]interface{}{"type": "disabled"}
-			delete(bodyMap, "output_config")
-			return "disabled"
-		}
+		// DeepSeek's Anthropic-compatible endpoint uses output_config.effort
+		// and supports exactly high|max - thinking is never disabled.
 		effort := "high"
-		if level == ThinkingMax {
+		if rank >= 3 {
 			effort = "max"
 		}
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
 		bodyMap["output_config"] = map[string]interface{}{"effort": effort}
 		return effort
-	}
-
-	// Anthropic proper (and compatible endpoints for claude models).
-	if rank <= 1 {
-		// Provider default is off for budget-style models; explicitly sending
-		// {"type":"disabled"} is also rejected by some versions - omit instead.
-		delete(bodyMap, "thinking")
-		delete(bodyMap, "output_config")
-		return "default"
 	}
 
 	// Models without extended thinking (3.5 and older) 400 on the parameter.
@@ -387,8 +369,14 @@ func ApplyThinkingAnthropic(bodyMap map[string]interface{}, baseURL, targetModel
 	}
 
 	if anthropicAdaptiveOnly(model) {
-		effort := "high"
-		if level == ThinkingMax {
+		// Adaptive models take the full effort ladder - map the level onto it.
+		effort := "medium"
+		switch {
+		case rank <= 1:
+			effort = "low"
+		case rank == 3:
+			effort = "high"
+		case rank >= 4:
 			effort = "max"
 		}
 		bodyMap["thinking"] = map[string]interface{}{"type": "adaptive"}
@@ -400,11 +388,15 @@ func ApplyThinkingAnthropic(bodyMap map[string]interface{}, baseURL, targetModel
 		return "adaptive-" + effort
 	}
 
+	// Budget-style models: thinking is never disabled - low levels get the
+	// smallest meaningful budget instead of none.
 	budget := 8192
 	if rank >= 4 {
 		budget = 24576
 	} else if rank >= 3 {
 		budget = 16384
+	} else if rank <= 1 {
+		budget = 4096
 	}
 	bodyMap["thinking"] = map[string]interface{}{"type": "enabled", "budget_tokens": budget}
 	// Extended thinking requires max_tokens > budget_tokens and default
