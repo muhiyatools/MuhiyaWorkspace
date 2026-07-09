@@ -845,9 +845,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		if finalUsage != nil {
 			inputTokens = finalUsage.PromptTokens
 			completionTokens = finalUsage.CompletionTokens
-			if finalUsage.PromptTokensDetails != nil {
-				cacheRead = finalUsage.PromptTokensDetails.CachedTokens
-			}
+			cacheRead = finalUsage.CacheReadTokens()
 		}
 
 		log.StatusCode = http.StatusOK
@@ -873,9 +871,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		if err := json.Unmarshal(respBody, &oaiResp); err == nil && oaiResp.Usage.TotalTokens > 0 {
 			log.InputTokens = oaiResp.Usage.PromptTokens
 			completionTokens = oaiResp.Usage.CompletionTokens
-			if oaiResp.Usage.PromptTokensDetails != nil {
-				cacheRead = oaiResp.Usage.PromptTokensDetails.CachedTokens
-			}
+			cacheRead = oaiResp.Usage.CacheReadTokens()
 		} else {
 			if len(oaiResp.Choices) > 0 {
 				completionTokens = estimateTokens(GetMessageContentString(oaiResp.Choices[0].Message.Content))
@@ -907,6 +903,9 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 	_ = json.Unmarshal(translated, &bodyMap)
 	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
+	// Anthropic caches nothing without explicit breakpoints; inject them so
+	// agent loops stop re-billing their full history at full price.
+	InjectAnthropicCacheControl(bodyMap, model.TargetModel)
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
 	if !strings.HasSuffix(url, "/v1/messages") && !strings.HasSuffix(url, "/messages") {
@@ -981,10 +980,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		log.StatusCode = http.StatusOK
 		log.InputTokens = usageTracker.PromptTokens
 		log.OutputTokens = usageTracker.CompletionTokens
-		cacheRead := 0
-		if usageTracker.PromptTokensDetails != nil {
-			cacheRead = usageTracker.PromptTokensDetails.CachedTokens
-		}
+		cacheRead := usageTracker.CacheReadTokens()
 		log.CacheReadTokens = cacheRead
 		log.CacheWriteTokens = usageTracker.CacheWriteTokens
 		log.Cost = calculateCost(model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
@@ -1121,10 +1117,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		log.StatusCode = http.StatusOK
 		log.InputTokens = oaiResp.Usage.PromptTokens
 		log.OutputTokens = oaiResp.Usage.CompletionTokens
-		cacheRead := 0
-		if oaiResp.Usage.PromptTokensDetails != nil {
-			cacheRead = oaiResp.Usage.PromptTokensDetails.CachedTokens
-		}
+		cacheRead := oaiResp.Usage.CacheReadTokens()
 		log.CacheReadTokens = cacheRead
 		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, 0)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
@@ -1144,6 +1137,8 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 
 	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
+	// No-op when the client already placed its own cache_control breakpoints.
+	InjectAnthropicCacheControl(bodyMap, model.TargetModel)
 
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")

@@ -128,9 +128,7 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, activeTools, thinkingLevel)
 		totalInput += turn.usage.PromptTokens
 		totalOutput += turn.usage.CompletionTokens
-		if turn.usage.PromptTokensDetails != nil {
-			totalCacheRead += turn.usage.PromptTokensDetails.CachedTokens
-		}
+		totalCacheRead += turn.usage.CacheReadTokens()
 		if err != nil {
 			streamError = err.Error()
 			writeSSEJSON(w, flusher, map[string]interface{}{

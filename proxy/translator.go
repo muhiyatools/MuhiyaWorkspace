@@ -74,7 +74,28 @@ type OpenAIUsage struct {
 	CompletionTokens    int                 `json:"completion_tokens"`
 	TotalTokens         int                 `json:"total_tokens"`
 	PromptTokensDetails *PromptTokensDetail `json:"prompt_tokens_details,omitempty"`
-	CacheWriteTokens    int                 `json:"-"` // internal tracking
+	// DeepSeek reports prefix-cache usage under its own names instead of (or
+	// in addition to) the OpenAI prompt_tokens_details shape. Without these
+	// fields every DeepSeek request logged 0 cache tokens even on real hits.
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+	CacheWriteTokens      int `json:"-"` // internal tracking
+}
+
+// CacheReadTokens returns the prompt tokens served from the provider's
+// prefix cache, whichever dialect the upstream reported them in.
+func (u *OpenAIUsage) CacheReadTokens() int {
+	if u == nil {
+		return 0
+	}
+	read := 0
+	if u.PromptTokensDetails != nil {
+		read = u.PromptTokensDetails.CachedTokens
+	}
+	if u.PromptCacheHitTokens > read {
+		read = u.PromptCacheHitTokens
+	}
+	return read
 }
 
 type OpenAIChoice struct {
@@ -592,11 +613,8 @@ func TranslateOpenAIToAnthropicResponse(oaiResp *OpenAIResponse, virtualModel st
 		}
 	}
 
-	// Parse cache tokens
-	cacheRead := 0
-	if oaiResp.Usage.PromptTokensDetails != nil {
-		cacheRead = oaiResp.Usage.PromptTokensDetails.CachedTokens
-	}
+	// Parse cache tokens (OpenAI details shape or DeepSeek's own fields).
+	cacheRead := oaiResp.Usage.CacheReadTokens()
 
 	return &AnthropicResponse{
 		ID:      oaiResp.ID,
@@ -699,8 +717,8 @@ func TranslateOpenAIChunkToAnthropic(line string, msgID string, virtualModel str
 	if chunk.Usage != nil {
 		usageTracker.InputTokens = chunk.Usage.PromptTokens
 		usageTracker.OutputTokens = chunk.Usage.CompletionTokens
-		if chunk.Usage.PromptTokensDetails != nil {
-			usageTracker.CacheReadInputTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		if read := chunk.Usage.CacheReadTokens(); read > 0 {
+			usageTracker.CacheReadInputTokens = read
 		}
 	}
 
