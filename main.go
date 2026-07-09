@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
 	"fmt"
@@ -232,6 +233,16 @@ func main() {
 	// where dbReady is true but a handler is still nil.
 	dbReady.Store(true)
 
+	// DB watchdog: boot-time retry alone is not enough - the external
+	// PostgreSQL can drop MID-RUN (managed-DB restart, idle NAT reset, host
+	// sleep), after which every request used to hang or surface raw query
+	// errors until someone manually restarted the gateway. Instead, ping
+	// continuously: on consecutive failures flip every route to the existing
+	// "Database is connecting" degraded state, keep probing (each ping dials
+	// fresh, so the pool heals itself), and flip back the moment the database
+	// answers. The gateway now survives any database outage unattended.
+	go watchDatabase(database)
+
 	fmt.Println(`
     __  ___      __    _               __    __    __  ___
    /  |/  /_  __/ /_  (_)__  ______ _ / /   / /   /  |/  /
@@ -253,6 +264,35 @@ func main() {
 
 	// Block main goroutine forever
 	select {}
+}
+
+// Degrade after this many consecutive failed pings (one flaky ping must not
+// bounce the whole gateway), and recover on the first successful one.
+const dbWatchFailureThreshold = 2
+
+func watchDatabase(database *db.DB) {
+	const interval = 15 * time.Second
+	const pingTimeout = 5 * time.Second
+	failures := 0
+	for {
+		time.Sleep(interval)
+		ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+		err := database.PingContext(ctx)
+		cancel()
+		if err != nil {
+			failures++
+			if failures == dbWatchFailureThreshold {
+				dbReady.Store(false)
+				log.Printf("Database unreachable (%v) - degrading to 'connecting' state until it recovers", err)
+			}
+			continue
+		}
+		if failures >= dbWatchFailureThreshold {
+			log.Printf("Database recovered - resuming normal service")
+		}
+		failures = 0
+		dbReady.Store(true)
+	}
 }
 
 func connectWithRetry(dsn string, maxAttempts int) (*db.DB, error) {

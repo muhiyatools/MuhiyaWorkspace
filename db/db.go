@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -188,6 +189,13 @@ func Open(dsn string) (*DB, error) {
 
 func (db *DB) Close() error {
 	return db.conn.Close()
+}
+
+// PingContext verifies live connectivity with a caller-supplied deadline.
+// Used by the runtime watchdog; a ping on a dead pool also dials a fresh
+// connection, which is what lets the pool self-heal after an outage.
+func (db *DB) PingContext(ctx context.Context) error {
+	return db.conn.PingContext(ctx)
 }
 
 func (db *DB) seedDefaults() error {
