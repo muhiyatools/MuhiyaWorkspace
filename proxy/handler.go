@@ -406,6 +406,10 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Canonical thinking level for this request (header > body). An explicit
+	// client `thinking` object is NOT a level: it passes through untouched.
+	thinkingLevel := ResolveThinkingLevel(r, oaiReq.ReasoningEffort)
+
 	isRouterRequest := oaiReq.Model == "muhiya-ai-router"
 	var targetModel *db.Model
 	var fallbackModels []*db.Model
@@ -428,7 +432,10 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		thinkingRequested := oaiReq.Thinking != nil || oaiReq.ReasoningEffort != nil
+		// minimal/low means "think less" - it must never route the request
+		// onto a pricier thinking tier. An explicit client thinking object
+		// still counts as a thinking request.
+		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
 		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
@@ -504,6 +511,7 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 			ClientApp:        getClientAppName(r),
 			RequestedModel:   requestedModel,
 			Complexity:       complexityStr,
+			ThinkingLevel:    thinkingLevel,
 			FailoverAttempts: idx,
 			CreatedAt:        startTime,
 		}
@@ -529,7 +537,8 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		bufW := NewBufferedResponseWriter(w)
 		lastBuffer = bufW
 
-		// Perform proxy
+		// Perform proxy (thinking mapping happens per-candidate inside, since
+		// failover can switch to a provider with a different dialect)
 		if useAnthropicUpstream {
 			h.proxyOpenAIToAnthropic(bufW, r, &reqCopy, model, &resolvedProvider, reqLog, startTime)
 		} else {
@@ -571,6 +580,11 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Same canonical thinking resolution as the OpenAI path; the Anthropic
+	// request struct also accepts reasoning_effort for symmetric clients.
+	// A native `thinking` object is the client's own control - not a level.
+	thinkingLevel := ResolveThinkingLevel(r, anthReq.ReasoningEffort)
+
 	isRouterRequest := anthReq.Model == "muhiya-ai-router"
 	var targetModel *db.Model
 	var fallbackModels []*db.Model
@@ -602,7 +616,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 			}
 		}
 
-		thinkingRequested := anthReq.Thinking != nil
+		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(anthReq.Thinking)
 		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
@@ -681,6 +695,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 			ClientApp:        getClientAppName(r),
 			RequestedModel:   requestedModel,
 			Complexity:       complexityStr,
+			ThinkingLevel:    thinkingLevel,
 			FailoverAttempts: idx,
 			CreatedAt:        startTime,
 		}
@@ -741,6 +756,11 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	_ = json.Unmarshal(origBody, &bodyMap)
 	bodyMap["model"] = model.TargetModel
 	delete(bodyMap, "web_search")
+
+	// Translate the canonical thinking level into this provider's dialect
+	// (and strip the gateway-level fields regardless).
+	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
 
 	stream, _ := bodyMap["stream"].(bool)
 	if stream {
@@ -882,7 +902,12 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		h.logAndWriteError(w, http.StatusBadRequest, "Payload translation error: "+err.Error(), "invalid_request_error", &log, startTime)
 		return
 	}
-	newBody, _ := json.Marshal(anthRequest)
+	translated, _ := json.Marshal(anthRequest)
+	var bodyMap map[string]interface{}
+	_ = json.Unmarshal(translated, &bodyMap)
+	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
+	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
 	if !strings.HasSuffix(url, "/v1/messages") && !strings.HasSuffix(url, "/messages") {
 		url += "/v1/messages"
@@ -1000,7 +1025,12 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		h.logAndWriteError(w, http.StatusBadRequest, "Payload translation error: "+err.Error(), "invalid_request_error", &log, startTime)
 		return
 	}
-	newBody, _ := json.Marshal(oaiReq)
+	translated, _ := json.Marshal(oaiReq)
+	var bodyMap map[string]interface{}
+	_ = json.Unmarshal(translated, &bodyMap)
+	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
+	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
 	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/completions") {
 		url += "/chat/completions"
@@ -1111,6 +1141,9 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(origBody, &bodyMap)
 	bodyMap["model"] = model.TargetModel
+
+	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
 
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")

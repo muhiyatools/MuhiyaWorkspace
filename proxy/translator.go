@@ -222,6 +222,9 @@ type AnthropicRequest struct {
 	Stream      bool               `json:"stream,omitempty"`
 	Tools       []AnthropicTool    `json:"tools,omitempty"`
 	Thinking    *AnthropicThinking `json:"thinking,omitempty"`
+	// Gateway-level effort control (Muhiya extension, mirrors the OpenAI
+	// field). Stripped by ApplyThinking* before anything reaches a provider.
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 }
 
 type AnthropicUsage struct {

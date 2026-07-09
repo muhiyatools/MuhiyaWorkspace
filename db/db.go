@@ -109,6 +109,7 @@ type RequestLog struct {
 	ClientApp        string    `json:"client_app"`
 	RequestedModel   string    `json:"requested_model"`
 	Complexity       string    `json:"complexity"`
+	ThinkingLevel    string    `json:"thinking_level"`
 	FailoverAttempts int       `json:"failover_attempts"`
 	CreatedAt        time.Time `json:"created_at"`
 }
@@ -847,13 +848,13 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 	}
 
 	_, err := db.conn.Exec(`INSERT INTO request_logs (
-		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code, 
+		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
 		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, latency_ms, error_message, created_at, client_app,
-		requested_model, complexity, failover_attempts
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+		requested_model, complexity, failover_attempts, thinking_level
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
 		log.ID, log.VirtualKeyID, log.UserID, modelID, providerID, log.RequestPath, log.StatusCode,
 		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp,
-		log.RequestedModel, log.Complexity, log.FailoverAttempts)
+		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel)
 
 	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
 		_ = db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost)
@@ -865,8 +866,8 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	query := `
 		SELECT request_logs.id, request_logs.virtual_key_id, request_logs.user_id, COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code, 
 		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
-		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0)
-		FROM request_logs 
+		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, '')
+		FROM request_logs
 		LEFT JOIN models ON request_logs.model_id = models.id
 		WHERE 1=1`
 
@@ -899,7 +900,7 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 		var r RequestLog
 		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
-			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts)
+			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel)
 		if err != nil {
 			return nil, err
 		}

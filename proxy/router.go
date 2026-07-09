@@ -65,13 +65,17 @@ func AnalyzePromptComplexity(messages []OpenAIMessage) string {
 	return "simple"
 }
 
+// NOTE: deliberately unchanged by the thinking-level feature. This heuristic
+// steers muhiya-ai-router MODEL SELECTION with strict equality matching, so
+// widening it would silently re-route existing non-thinking traffic away from
+// newly-matched models. Thinking-level MAPPING is independent (proxy/thinking.go).
 func modelSupportsThinking(targetModel string) bool {
 	target := strings.ToLower(targetModel)
-	return strings.Contains(target, "reasoner") || 
-	       strings.Contains(target, "r1") || 
-	       strings.Contains(target, "o1") || 
-	       strings.Contains(target, "o3") || 
-	       strings.Contains(target, "claude-3-7")
+	return strings.Contains(target, "reasoner") ||
+		strings.Contains(target, "r1") ||
+		strings.Contains(target, "o1") ||
+		strings.Contains(target, "o3") ||
+		strings.Contains(target, "claude-3-7")
 }
 
 // RouteToModel resolves a complexity level, optional vision requirement, and thinking preference to the cheapest active model

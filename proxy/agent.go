@@ -55,7 +55,8 @@ func (h *ProxyHandler) shouldRunAgentLoop(r *http.Request, oaiReq *OpenAIRequest
 // OpenAI-format, runs the loop. If the provider is Anthropic-format it returns
 // false so the caller can fall back to the standard proxy path.
 func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, oaiReq *OpenAIRequest, key *db.VirtualKey, settings ToolSettings) (handled bool) {
-	model, provider, complexity, err := h.resolveAgentModel(oaiReq)
+	thinkingLevel := ResolveThinkingLevel(r, oaiReq.ReasoningEffort)
+	model, provider, complexity, err := h.resolveAgentModel(oaiReq, thinkingLevel)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
 		return true
@@ -93,6 +94,7 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		ClientApp:      "MuhiyaChat",
 		RequestedModel: requestedModel,
 		Complexity:     complexity,
+		ThinkingLevel:  thinkingLevel,
 		CreatedAt:      startTime,
 	}
 
@@ -123,7 +125,7 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		if !hasSearched {
 			activeTools = tools
 		}
-		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, activeTools)
+		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, activeTools, thinkingLevel)
 		totalInput += turn.usage.PromptTokens
 		totalOutput += turn.usage.CompletionTokens
 		if turn.usage.PromptTokensDetails != nil {
@@ -218,7 +220,7 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 // resolveAgentModel picks the model + provider for the request, honoring the
 // router alias exactly like serveOpenAIClient does.
-func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest) (*db.Model, *db.Provider, string, error) {
+func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel string) (*db.Model, *db.Provider, string, error) {
 	complexity := "direct"
 	var model *db.Model
 	var err error
@@ -226,7 +228,8 @@ func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest) (*db.Model, *db.
 	if oaiReq.Model == "muhiya-ai-router" {
 		complexity = AnalyzePromptComplexity(oaiReq.Messages)
 		needsVision := requestNeedsVision(oaiReq.Messages)
-		thinkingRequested := oaiReq.Thinking != nil || oaiReq.ReasoningEffort != nil
+		// minimal/low means "think less" - never route onto a thinking tier.
+		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
 		model, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
 			return nil, nil, complexity, err
@@ -277,7 +280,7 @@ type turnResult struct {
 // streamOpenAITurn performs one streaming upstream call. It relays text and
 // reasoning deltas to the client as OpenAI chunks, accumulates any tool calls
 // (which are NOT forwarded to the client), and returns the turn result.
-func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, flusher http.Flusher, msgID string, model *db.Model, provider *db.Provider, messages []OpenAIMessage, tools []OpenAITool) (turnResult, error) {
+func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, flusher http.Flusher, msgID string, model *db.Model, provider *db.Provider, messages []OpenAIMessage, tools []OpenAITool, thinkingLevel string) (turnResult, error) {
 	var res turnResult
 
 	temperature := 0.7
@@ -296,7 +299,11 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 		Temperature:   &temperature,
 		MaxTokens:     &maxTokens,
 	}
-	body, _ := json.Marshal(upstreamReq)
+	structBody, _ := json.Marshal(upstreamReq)
+	var bodyMap map[string]interface{}
+	_ = json.Unmarshal(structBody, &bodyMap)
+	ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, thinkingLevel)
+	body, _ := json.Marshal(bodyMap)
 
 	url := strings.TrimSuffix(provider.BaseURL, "/")
 	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/completions") {

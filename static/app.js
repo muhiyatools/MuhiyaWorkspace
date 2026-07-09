@@ -1300,6 +1300,18 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const cacheHitRate = inputTokens > 0 ? ((cacheRead / inputTokens) * 100).toFixed(1) : '0.0';
 
+        // Thinking level badge: "<requested>" or "<requested>><applied>"
+        let thinkingHTML = '';
+        if (l.thinking_level) {
+            const parts = String(l.thinking_level).split('>');
+            const label = parts.length > 1 ? `${parts[0]} → ${parts[1]}` : parts[0];
+            thinkingHTML = `
+                <div class="details-section" style="background: rgba(139, 92, 246, 0.05); border: 1px solid rgba(139, 92, 246, 0.15); border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-size: 0.85rem;">
+                    <span><i class="fa-solid fa-brain" style="margin-right: 6px; color:#8b5cf6;"></i><strong>Thinking:</strong> <code>${escapeHtml(label)}</code></span>
+                </div>
+            `;
+        }
+
         // Check if this request was routed by the AI Router
         const isRouter = l.requested_model === 'muhiya-ai-router';
         let routerHTML = '';
@@ -1331,7 +1343,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const modalContent = `
             ${routerHTML}
-            
+            ${thinkingHTML}
+
             <div class="details-grid-two-col" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">
                 <div class="details-card" style="background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 1rem;">
                     <h4 style="margin-bottom: 0.75rem; border-bottom: 1px solid var(--panel-border); padding-bottom: 0.25rem;">Metadata</h4>

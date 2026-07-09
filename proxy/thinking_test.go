@@ -1,0 +1,353 @@
+package proxy
+
+import (
+	"net/http/httptest"
+	"testing"
+)
+
+func strPtr(s string) *string { return &s }
+
+func TestNormalizeThinkingLevel(t *testing.T) {
+	cases := map[string]string{
+		"minimal": "minimal", "MIN": "minimal", "none": "minimal", "off": "minimal",
+		"low": "low", "medium": "medium", "MID": "medium",
+		"high": "high", "ultra": "high",
+		"max": "max", "xhigh": "max",
+		"garbage": "", "": "", "  high  ": "high",
+	}
+	for input, want := range cases {
+		if got := NormalizeThinkingLevel(input); got != want {
+			t.Errorf("NormalizeThinkingLevel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestResolveThinkingLevelPrecedence(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set(EffortHeader, "max")
+
+	// The header is the full-fidelity Muhiya channel and WINS over the body:
+	// Muhiya clients send header "max" alongside a clamped body "high" for
+	// generic-endpoint compatibility - the clamp must not downgrade us.
+	if got := ResolveThinkingLevel(r, strPtr("high")); got != "max" {
+		t.Errorf("header should win over clamped body, got %q", got)
+	}
+	// Body used when no header is present.
+	noHeader := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	if got := ResolveThinkingLevel(noHeader, strPtr("low")); got != "low" {
+		t.Errorf("body fallback failed, got %q", got)
+	}
+	if got := ResolveThinkingLevel(r, nil); got != "max" {
+		t.Errorf("header alone failed, got %q", got)
+	}
+	// Garbage header falls through to the body.
+	badHeader := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	badHeader.Header.Set(EffortHeader, "nonsense")
+	if got := ResolveThinkingLevel(badHeader, strPtr("medium")); got != "medium" {
+		t.Errorf("garbage header should fall back to body, got %q", got)
+	}
+	if got := ResolveThinkingLevel(nil, nil); got != "" {
+		t.Errorf("no signals should resolve to empty, got %q", got)
+	}
+	// Explicit thinking objects are a router signal, never a mapping level.
+	if !clientRequestsThinking(&AnthropicThinking{Type: "enabled", BudgetTokens: 2048}) {
+		t.Error("enabled thinking object should count as a thinking request")
+	}
+	if clientRequestsThinking(&AnthropicThinking{Type: "disabled"}) || clientRequestsThinking(nil) {
+		t.Error("disabled/absent thinking object must not count as a thinking request")
+	}
+}
+
+func TestThinkingRequestsReasoning(t *testing.T) {
+	if ThinkingRequestsReasoning("minimal") || ThinkingRequestsReasoning("low") || ThinkingRequestsReasoning("") {
+		t.Error("minimal/low/unset must not count as thinking requested")
+	}
+	if !ThinkingRequestsReasoning("medium") || !ThinkingRequestsReasoning("max") {
+		t.Error("medium+ must count as thinking requested")
+	}
+}
+
+func TestThinkingLogValue(t *testing.T) {
+	if got := ThinkingLogValue("", "anything"); got != "" {
+		t.Errorf("unset request must log empty, got %q", got)
+	}
+	if got := ThinkingLogValue("high", "high"); got != "high" {
+		t.Errorf("same applied collapses, got %q", got)
+	}
+	if got := ThinkingLogValue("max", "max"); got != "max" {
+		t.Errorf("got %q", got)
+	}
+	if got := ThinkingLogValue("low", "disabled"); got != "low>disabled" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func applyOpenAI(t *testing.T, baseURL, model, level string, extra map[string]interface{}) (map[string]interface{}, string) {
+	t.Helper()
+	body := map[string]interface{}{
+		"model":            model,
+		"reasoning_effort": "high",
+		"thinking":         map[string]interface{}{"type": "enabled"},
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	applied := ApplyThinkingOpenAI(body, baseURL, model, level)
+	return body, applied
+}
+
+func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
+	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "max", nil)
+	if applied != "max" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if body["reasoning_effort"] != "max" {
+		t.Errorf("reasoning_effort = %v", body["reasoning_effort"])
+	}
+	thinking := body["thinking"].(map[string]interface{})
+	if thinking["type"] != "enabled" {
+		t.Errorf("thinking = %v", thinking)
+	}
+
+	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-flash", "low", nil)
+	if applied != "disabled" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if _, hasEffort := body["reasoning_effort"]; hasEffort {
+		t.Error("disabled thinking must not carry reasoning_effort")
+	}
+	if body["thinking"].(map[string]interface{})["type"] != "disabled" {
+		t.Errorf("thinking = %v", body["thinking"])
+	}
+
+	// medium and high both land on DeepSeek "high".
+	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "medium", nil)
+	if applied != "high" || body["reasoning_effort"] != "high" {
+		t.Errorf("medium -> %q / %v", applied, body["reasoning_effort"])
+	}
+}
+
+func TestApplyThinkingOpenAI_GLM(t *testing.T) {
+	body, applied := applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-4.6", "high", nil)
+	if applied != "enabled" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if _, hasEffort := body["reasoning_effort"]; hasEffort {
+		t.Error("glm-4.x must not receive reasoning_effort")
+	}
+	body, applied = applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-5.2", "max", nil)
+	if applied != "max" || body["reasoning_effort"] != "max" {
+		t.Errorf("glm-5 max -> %q / %v", applied, body["reasoning_effort"])
+	}
+	body, _ = applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-4.5-air", "minimal", nil)
+	if body["thinking"].(map[string]interface{})["type"] != "disabled" {
+		t.Errorf("minimal must disable thinking, got %v", body["thinking"])
+	}
+}
+
+func TestApplyThinkingOpenAI_MiniMaxAlwaysOn(t *testing.T) {
+	body, applied := applyOpenAI(t, "https://api.minimax.io/v1", "MiniMax-M3", "low", nil)
+	if applied != "always-on" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if _, hasThinking := body["thinking"]; hasThinking {
+		t.Error("minimax must not receive a thinking object")
+	}
+	if body["reasoning_split"] != true {
+		t.Error("minimax should get reasoning_split")
+	}
+}
+
+func TestApplyThinkingOpenAI_OpenAIStrict(t *testing.T) {
+	// Non-reasoning model: everything stripped, nothing injected (400 guard).
+	body, applied := applyOpenAI(t, "https://api.openai.com/v1", "gpt-4o", "high", nil)
+	if applied != "unsupported" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if _, has := body["reasoning_effort"]; has {
+		t.Error("gpt-4o must not receive reasoning_effort")
+	}
+	if _, has := body["thinking"]; has {
+		t.Error("thinking must always be stripped for OpenAI upstreams")
+	}
+	// Reasoning model: clamped standard values.
+	body, applied = applyOpenAI(t, "https://api.openai.com/v1", "gpt-5.1", "max", nil)
+	if applied != "high" || body["reasoning_effort"] != "high" {
+		t.Errorf("gpt-5.1 max -> %q / %v", applied, body["reasoning_effort"])
+	}
+	// o-series predates "minimal": clamp to low instead of a guaranteed 400.
+	body, applied = applyOpenAI(t, "https://api.openai.com/v1", "o3-mini", "minimal", nil)
+	if applied != "low" || body["reasoning_effort"] != "low" {
+		t.Errorf("o3-mini minimal -> %q", applied)
+	}
+	_, applied = applyOpenAI(t, "https://api.openai.com/v1", "gpt-5.1", "minimal", nil)
+	if applied != "minimal" {
+		t.Errorf("gpt-5.1 minimal -> %q", applied)
+	}
+}
+
+func TestApplyThinkingOpenAI_GrokQwenKimiGemini(t *testing.T) {
+	// grok-4 errors on reasoning_effort: must strip only.
+	body, applied := applyOpenAI(t, "https://api.x.ai/v1", "grok-4", "high", nil)
+	if applied != "unsupported" {
+		t.Fatalf("grok-4 applied = %q", applied)
+	}
+	if _, has := body["reasoning_effort"]; has {
+		t.Error("grok-4 must not receive reasoning_effort")
+	}
+	body, applied = applyOpenAI(t, "https://api.x.ai/v1", "grok-3-mini", "medium", nil)
+	if applied != "low" || body["reasoning_effort"] != "low" {
+		t.Errorf("grok-3-mini medium -> %q", applied)
+	}
+	body, applied = applyOpenAI(t, "https://api.x.ai/v1", "grok-4.5", "max", nil)
+	if applied != "high" || body["reasoning_effort"] != "high" {
+		t.Errorf("grok-4.5 max -> %q", applied)
+	}
+
+	body, applied = applyOpenAI(t, "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3-max", "low", nil)
+	if applied != "disabled" || body["enable_thinking"] != false {
+		t.Errorf("qwen low -> %q / %v", applied, body["enable_thinking"])
+	}
+	body, applied = applyOpenAI(t, "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3-max", "high", nil)
+	if applied != "enabled" || body["enable_thinking"] != true {
+		t.Errorf("qwen high -> %q", applied)
+	}
+
+	body, applied = applyOpenAI(t, "https://api.moonshot.ai/v1", "kimi-k2.6", "medium", nil)
+	if applied != "enabled" || body["thinking"].(map[string]interface{})["type"] != "enabled" {
+		t.Errorf("kimi medium -> %q", applied)
+	}
+	body, applied = applyOpenAI(t, "https://api.moonshot.ai/v1", "kimi-k2.7-code", "high", nil)
+	if applied != "always-on" {
+		t.Errorf("kimi k2.7-code -> %q", applied)
+	}
+	if _, has := body["thinking"]; has {
+		t.Error("k2.7-code must not receive the thinking param at all")
+	}
+
+	body, applied = applyOpenAI(t, "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.1-pro", "minimal", nil)
+	if applied != "low" || body["reasoning_effort"] != "low" {
+		t.Errorf("gemini minimal -> %q (must never send none)", applied)
+	}
+}
+
+func TestApplyThinkingOpenAI_UnknownStripsEverything(t *testing.T) {
+	body, applied := applyOpenAI(t, "https://some-random-upstream.example/v1", "mystery-model", "high", nil)
+	if applied != "unsupported" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if _, has := body["reasoning_effort"]; has {
+		t.Error("unknown upstream must not receive reasoning_effort")
+	}
+	if _, has := body["thinking"]; has {
+		t.Error("unknown upstream must not receive thinking")
+	}
+}
+
+func TestApplyThinkingOpenAI_UnsetLeavesBodyUntouched(t *testing.T) {
+	// No level requested: a client speaking the provider's dialect directly
+	// keeps full control (pre-existing pass-through behavior).
+	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "", nil)
+	if applied != "" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if body["reasoning_effort"] != "high" {
+		t.Error("client reasoning_effort must pass through when no level is requested")
+	}
+	if body["thinking"].(map[string]interface{})["type"] != "enabled" {
+		t.Error("client thinking must pass through when no level is requested")
+	}
+}
+
+func TestApplyThinkingAnthropic_Budget(t *testing.T) {
+	body := map[string]interface{}{
+		"model":       "claude-sonnet-4-5",
+		"max_tokens":  float64(4096),
+		"temperature": float64(0.2),
+	}
+	applied := ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-4-5", "max")
+	if applied != "budget-24576" {
+		t.Fatalf("applied = %q", applied)
+	}
+	thinking := body["thinking"].(map[string]interface{})
+	if thinking["type"] != "enabled" || thinking["budget_tokens"] != 24576 {
+		t.Errorf("thinking = %v", thinking)
+	}
+	// max_tokens must exceed the budget.
+	if body["max_tokens"].(int) <= 24576 {
+		t.Errorf("max_tokens = %v, must exceed budget", body["max_tokens"])
+	}
+	// Extended thinking rejects non-default sampling params.
+	if _, has := body["temperature"]; has {
+		t.Error("temperature must be removed when thinking is injected")
+	}
+
+	// Models without extended thinking must not receive the parameter.
+	old := map[string]interface{}{"model": "claude-3-5-sonnet-20241022", "temperature": float64(0.2)}
+	if applied := ApplyThinkingAnthropic(old, "https://api.anthropic.com", "claude-3-5-sonnet-20241022", "high"); applied != "unsupported" {
+		t.Fatalf("claude-3-5 applied = %q", applied)
+	}
+	if _, has := old["thinking"]; has {
+		t.Error("claude-3-5 must not receive a thinking object")
+	}
+	if old["temperature"] != float64(0.2) {
+		t.Error("unsupported models keep their sampling params untouched")
+	}
+
+	body = map[string]interface{}{"model": "claude-sonnet-4-5", "thinking": map[string]interface{}{"type": "enabled", "budget_tokens": 1024}}
+	applied = ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-4-5", "low")
+	if applied != "default" {
+		t.Fatalf("low applied = %q", applied)
+	}
+	if _, has := body["thinking"]; has {
+		t.Error("low effort must omit the thinking object")
+	}
+}
+
+func TestApplyThinkingAnthropic_AdaptiveAndDeepseek(t *testing.T) {
+	body := map[string]interface{}{"model": "claude-opus-4-8", "temperature": float64(0.7)}
+	applied := ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-opus-4-8", "max")
+	if applied != "adaptive-max" {
+		t.Fatalf("applied = %q", applied)
+	}
+	if body["thinking"].(map[string]interface{})["type"] != "adaptive" {
+		t.Errorf("thinking = %v", body["thinking"])
+	}
+	if body["output_config"].(map[string]interface{})["effort"] != "max" {
+		t.Errorf("output_config = %v", body["output_config"])
+	}
+	if _, has := body["temperature"]; has {
+		t.Error("adaptive thinking must drop temperature")
+	}
+
+	body = map[string]interface{}{"model": "deepseek-v4-pro"}
+	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-pro", "high")
+	if applied != "high" {
+		t.Fatalf("deepseek anthropic applied = %q", applied)
+	}
+	if body["output_config"].(map[string]interface{})["effort"] != "high" {
+		t.Errorf("output_config = %v", body["output_config"])
+	}
+
+	// Unset level: client thinking object passes through untouched.
+	passthrough := map[string]interface{}{"thinking": map[string]interface{}{"type": "enabled", "budget_tokens": float64(2048)}}
+	if applied := ApplyThinkingAnthropic(passthrough, "https://api.anthropic.com", "claude-sonnet-4-5", ""); applied != "" {
+		t.Fatalf("unset applied = %q", applied)
+	}
+	if passthrough["thinking"].(map[string]interface{})["budget_tokens"] != float64(2048) {
+		t.Error("client thinking must pass through when no level requested")
+	}
+}
+
+func TestClassifyUpstreamModelWinsOverHost(t *testing.T) {
+	// Aggregator host, DeepSeek model: model prefix must win.
+	if classifyUpstream("https://aggregator.example/v1", "deepseek-v4-pro") != famDeepseek {
+		t.Error("model prefix should classify deepseek")
+	}
+	if classifyUpstream("https://api.deepseek.com", "some-custom-model") != famDeepseek {
+		t.Error("host should classify deepseek when model is unknown")
+	}
+	if classifyUpstream("https://unknown.example", "unknown-model") != famUnknown {
+		t.Error("unknown/unknown should be famUnknown")
+	}
+}
