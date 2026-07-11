@@ -15,7 +15,14 @@ services:
       # Format: postgres://<POSTGRES_USER>:<POSTGRES_PASSWORD>@<POSTGRES_HOST>:<POSTGRES_PORT>/<POSTGRES_DB>?sslmode=disable
       - DATABASE_URL=${DATABASE_URL}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpassword}
+      # No insecure default: an unset ADMIN_PASSWORD now reaches the app as
+      # an empty string, which makes it refuse to boot (see main.go) instead
+      # of silently exposing the admin dashboard with a guessable password.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - DEV_MODE=${DEV_MODE:-}
+      - REQUIRE_REDIS=${REQUIRE_REDIS:-}
+      - PROVIDER_KEY_ENCRYPTION_KEY=${PROVIDER_KEY_ENCRYPTION_KEY:-}
+      - REQUEST_LOG_RETENTION_DAYS=${REQUEST_LOG_RETENTION_DAYS:-}
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SERPER_API_KEY=${SERPER_API_KEY}
       - REDIS_URL=${REDIS_URL}

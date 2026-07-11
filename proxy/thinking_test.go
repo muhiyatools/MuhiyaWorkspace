@@ -97,7 +97,12 @@ func applyOpenAI(t *testing.T, baseURL, model, level string, extra map[string]in
 }
 
 func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
-	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "max", nil)
+	// Real DeepSeek target model names only: "deepseek-reasoner" is the
+	// thinking-capable one. MuhiyaLLM's own virtual aliases (deepseek-v4-pro,
+	// deepseek-v4-flash, ...) resolve to a concrete target_model before this
+	// function ever sees them (see handler.go), so exercising the mapper
+	// with an alias here would not reflect a real call.
+	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "max", nil)
 	if applied != "max" {
 		t.Fatalf("applied = %q", applied)
 	}
@@ -111,7 +116,7 @@ func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
 
 	// Thinking is NEVER disabled: DeepSeek supports high|max only, so
 	// low/medium ride the "high" floor and high/max ride "max".
-	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-flash", "low", nil)
+	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "low", nil)
 	if applied != "high" || body["reasoning_effort"] != "high" {
 		t.Fatalf("low -> %q / %v", applied, body["reasoning_effort"])
 	}
@@ -119,13 +124,28 @@ func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
 		t.Errorf("thinking = %v", body["thinking"])
 	}
 
-	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "medium", nil)
+	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "medium", nil)
 	if applied != "high" || body["reasoning_effort"] != "high" {
 		t.Errorf("medium -> %q / %v", applied, body["reasoning_effort"])
 	}
-	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "high", nil)
+	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "high", nil)
 	if applied != "max" || body["reasoning_effort"] != "max" {
 		t.Errorf("high -> %q / %v", applied, body["reasoning_effort"])
+	}
+}
+
+// TestApplyThinkingOpenAI_DeepSeekChatUnsupported locks in the fix for a
+// gateway audit finding: deepseek-chat has no thinking mode and used to get
+// "thinking"/"reasoning_effort" injected anyway (a 400 risk, and request-body
+// shape variance for a model that could never act on it). Only
+// deepseek-reasoner should receive the parameter.
+func TestApplyThinkingOpenAI_DeepSeekChatUnsupported(t *testing.T) {
+	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-chat", "max", nil)
+	if applied != "unsupported" {
+		t.Fatalf("deepseek-chat applied = %q, want unsupported", applied)
+	}
+	if _, has := body["reasoning_effort"]; has {
+		t.Errorf("deepseek-chat must not receive reasoning_effort, got %v", body["reasoning_effort"])
 	}
 }
 
@@ -338,19 +358,33 @@ func TestApplyThinkingAnthropic_AdaptiveAndDeepseek(t *testing.T) {
 	}
 
 	// DeepSeek-Anthropic supports high|max only: high effort rides "max",
-	// low rides the "high" floor - never disabled.
-	body = map[string]interface{}{"model": "deepseek-v4-pro"}
-	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-pro", "high")
+	// low rides the "high" floor - never disabled. Real target model name
+	// only ("deepseek-reasoner"); see TestApplyThinkingOpenAI_DeepSeek for
+	// why an alias like deepseek-v4-pro would not reflect a real call.
+	body = map[string]interface{}{"model": "deepseek-reasoner"}
+	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-reasoner", "high")
 	if applied != "max" {
 		t.Fatalf("deepseek anthropic high applied = %q", applied)
 	}
 	if body["output_config"].(map[string]interface{})["effort"] != "max" {
 		t.Errorf("output_config = %v", body["output_config"])
 	}
-	body = map[string]interface{}{"model": "deepseek-v4-pro"}
-	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-pro", "low")
+	body = map[string]interface{}{"model": "deepseek-reasoner"}
+	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-reasoner", "low")
 	if applied != "high" || body["thinking"].(map[string]interface{})["type"] != "enabled" {
 		t.Fatalf("deepseek anthropic low applied = %q / %v", applied, body["thinking"])
+	}
+
+	// deepseek-chat has no reasoning mode: must fall through to unsupported,
+	// not have output_config/thinking injected (audit fix, mirrors the
+	// OpenAI-path test).
+	body = map[string]interface{}{"model": "deepseek-chat"}
+	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-chat", "high")
+	if applied != "unsupported" {
+		t.Fatalf("deepseek-chat anthropic applied = %q, want unsupported", applied)
+	}
+	if _, has := body["output_config"]; has {
+		t.Errorf("deepseek-chat must not receive output_config, got %v", body["output_config"])
 	}
 
 	// Unset level: client thinking object passes through untouched.

@@ -183,16 +183,23 @@ INSERT INTO models (
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================
--- PART 4: DEFAULT USER & KEY FOR IMMEDIATE WORKING FUNCTIONALITY
+-- PART 4: DEFAULT USER FOR IMMEDIATE WORKING FUNCTIONALITY
 -- =========================================================================
 
--- 1. Create default active user
+-- 1. Create default active user (owns whatever keys you mint for it below).
 INSERT INTO users (id, name, email, plan_id, status) VALUES
 ('usr-admin', 'Admin User', 'admin@muhiya.local', 'plan-dev', 'active')
 ON CONFLICT (id) DO NOTHING;
 
--- 2. Create default virtual key (x-api-key for client applications)
--- You can use the key below in your API clients to authenticate with the proxy.
-INSERT INTO virtual_keys (id, name, user_id, status, expires_at) VALUES
-('key-admin-test-12345', 'Default Admin Key', 'usr-admin', 'active', NULL)
-ON CONFLICT (id) DO NOTHING;
+-- SECURITY: a predictable seeded virtual key used to be inserted here
+-- ('key-admin-test-12345'), active and billable to usr-admin from the moment
+-- this script ran. Anyone who found or guessed it could consume credits on
+-- your account. Virtual keys are now stored as a salted hash (see migration
+-- 006), so a key can no longer be minted by hand in SQL anyway - generate one
+-- through the admin dashboard or `POST /api/keys` (both use crypto/rand) and
+-- copy the plaintext token shown ONCE at creation time; it is never stored or
+-- shown again.
+--
+-- If this script was run before and the legacy key is still active on an
+-- existing database, revoke it explicitly:
+--   UPDATE virtual_keys SET status = 'revoked' WHERE id = 'key-admin-test-12345';

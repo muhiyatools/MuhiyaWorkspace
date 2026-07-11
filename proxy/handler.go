@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,7 +24,35 @@ var httpClient = &http.Client{
 		MaxIdleConns:        500,
 		MaxIdleConnsPerHost: 50,
 		IdleConnTimeout:     90 * time.Second,
+		// A hung TCP connect/TLS handshake/response-header wait used to pin a
+		// request goroutine (and an upstream connection) for up to the full
+		// 15-minute client timeout with no way to distinguish it from a
+		// legitimately slow reasoning model. These bound only the
+		// connection-establishment phases, not in-progress streaming.
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 90 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	},
+}
+
+// streamIdleTimeout bounds how long a streaming read loop tolerates total
+// silence from the upstream before assuming the connection has stalled.
+// Reasoning models can legitimately pause for tens of seconds mid-response,
+// so this is generous relative to a typical token cadence while still being
+// far short of the 15-minute client ceiling.
+const streamIdleTimeout = 120 * time.Second
+
+// armIdleWatchdog closes body if reset is not called within d; a stalled
+// bufio.Reader.ReadString then returns promptly with an error instead of
+// blocking until the full client timeout. Call reset() after every
+// successful read and stop() once the read loop exits normally.
+func armIdleWatchdog(body io.Closer, d time.Duration) (reset func(), stop func()) {
+	timer := time.AfterFunc(d, func() {
+		log.Printf("[STREAM-IDLE] upstream produced no data for %s - closing the connection", d)
+		_ = body.Close()
+	})
+	return func() { timer.Reset(d) }, func() { timer.Stop() }
 }
 
 // maxChatRequestBytes bounds chat/messages request bodies. Large coding-agent
@@ -46,12 +75,38 @@ func asFlusher(w http.ResponseWriter) http.Flusher {
 type ProxyHandler struct {
 	db      *db.DB
 	limiter *RateLimiter
+	sticky  *modelSticky
+	outbox  *logOutbox
 }
 
 func NewProxyHandler(database *db.DB, limiter *RateLimiter) *ProxyHandler {
 	return &ProxyHandler{
 		db:      database,
 		limiter: limiter,
+		sticky:  newModelSticky(),
+		outbox:  newLogOutbox(database),
+	}
+}
+
+// internalErrorResponse logs the real error server-side (with a short
+// context label) and writes a generic message to the client - a raw
+// err.Error() on the public proxy endpoint risked leaking internal
+// schema/driver/query details to any caller with a valid key.
+func (h *ProxyHandler) internalErrorResponse(w http.ResponseWriter, context string, err error) {
+	log.Printf("[ERROR] %s: %v", context, err)
+	h.writeError(w, http.StatusInternalServerError, "Internal server error", "api_error")
+}
+
+// saveRequestLog persists one request's billing/usage row. A failed insert is
+// never silently discarded: it is logged immediately and handed to a
+// bounded, backoff-retrying outbox so a transient database blip cannot lose
+// billing history (see outbox.go).
+func (h *ProxyHandler) saveRequestLog(entry db.RequestLog) {
+	if err := h.db.InsertRequestLog(entry); err != nil {
+		log.Printf("[BILLING-ERROR] failed to insert request log %s: %v - queued for retry", entry.ID, err)
+		if h.outbox != nil {
+			h.outbox.enqueue(entry)
+		}
 	}
 }
 
@@ -221,8 +276,15 @@ func translateErrorBytes(respBytes []byte, clientIsAnthropic bool) []byte {
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w = &responseWriterWithRequest{ResponseWriter: w, req: r}
 
-	// Handle GET /v1/models and /v1/models/{id} endpoints (Model Discovery)
+	// Handle GET /v1/models and /v1/models/{id} endpoints (Model Discovery).
+	// Requires a valid virtual key, same as /capabilities and
+	// /tools/web_search below: an anonymous caller was previously able to
+	// enumerate every configured model (and trigger a DB query per hit) with
+	// no credential at all.
 	if r.Method == http.MethodGet && (strings.HasSuffix(r.URL.Path, "/models") || strings.Contains(r.URL.Path, "/models/")) {
+		if _, ok := h.authenticateVirtualKey(w, r); !ok {
+			return
+		}
 		h.handleModelDiscovery(w, r)
 		return
 	}
@@ -249,8 +311,15 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		// Bounded the same way the chat body is below - an authenticated but
+		// unbounded io.ReadAll here was a memory-exhaustion vector.
+		r.Body = http.MaxBytesReader(w, r.Body, maxChatRequestBytes)
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
+			if strings.Contains(err.Error(), "http: request body too large") {
+				h.writeError(w, http.StatusRequestEntityTooLarge, "Request body exceeds the maximum allowed size.", "invalid_request_error")
+				return
+			}
 			h.writeError(w, http.StatusBadRequest, "Failed to read request body", "invalid_request_error")
 			return
 		}
@@ -315,7 +384,7 @@ func (h *ProxyHandler) authenticateVirtualKey(w http.ResponseWriter, r *http.Req
 
 	key, err := h.db.GetVirtualKey(keyID)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+		h.internalErrorResponse(w, "database error", err)
 		return nil, false
 	}
 	if key == nil || key.Status != "active" {
@@ -386,7 +455,10 @@ func (h *ProxyHandler) handleGatewayWebSearch(w http.ResponseWriter, _ *http.Req
 func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request, bodyBytes []byte, key *db.VirtualKey) {
 	var oaiReq OpenAIRequest
 	if err := json.Unmarshal(bodyBytes, &oaiReq); err != nil {
-		log.Printf("[ERROR] failed to unmarshal OpenAI request: %v. Body: %s", err, string(bodyBytes))
+		// Never log request bodies: they routinely contain user prompts and
+		// proprietary source code. A length + truncated-prefix is enough to
+		// debug a malformed-JSON report without leaking content into logs.
+		log.Printf("[ERROR] failed to unmarshal OpenAI request (%d bytes): %v", len(bodyBytes), err)
 		h.writeError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error(), "invalid_request_error")
 		return
 	}
@@ -438,15 +510,33 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
 		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
+			h.internalErrorResponse(w, "routing error", err)
 			return
 		}
+
+		// Session stickiness: DeepSeek's prefix cache is per upstream model,
+		// so once a conversation has picked one, a later turn must not
+		// silently re-route it just because effort/complexity shifted - that
+		// would wipe the whole cached prefix for a request that could have
+		// reused it. A client that sends X-Muhiya-Session pins the model for
+		// the session's lifetime; without the header, routing is unchanged.
+		stKey := stickyKeyFor(key.ID, r.Header.Get(SessionHeader))
+		if pinnedID, ok := h.sticky.get(stKey); ok {
+			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil && pinned.Status == "active" {
+				if pinned.ID != targetModel.ID {
+					log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
+				}
+				targetModel = pinned
+			}
+		}
+		h.sticky.set(stKey, targetModel.ID)
+
 		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needsVision)
 		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, vision: %v) with %d fallback(s)", targetModel.Name, complexity, needsVision, len(fallbackModels))
 	} else {
 		targetModel, err = h.db.GetModelByName(oaiReq.Model)
 		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+			h.internalErrorResponse(w, "database error", err)
 			return
 		}
 		if targetModel == nil {
@@ -542,8 +632,15 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		if useAnthropicUpstream {
 			h.proxyOpenAIToAnthropic(bufW, r, &reqCopy, model, &resolvedProvider, reqLog, startTime)
 		} else {
-			newBody, _ := json.Marshal(reqCopy)
-			h.proxyOpenAIToOpenAI(bufW, r, newBody, model, &resolvedProvider, reqLog, startTime)
+			// Forward the client's ORIGINAL bytes, not a re-marshal of the
+			// lossy typed struct: proxyOpenAIToOpenAI already unmarshals its
+			// origBody into a map and overwrites "model" there, so passing
+			// bodyBytes directly preserves every field the client sent
+			// (reasoning_content, stop, response_format, seed, ...) instead
+			// of silently dropping anything OpenAIRequest doesn't declare.
+			// reqCopy.Model is redundant here anyway - proxyOpenAIToOpenAI
+			// overwrites bodyMap["model"] with model.TargetModel regardless.
+			h.proxyOpenAIToOpenAI(bufW, r, bodyBytes, model, &resolvedProvider, reqLog, startTime)
 		}
 
 		// Check if request was successful
@@ -570,7 +667,8 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Request, bodyBytes []byte, key *db.VirtualKey) {
 	var anthReq AnthropicRequest
 	if err := json.Unmarshal(bodyBytes, &anthReq); err != nil {
-		log.Printf("[ERROR] failed to unmarshal Anthropic request: %v. Body: %s", err, string(bodyBytes))
+		// See serveOpenAIClient: never log request bodies.
+		log.Printf("[ERROR] failed to unmarshal Anthropic request (%d bytes): %v", len(bodyBytes), err)
 		h.writeError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error(), "invalid_request_error")
 		return
 	}
@@ -619,15 +717,30 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(anthReq.Thinking)
 		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
+			h.internalErrorResponse(w, "routing error", err)
 			return
 		}
+
+		// Same session stickiness as the OpenAI-format path (see there for
+		// the full rationale): protects the provider prefix cache from a
+		// mid-session model re-route.
+		stKey := stickyKeyFor(key.ID, r.Header.Get(SessionHeader))
+		if pinnedID, ok := h.sticky.get(stKey); ok {
+			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil && pinned.Status == "active" {
+				if pinned.ID != targetModel.ID {
+					log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
+				}
+				targetModel = pinned
+			}
+		}
+		h.sticky.set(stKey, targetModel.ID)
+
 		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needsVision)
 		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, vision: %v) with %d fallback(s)", targetModel.Name, complexity, needsVision, len(fallbackModels))
 	} else {
 		targetModel, err = h.db.GetModelByName(anthReq.Model)
 		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+			h.internalErrorResponse(w, "database error", err)
 			return
 		}
 		if targetModel == nil {
@@ -804,21 +917,58 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
+		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		defer stopIdle()
 		var textAccumulator strings.Builder
 		var finalUsage *OpenAIUsage
 		normalClose := false
+		logged := false
+
+		// finish persists billing/usage and sends the MuhiyaChat meta chunk
+		// exactly once, BEFORE the terminal [DONE] line - a data frame after
+		// [DONE] violates SSE/OpenAI stream semantics. Idempotent so it is
+		// safe to call from both the normal (inline, pre-DONE) and abnormal
+		// (post-loop, on disconnect) completion paths below.
+		finish := func() {
+			if logged {
+				return
+			}
+			logged = true
+			completionTokens := estimateTokens(textAccumulator.String())
+			inputTokens := log.InputTokens
+			cacheRead := 0
+			if finalUsage != nil {
+				inputTokens = finalUsage.PromptTokens
+				completionTokens = finalUsage.CompletionTokens
+				cacheRead = finalUsage.CacheReadTokens()
+			}
+			log.UsageEstimated = finalUsage == nil
+			log.StatusCode = http.StatusOK
+			log.InputTokens = inputTokens
+			log.OutputTokens = completionTokens
+			log.CacheReadTokens = cacheRead
+			log.Cost = calculateCost(model, inputTokens, completionTokens, cacheRead, 0)
+			log.LatencyMS = int(time.Since(startTime).Milliseconds())
+			h.saveRequestLog(log)
+			h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
+			sendMuhiyaMetaChunk(w, &log, model.Name)
+		}
+
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				break
 			}
-			w.Write([]byte(line))
-			flusher.Flush()
+			resetIdle()
 
 			if strings.HasPrefix(line, "data:") {
 				dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 				if dataStr == "[DONE]" {
 					normalClose = true
+					finish()
+					w.Write([]byte(line))
+					flusher.Flush()
+					continue
 				} else if dataStr != "" {
 					var chunk OpenAIChunk
 					if err := json.Unmarshal([]byte(dataStr), &chunk); err == nil {
@@ -831,33 +981,15 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 					}
 				}
 			}
+			w.Write([]byte(line))
+			flusher.Flush()
 		}
 
 		if !normalClose {
 			w.Write([]byte("data: {\"error\": {\"message\": \"Upstream connection disconnected prematurely.\", \"type\": \"api_error\"}}\n\n"))
 			flusher.Flush()
 		}
-
-		completionTokens := estimateTokens(textAccumulator.String())
-		inputTokens := log.InputTokens
-		cacheRead := 0
-
-		if finalUsage != nil {
-			inputTokens = finalUsage.PromptTokens
-			completionTokens = finalUsage.CompletionTokens
-			cacheRead = finalUsage.CacheReadTokens()
-		}
-
-		log.StatusCode = http.StatusOK
-		log.InputTokens = inputTokens
-		log.OutputTokens = completionTokens
-		log.CacheReadTokens = cacheRead
-		log.Cost = calculateCost(model, inputTokens, completionTokens, cacheRead, 0)
-		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
-
-		sendMuhiyaMetaChunk(w, &log, model.Name)
+		finish()
 	} else {
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -872,10 +1004,12 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.InputTokens = oaiResp.Usage.PromptTokens
 			completionTokens = oaiResp.Usage.CompletionTokens
 			cacheRead = oaiResp.Usage.CacheReadTokens()
+			log.UsageEstimated = false
 		} else {
 			if len(oaiResp.Choices) > 0 {
 				completionTokens = estimateTokens(GetMessageContentString(oaiResp.Choices[0].Message.Content))
 			}
+			log.UsageEstimated = true
 		}
 
 		log.StatusCode = http.StatusOK
@@ -883,7 +1017,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		log.CacheReadTokens = cacheRead
 		log.Cost = calculateCost(model, log.InputTokens, completionTokens, cacheRead, 0)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
+		h.saveRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -942,15 +1076,39 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
+		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		defer stopIdle()
 		var usageTracker OpenAIUsage
 		msgID := "chatcmpl-" + uuid.New().String()
 
 		normalClose := false
+		logged := false
+		// finish persists billing/usage and sends the meta chunk exactly
+		// once, before the terminal [DONE] frame (see proxyOpenAIToOpenAI).
+		finish := func() {
+			if logged {
+				return
+			}
+			logged = true
+			log.StatusCode = http.StatusOK
+			log.InputTokens = usageTracker.PromptTokens
+			log.OutputTokens = usageTracker.CompletionTokens
+			cacheRead := usageTracker.CacheReadTokens()
+			log.CacheReadTokens = cacheRead
+			log.CacheWriteTokens = usageTracker.CacheWriteTokens
+			log.Cost = calculateCost(model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
+			log.LatencyMS = int(time.Since(startTime).Milliseconds())
+			h.saveRequestLog(log)
+			h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.CompletionTokens)
+			sendMuhiyaMetaChunk(w, &log, model.Name)
+		}
+
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				break
 			}
+			resetIdle()
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
@@ -966,8 +1124,6 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 			}
 			if done {
 				normalClose = true
-				w.Write([]byte("data: [DONE]\n\n"))
-				flusher.Flush()
 				break
 			}
 		}
@@ -976,19 +1132,11 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 			w.Write([]byte("data: {\"error\": {\"message\": \"Upstream connection disconnected prematurely.\", \"type\": \"api_error\"}}\n\n"))
 			flusher.Flush()
 		}
-
-		log.StatusCode = http.StatusOK
-		log.InputTokens = usageTracker.PromptTokens
-		log.OutputTokens = usageTracker.CompletionTokens
-		cacheRead := usageTracker.CacheReadTokens()
-		log.CacheReadTokens = cacheRead
-		log.CacheWriteTokens = usageTracker.CacheWriteTokens
-		log.Cost = calculateCost(model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
-		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.CompletionTokens)
-
-		sendMuhiyaMetaChunk(w, &log, model.Name)
+		finish()
+		if normalClose {
+			w.Write([]byte("data: [DONE]\n\n"))
+			flusher.Flush()
+		}
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		var anthResp AnthropicResponse
@@ -1006,7 +1154,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		log.CacheWriteTokens = cacheWrite
 		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
+		h.saveRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1061,15 +1209,37 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
+		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		defer stopIdle()
 		var usageTracker AnthropicUsage
 		msgID := "msg_" + uuid.New().String()
 
 		normalClose := false
+		logged := false
+		// finish persists billing/usage and sends the meta chunk exactly
+		// once, before the terminal message_stop event.
+		finish := func() {
+			if logged {
+				return
+			}
+			logged = true
+			log.StatusCode = http.StatusOK
+			log.InputTokens = usageTracker.InputTokens
+			log.OutputTokens = usageTracker.OutputTokens
+			log.CacheReadTokens = usageTracker.CacheReadInputTokens
+			log.Cost = calculateCost(model, usageTracker.InputTokens, usageTracker.OutputTokens, usageTracker.CacheReadInputTokens, 0)
+			log.LatencyMS = int(time.Since(startTime).Milliseconds())
+			h.saveRequestLog(log)
+			h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.OutputTokens)
+			sendMuhiyaMetaChunk(w, &log, model.Name)
+		}
+
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				break
 			}
+			resetIdle()
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
@@ -1085,8 +1255,6 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 			}
 			if done {
 				normalClose = true
-				w.Write([]byte("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"))
-				flusher.Flush()
 				break
 			}
 		}
@@ -1095,17 +1263,11 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 			w.Write([]byte("event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"api_error\", \"message\": \"Upstream connection disconnected prematurely.\"}}\n\n"))
 			flusher.Flush()
 		}
-
-		log.StatusCode = http.StatusOK
-		log.InputTokens = usageTracker.InputTokens
-		log.OutputTokens = usageTracker.OutputTokens
-		log.CacheReadTokens = usageTracker.CacheReadInputTokens
-		log.Cost = calculateCost(model, usageTracker.InputTokens, usageTracker.OutputTokens, usageTracker.CacheReadInputTokens, 0)
-		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.OutputTokens)
-
-		sendMuhiyaMetaChunk(w, &log, model.Name)
+		finish()
+		if normalClose {
+			w.Write([]byte("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"))
+			flusher.Flush()
+		}
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		var oaiResp OpenAIResponse
@@ -1121,7 +1283,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		log.CacheReadTokens = cacheRead
 		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, 0)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
+		h.saveRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1176,25 +1338,51 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
+		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		defer stopIdle()
 		var usageTracker AnthropicUsage
 
 		normalClose := false
+		logged := false
+		// finish persists billing/usage and sends the meta chunk exactly
+		// once, before the terminal message_stop line is forwarded.
+		finish := func() {
+			if logged {
+				return
+			}
+			logged = true
+			log.StatusCode = http.StatusOK
+			log.InputTokens = usageTracker.InputTokens
+			log.OutputTokens = usageTracker.OutputTokens
+			log.CacheReadTokens = usageTracker.CacheReadInputTokens
+			log.CacheWriteTokens = usageTracker.CacheCreationInputTokens
+			log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens)
+			log.LatencyMS = int(time.Since(startTime).Milliseconds())
+			h.saveRequestLog(log)
+			h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
+			sendMuhiyaMetaChunk(w, &log, model.Name)
+		}
+
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				break
 			}
-			w.Write([]byte(line))
-			flusher.Flush()
+			resetIdle()
 
-			// Parse usage out of chunks
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "data:") {
-				dataStr := strings.TrimPrefix(line, "data:")
+			// Parse usage/terminal-event out of the chunk BEFORE forwarding
+			// it, so the meta chunk precedes message_stop rather than
+			// following it (a data frame after the stream's terminal event
+			// is invalid SSE).
+			trimmed := strings.TrimSpace(line)
+			isMessageStop := false
+			if strings.HasPrefix(trimmed, "data:") {
+				dataStr := strings.TrimPrefix(trimmed, "data:")
 				var event map[string]interface{}
 				if err := json.Unmarshal([]byte(dataStr), &event); err == nil {
 					eventType, _ := event["type"].(string)
 					if eventType == "message_stop" {
+						isMessageStop = true
 						normalClose = true
 					} else if eventType == "message_start" {
 						if message, ok := event["message"].(map[string]interface{}); ok {
@@ -1219,24 +1407,19 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 					}
 				}
 			}
+
+			if isMessageStop {
+				finish()
+			}
+			w.Write([]byte(line))
+			flusher.Flush()
 		}
 
 		if !normalClose {
 			w.Write([]byte("event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"api_error\", \"message\": \"Upstream connection disconnected prematurely.\"}}\n\n"))
 			flusher.Flush()
 		}
-
-		log.StatusCode = http.StatusOK
-		log.InputTokens = usageTracker.InputTokens
-		log.OutputTokens = usageTracker.OutputTokens
-		log.CacheReadTokens = usageTracker.CacheReadInputTokens
-		log.CacheWriteTokens = usageTracker.CacheCreationInputTokens
-		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens)
-		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
-
-		sendMuhiyaMetaChunk(w, &log, model.Name)
+		finish()
 	} else {
 		respBody, _ := io.ReadAll(resp.Body)
 		var anthResp AnthropicResponse
@@ -1251,7 +1434,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		log.CacheWriteTokens = cacheWrite
 		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
-		_ = h.db.InsertRequestLog(log)
+		h.saveRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1270,7 +1453,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 
 	models, err := h.db.ListModels()
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error listing models: "+err.Error(), "api_error")
+		h.internalErrorResponse(w, "database error listing models", err)
 		return
 	}
 
@@ -1453,7 +1636,7 @@ func (h *ProxyHandler) logAndWriteError(w http.ResponseWriter, code int, msg str
 	log.StatusCode = code
 	log.ErrorMessage = msg
 	log.LatencyMS = int(time.Since(startTime).Milliseconds())
-	_ = h.db.InsertRequestLog(*log)
+	h.saveRequestLog(*log)
 
 	h.writeError(w, code, msg, errType)
 }
@@ -1462,7 +1645,7 @@ func (h *ProxyHandler) logFailedUpstream(w http.ResponseWriter, statusCode int, 
 	log.StatusCode = statusCode
 	log.ErrorMessage = string(respBytes)
 	log.LatencyMS = int(time.Since(startTime).Milliseconds())
-	_ = h.db.InsertRequestLog(*log)
+	h.saveRequestLog(*log)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -1552,7 +1735,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	// Retrieve target model
 	targetModel, err := h.db.GetModelByName(modelName)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+		h.internalErrorResponse(w, "database error", err)
 		return
 	}
 	if targetModel == nil {
@@ -1563,7 +1746,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	// Retrieve provider
 	provider, err := h.db.GetProvider(targetModel.ProviderID)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Database error: "+err.Error(), "api_error")
+		h.internalErrorResponse(w, "database error", err)
 		return
 	}
 	if provider == nil || provider.Status != "active" {
@@ -1689,9 +1872,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		CreatedAt:      time.Now(),
 	}
 
-	if err := h.db.InsertRequestLog(logEntry); err != nil {
-		log.Printf("[TRANSCRIPTION-ERROR] Failed to insert request log: %v", err)
-	}
+	h.saveRequestLog(logEntry)
 
 	// Return response
 	w.Header().Set("Content-Type", "application/json")

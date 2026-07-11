@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -52,7 +53,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 		if id != "" {
 			u, err := api.db.GetUser(id)
 			if err != nil {
-				api.errorResponse(w, http.StatusInternalServerError, err.Error())
+				api.dbErrorResponse(w, err)
 				return
 			}
 			if u == nil {
@@ -64,7 +65,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		list, err := api.db.ListUsers()
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, list)
@@ -84,7 +85,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := api.db.CreateUser(u); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, u)
@@ -101,7 +102,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		existing, err := api.db.GetUser(u.ID)
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		if existing == nil {
@@ -115,7 +116,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			u.CreatedAt = existing.CreatedAt
 		}
 		if err := api.db.UpdateUser(u); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, u)
@@ -127,7 +128,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.DeleteUser(id); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
@@ -143,7 +144,7 @@ func (api *AdminAPI) handlePlans(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		list, err := api.db.ListPlans()
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, list)
@@ -160,7 +161,7 @@ func (api *AdminAPI) handlePlans(w http.ResponseWriter, r *http.Request) {
 		p.CreatedAt = time.Now()
 
 		if err := api.db.CreatePlan(p); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, p)
@@ -176,7 +177,7 @@ func (api *AdminAPI) handlePlans(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.UpdatePlan(p); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, p)
@@ -188,7 +189,7 @@ func (api *AdminAPI) handlePlans(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.DeletePlan(id); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
@@ -211,7 +212,7 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 			list, err = api.db.ListBudgetWindows()
 		}
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, list)
@@ -228,7 +229,7 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 		bw.CreatedAt = time.Now()
 
 		if err := api.db.CreateBudgetWindow(bw); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, bw)
@@ -244,7 +245,7 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.UpdateBudgetWindow(bw); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, bw)
@@ -256,7 +257,7 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.DeleteBudgetWindow(id); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
@@ -279,7 +280,7 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 			list, err = api.db.ListVirtualKeys()
 		}
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, list)
@@ -290,15 +291,22 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
 			return
 		}
-		vk.ID = generateVirtualKey()
+		// CreateVirtualKey generates both the internal ID and the bearer
+		// token itself (storing only the token's hash); any client-supplied
+		// ID is ignored so a caller can never choose - and thereby learn
+		// something about - the value used to key lookups.
+		vk.ID = ""
 		vk.Status = "active"
 		vk.CreatedAt = time.Now()
 
-		if err := api.db.CreateVirtualKey(vk); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+		created, err := api.db.CreateVirtualKey(vk)
+		if err != nil {
+			api.dbErrorResponse(w, err)
 			return
 		}
-		api.jsonResponse(w, http.StatusCreated, vk)
+		// created.Token carries the plaintext bearer credential - the ONLY
+		// response that will ever contain it. Callers must copy it now.
+		api.jsonResponse(w, http.StatusCreated, created)
 
 	case http.MethodPut:
 		var vk db.VirtualKey
@@ -310,9 +318,9 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "Key ID is required")
 			return
 		}
-		existing, err := api.db.GetVirtualKey(vk.ID)
+		existing, err := api.db.GetVirtualKeyByID(vk.ID)
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		if existing == nil {
@@ -321,7 +329,7 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		if vk.Status == "revoked" {
 			if err := api.db.DeleteVirtualKey(vk.ID); err != nil {
-				api.errorResponse(w, http.StatusInternalServerError, err.Error())
+				api.dbErrorResponse(w, err)
 				return
 			}
 			api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
@@ -337,7 +345,7 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 			vk.ExpiresAt = existing.ExpiresAt
 		}
 		if err := api.db.UpdateVirtualKey(vk); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, vk)
@@ -349,7 +357,7 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.DeleteVirtualKey(id); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
@@ -383,7 +391,7 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		list, err := api.db.ListProviders()
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		// Never ship upstream API keys to the browser. Redact the secret and
@@ -405,7 +413,7 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 		p.UpdatedAt = time.Now()
 
 		if err := api.db.CreateProvider(p); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, redactProviderKeys([]db.Provider{p})[0])
@@ -422,7 +430,7 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		existing, err := api.db.GetProvider(p.ID)
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		if existing == nil {
@@ -442,7 +450,7 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		p.UpdatedAt = time.Now()
 		if err := api.db.UpdateProvider(p); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, redactProviderKeys([]db.Provider{p})[0])
@@ -454,7 +462,7 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.DeleteProvider(id); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
@@ -470,7 +478,7 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		list, err := api.db.ListModels()
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, list)
@@ -488,7 +496,7 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 		m.CreatedAt = time.Now()
 
 		if err := api.db.CreateModel(m); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, m)
@@ -505,7 +513,7 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		existing, err := api.db.GetModel(m.ID)
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		if existing == nil {
@@ -519,7 +527,7 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 			m.CreatedAt = existing.CreatedAt
 		}
 		if err := api.db.UpdateModel(m); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, m)
@@ -531,7 +539,7 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.DeleteModel(id); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
@@ -547,7 +555,7 @@ func (api *AdminAPI) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		list, err := api.db.ListSettings()
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, list)
@@ -563,7 +571,7 @@ func (api *AdminAPI) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.SetSetting(s.Key, s.Value); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, s)
@@ -588,7 +596,7 @@ func (api *AdminAPI) handleLogs(w http.ResponseWriter, r *http.Request) {
 			log.CreatedAt = time.Now()
 		}
 		if err := api.db.InsertRequestLog(log); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, log)
@@ -636,10 +644,13 @@ func (api *AdminAPI) errorResponse(w http.ResponseWriter, status int, message st
 	api.jsonResponse(w, status, map[string]string{"error": message})
 }
 
-func generateVirtualKey() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return "sk-virt-" + hex.EncodeToString(b)
+// dbErrorResponse logs a database/internal error server-side (with whatever
+// detail is useful for debugging) and returns a generic message to the
+// client - a raw err.Error() risks leaking schema, driver, or query
+// fragments to whoever is calling the admin API.
+func (api *AdminAPI) dbErrorResponse(w http.ResponseWriter, err error) {
+	log.Printf("[ADMIN-ERROR] %v", err)
+	api.errorResponse(w, http.StatusInternalServerError, "Internal server error. See gateway logs for details.")
 }
 
 func generateRandomString(length int) string {
@@ -658,7 +669,7 @@ func (api *AdminAPI) handleUserTopups(w http.ResponseWriter, r *http.Request) {
 		}
 		list, err := api.db.ListUserTopups(userID)
 		if err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusOK, list)
@@ -680,7 +691,7 @@ func (api *AdminAPI) handleUserTopups(w http.ResponseWriter, r *http.Request) {
 		t.CreatedAt = time.Now()
 
 		if err := api.db.CreateUserTopup(t); err != nil {
-			api.errorResponse(w, http.StatusInternalServerError, err.Error())
+			api.dbErrorResponse(w, err)
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, t)

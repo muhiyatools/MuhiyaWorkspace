@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Muhiya Plan &amp; Budget Simulator</title>
+<style>
+  :root {
+    --bg: #0a0a0b;
+    --panel: #131316;
+    --panel-2: #1a1a1f;
+    --border: #26262c;
+    --border-lit: #34343c;
+    --primary: #10b981;
+    --primary-dim: rgba(16,185,129,0.12);
+    --danger: #ef4444;
+    --danger-dim: rgba(239,68,68,0.12);
+    --warn: #f59e0b;
+    --warn-dim: rgba(245,158,11,0.12);
+    --text: #fafafa;
+    --muted: #a1a1aa;
+    --muted-2: #71717a;
+    --radius: 14px;
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    line-height: 1.5;
+    padding: 2rem 1.25rem 5rem;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; }
+
+  header h1 { font-size: 1.7rem; letter-spacing: -0.02em; }
+  header h1 span { color: var(--primary); }
+  header p { color: var(--muted); margin-top: 0.35rem; max-width: 62ch; }
+
+  .presets { display: flex; gap: 0.6rem; margin: 1.4rem 0 1.8rem; flex-wrap: wrap; }
+  .preset-btn {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    padding: 0.55rem 1.1rem; border-radius: 10px; cursor: pointer; font-weight: 700;
+    font-size: 0.85rem; transition: all .15s;
+  }
+  .preset-btn:hover { border-color: var(--primary); color: var(--primary); }
+  .preset-btn.active { background: var(--primary-dim); border-color: var(--primary); color: var(--primary); }
+
+  .grid { display: grid; gap: 1.1rem; }
+  .grid-global { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .grid-plans  { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); margin-top: 1.1rem; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 1.25rem 1.35rem;
+  }
+  .card h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin-bottom: 0.9rem; }
+  .card h3 { font-size: 1.05rem; display: flex; align-items: center; justify-content: space-between; }
+
+  .plan-card { border-top: 3px solid var(--border-lit); }
+  .plan-card.free { border-top-color: #64748b; }
+  .plan-card.yalla { border-top-color: var(--primary); }
+  .plan-card.max { border-top-color: #a855f7; }
+
+  .field { margin-bottom: 0.85rem; }
+  .field label { display: flex; justify-content: space-between; font-size: 0.78rem; font-weight: 700; color: var(--muted); margin-bottom: 0.3rem; }
+  .field label output { color: var(--text); font-variant-numeric: tabular-nums; }
+  input[type="range"] {
+    width: 100%; accent-color: var(--primary); height: 4px; cursor: pointer;
+  }
+  input[type="number"] {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--text); padding: 0.45rem 0.6rem; border-radius: 8px; font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+  }
+  input[type="number"]:focus { outline: none; border-color: var(--primary); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.7rem; }
+
+  .stat-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; margin-top: 1rem; }
+  .stat {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.55rem 0.7rem;
+  }
+  .stat .k { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted-2); font-weight: 800; }
+  .stat .v { font-size: 1.02rem; font-weight: 800; font-variant-numeric: tabular-nums; margin-top: 1px; }
+  .stat .s { font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .v.good { color: var(--primary); } .v.bad { color: var(--danger); } .v.warn { color: var(--warn); }
+
+  .badge {
+    font-size: 0.66rem; font-weight: 900; letter-spacing: 0.08em; padding: 0.22rem 0.6rem;
+    border-radius: 99px; text-transform: uppercase;
+  }
+  .badge.safe { background: var(--primary-dim); color: var(--primary); }
+  .badge.risk { background: var(--warn-dim); color: var(--warn); }
+  .badge.loss { background: var(--danger-dim); color: var(--danger); }
+
+  .bar-wrap { margin-top: 0.8rem; }
+  .bar-label { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--muted); font-weight: 700; margin-bottom: 3px; }
+  .bar { height: 8px; background: var(--panel-2); border-radius: 5px; overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 5px; transition: width .25s; }
+
+  /* Verdict */
+  .verdict { margin-top: 1.4rem; display: grid; grid-template-columns: 1.2fr 1fr; gap: 1.1rem; }
+  @media (max-width: 900px) { .verdict { grid-template-columns: 1fr; } }
+  .verdict-num { font-size: 2.2rem; font-weight: 900; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .verdict-sub { color: var(--muted); font-size: 0.85rem; }
+  .checks { display: flex; flex-direction: column; gap: 0.55rem; margin-top: 0.9rem; }
+  .check { display: flex; gap: 0.6rem; align-items: flex-start; font-size: 0.85rem; }
+  .check .ico { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; font-size: 0.7rem; font-weight: 900; flex-shrink: 0; margin-top: 1px; }
+  .check.ok .ico { background: var(--primary-dim); color: var(--primary); }
+  .check.no .ico { background: var(--danger-dim); color: var(--danger); }
+  .check small { display: block; color: var(--muted-2); font-size: 0.72rem; }
+
+  .profit-bars { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.9rem; }
+
+  .note {
+    margin-top: 1.4rem; background: var(--panel); border: 1px dashed var(--border-lit);
+    border-radius: var(--radius); padding: 1rem 1.2rem; color: var(--muted); font-size: 0.8rem;
+  }
+  .note b { color: var(--text); }
+  code { background: var(--panel-2); padding: 0.1rem 0.35rem; border-radius: 5px; font-size: 0.78rem; color: var(--primary); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Muhiya <span>Plan &amp; Budget Simulator</span></h1>
+    <p>Tune plan pricing, credit budgets, burst windows, and market assumptions. The simulator computes per-user unit economics and tells you whether <b>you win</b> (healthy margin, no worst-case loss) and <b>users win</b> (they get more credit value than they pay).</p>
+  </header>
+
+  <div class="presets">
+    <button class="preset-btn active" id="btn-reco" onclick="applyPreset('reco', this)">★ Recommended Meta</button>
+    <button class="preset-btn" id="btn-current" onclick="applyPreset('current', this)">Current Config</button>
+    <button class="preset-btn" onclick="applyPreset('growth', this)">Aggressive Growth</button>
+  </div>
+
+  <!-- Global assumptions -->
+  <div class="grid grid-global">
+    <div class="card">
+      <h2>Exchange & Fees</h2>
+      <div class="field">
+        <label>USD → EGP rate <output id="o-rate"></output></label>
+        <input type="range" id="in-rate" min="30" max="80" step="0.5" oninput="recalc()">
+      </div>
+      <div class="field">
+        <label>Payment fees % <output id="o-fee"></output></label>
+        <input type="range" id="in-fee" min="0" max="8" step="0.25" oninput="recalc()">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Model Pricing Markup</h2>
+      <div class="field">
+        <label>Charged price ÷ provider cost <output id="o-markup"></output></label>
+        <input type="range" id="in-markup" min="1" max="4" step="0.05" oninput="recalc()">
+      </div>
+      <p style="font-size:0.72rem;color:var(--muted-2)">How much your gateway model prices exceed what DeepSeek/providers actually charge you. This is your primary profit lever.</p>
+    </div>
+
+    <div class="card">
+      <h2>Fixed Costs</h2>
+      <div class="field">
+        <label>Infra / month (USD) <output id="o-infra"></output></label>
+        <input type="range" id="in-infra" min="0" max="500" step="5" oninput="recalc()">
+      </div>
+      <p style="font-size:0.72rem;color:var(--muted-2)">elest.io VM, Postgres, Cloudflare, Supabase, domains…</p>
+    </div>
+
+    <div class="card">
+      <h2>Free → Paid Conversion</h2>
+      <div class="field">
+        <label>Conversion rate % <output id="o-conv"></output></label>
+        <input type="range" id="in-conv" min="0" max="15" step="0.25" oninput="recalc()">
+      </div>
+      <p style="font-size:0.72rem;color:var(--muted-2)">Share of free users who eventually upgrade. Turns the free tier from a cost into an acquisition channel.</p>
+    </div>
+  </div>
+
+  <!-- Plan cards -->
+  <div class="grid grid-plans" id="plans"></div>
+
+  <!-- Verdict -->
+  <div class="verdict">
+    <div class="card">
+      <h2>Monthly P&amp;L</h2>
+      <div class="verdict-num" id="v-profit">—</div>
+      <div class="verdict-sub" id="v-profit-sub">—</div>
+      <div class="profit-bars" id="v-bars"></div>
+    </div>
+    <div class="card">
+      <h2>Win / Win Checklist</h2>
+      <div class="checks" id="v-checks"></div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>How the math works.</b> A plan's budget is denominated at your <i>charged</i> model prices, so its true worst-case cost to you is
+    <code>budget ÷ markup</code>. A plan is <b>worst-case safe</b> when <code>budget ÷ markup ≤ price × (1 − fees)</code> — even a user who
+    burns 100% of their credits can't put you underwater. Typical utilization is far lower, which is where margin lives.
+    Burst (5h) windows protect against leaked keys and abuse spikes; the free plan's <b>weekly</b> window stops a new account
+    burning a whole month in one night.
+  </div>
+
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Plan model. All budgets in credits (1 credit = $0.01).
+// ---------------------------------------------------------------------------
+const PLANS = [
+  {
+    id: 'free', cls: 'free', name: 'MuhiyaCode Free', paid: false,
+    fields: { priceEgp: 0, monthlyCr: 25, weeklyCr: 10, burstCr: 5, users: 1000, util: 70 },
+  },
+  {
+    id: 'yalla', cls: 'yalla', name: 'MuhiyaCode Yalla', paid: true,
+    fields: { priceEgp: 950, monthlyCr: 2500, weeklyCr: 0, burstCr: 300, users: 100, util: 45 },
+  },
+  {
+    id: 'max', cls: 'max', name: 'MuhiyaCode Max', paid: true,
+    fields: { priceEgp: 1950, monthlyCr: 5000, weeklyCr: 0, burstCr: 600, users: 25, util: 40 },
+  },
+];
+
+const PRESETS = {
+  // The recommended meta: reduced free tier w/ weekly cap, real burst windows,
+  // markup that keeps every plan worst-case safe.
+  reco: {
+    globals: { rate: 48, fee: 3.5, markup: 2.0, infra: 60, conv: 3 },
+    free:  { priceEgp: 0,    monthlyCr: 25,   weeklyCr: 10,  burstCr: 5,   users: 1000, util: 70 },
+    yalla: { priceEgp: 950,  monthlyCr: 2500, weeklyCr: 0,   burstCr: 300, users: 100,  util: 45 },
+    max:   { priceEgp: 1950, monthlyCr: 5000, weeklyCr: 0,   burstCr: 600, users: 25,   util: 40 },
+  },
+  // What is live today: free 50cr with burst = full budget, paid plans with
+  // burst windows equal to the monthly budget (i.e. no real burst protection).
+  current: {
+    globals: { rate: 50, fee: 3.5, markup: 2.0, infra: 60, conv: 3 },
+    free:  { priceEgp: 0,    monthlyCr: 50,   weeklyCr: 0,   burstCr: 50,   users: 1000, util: 70 },
+    yalla: { priceEgp: 950,  monthlyCr: 2500, weeklyCr: 0,   burstCr: 2500, users: 100,  util: 45 },
+    max:   { priceEgp: 1950, monthlyCr: 5000, weeklyCr: 0,   burstCr: 5000, users: 25,   util: 40 },
+  },
+  // Cheaper paid tiers + bigger free tier to maximize signups; margins thinner.
+  growth: {
+    globals: { rate: 48, fee: 3.5, markup: 1.8, infra: 60, conv: 5 },
+    free:  { priceEgp: 0,    monthlyCr: 40,   weeklyCr: 15,  burstCr: 8,   users: 3000, util: 75 },
+    yalla: { priceEgp: 650,  monthlyCr: 2000, weeklyCr: 0,   burstCr: 250, users: 220,  util: 50 },
+    max:   { priceEgp: 1450, monthlyCr: 4200, weeklyCr: 0,   burstCr: 500, users: 60,   util: 45 },
+  },
+};
+
+const $ = (id) => document.getElementById(id);
+const fmtUSD = (v) => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: v < 100 ? 2 : 0 });
+const fmtEGP = (v) => 'EGP ' + Math.round(v).toLocaleString();
+
+// --- Build plan cards -------------------------------------------------------
+function planCardHTML(p) {
+  const f = p.fields;
+  return `
+  <div class="card plan-card ${p.cls}">
+    <h3>${p.name} <span class="badge safe" id="${p.id}-badge">—</span></h3>
+
+    <div class="row2" style="margin-top:0.9rem">
+      <div class="field">
+        <label>Price / month (EGP)</label>
+        <input type="number" id="${p.id}-priceEgp" min="0" step="10" value="${f.priceEgp}" ${p.paid ? '' : 'disabled'} oninput="recalc()">
+      </div>
+      <div class="field">
+        <label>Monthly budget (credits)</label>
+        <input type="number" id="${p.id}-monthlyCr" min="0" step="5" value="${f.monthlyCr}" oninput="recalc()">
+      </div>
+    </div>
+
+    <div class="row2">
+      <div class="field">
+        <label>Weekly window (credits, 0 = off)</label>
+        <input type="number" id="${p.id}-weeklyCr" min="0" step="1" value="${f.weeklyCr}" oninput="recalc()">
+      </div>
+      <div class="field">
+        <label>5h burst window (credits)</label>
+        <input type="number" id="${p.id}-burstCr" min="0" step="1" value="${f.burstCr}" oninput="recalc()">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Subscribers <output id="${p.id}-o-users"></output></label>
+      <input type="range" id="${p.id}-users" min="0" max="${p.paid ? 1000 : 20000}" step="${p.paid ? 5 : 50}" value="${f.users}" oninput="recalc()">
+    </div>
+    <div class="field">
+      <label>Expected budget utilization <output id="${p.id}-o-util"></output></label>
+      <input type="range" id="${p.id}-util" min="5" max="100" step="1" value="${f.util}" oninput="recalc()">
+    </div>
+
+    <div class="stat-strip" id="${p.id}-stats"></div>
+    <div class="bar-wrap" id="${p.id}-bar"></div>
+  </div>`;
+}
+
+$('plans').innerHTML = PLANS.map(planCardHTML).join('');
+
+// --- Preset application ------------------------------------------------------
+function applyPreset(name, btn) {
+  const p = PRESETS[name];
+  $('in-rate').value = p.globals.rate;
+  $('in-fee').value = p.globals.fee;
+  $('in-markup').value = p.globals.markup;
+  $('in-infra').value = p.globals.infra;
+  $('in-conv').value = p.globals.conv;
+  for (const plan of PLANS) {
+    const cfg = p[plan.id];
+    for (const k of Object.keys(cfg)) {
+      const el = $(`${plan.id}-${k}`);
+      if (el) el.value = cfg[k];
+    }
+  }
+  document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  recalc();
+}
+
+// --- Core math ---------------------------------------------------------------
+function recalc() {
+  const rate = +$('in-rate').value;
+  const fee = +$('in-fee').value / 100;
+  const markup = +$('in-markup').value;
+  const infra = +$('in-infra').value;
+  const conv = +$('in-conv').value / 100;
+
+  $('o-rate').textContent = rate.toFixed(1);
+  $('o-fee').textContent = (fee * 100).toFixed(2) + '%';
+  $('o-markup').textContent = markup.toFixed(2) + '×';
+  $('o-infra').textContent = fmtUSD(infra);
+  $('o-conv').textContent = (conv * 100).toFixed(2) + '%';
+
+  let totalRevenue = 0, totalCost = 0, freeCost = 0, freeUsers = 0;
+  const perPlan = [];
+
+  for (const p of PLANS) {
+    const priceEgp = +$(`${p.id}-priceEgp`).value || 0;
+    const monthlyCr = +$(`${p.id}-monthlyCr`).value || 0;
+    const users = +$(`${p.id}-users`).value || 0;
+    const util = +$(`${p.id}-util`).value / 100;
+
+    $(`${p.id}-o-users`).textContent = users.toLocaleString();
+    $(`${p.id}-o-util`).textContent = Math.round(util * 100) + '%';
+
+    const priceUsd = priceEgp / rate;
+    const netRevenue = priceUsd * (1 - fee);
+    const budgetUsd = monthlyCr / 100;              // credits -> face USD
+    const worstCost = budgetUsd / markup;           // what providers bill YOU at 100% burn
+    const expCost = worstCost * util;
+    const profitPerUser = netRevenue - expCost;
+    const marginPct = netRevenue > 0 ? (profitPerUser / netRevenue) * 100 : 0;
+    // Utilization at which a user stops being profitable (>100% = safe even at full burn)
+    const breakEvenUtil = worstCost > 0 ? (netRevenue / worstCost) * 100 : Infinity;
+    const valueMultiple = priceUsd > 0 ? budgetUsd / priceUsd : Infinity;
+
+    const revenue = netRevenue * users;
+    const cost = expCost * users;
+    totalRevenue += revenue;
+    totalCost += cost;
+    if (!p.paid) { freeCost += cost; freeUsers += users; }
+
+    // Badge
+    const badge = $(`${p.id}-badge`);
+    if (!p.paid) {
+      badge.textContent = 'COST CENTER';
+      badge.className = 'badge risk';
+    } else if (breakEvenUtil >= 100) {
+      badge.textContent = 'WORST-CASE SAFE';
+      badge.className = 'badge safe';
+    } else if (breakEvenUtil >= 70) {
+      badge.textContent = 'RISK ABOVE ' + Math.round(breakEvenUtil) + '%';
+      badge.className = 'badge risk';
+    } else {
+      badge.textContent = 'CAN LOSE MONEY';
+      badge.className = 'badge loss';
+    }
+
+    // Stats
+    const stats = [];
+    if (p.paid) {
+      stats.push(['Price', fmtUSD(priceUsd) + '/mo', fmtEGP(priceEgp)]);
+      stats.push(['Margin / user', fmtUSD(profitPerUser), marginPct.toFixed(0) + '% of net', profitPerUser >= 0 ? (marginPct >= 50 ? 'good' : 'warn') : 'bad']);
+      stats.push(['Worst-case cost', fmtUSD(worstCost), 'if 100% burned', worstCost <= netRevenue ? 'good' : 'bad']);
+      stats.push(['Break-even util', breakEvenUtil === Infinity ? '∞' : Math.round(breakEvenUtil) + '%', 'safe below this', breakEvenUtil >= 100 ? 'good' : 'warn']);
+      stats.push(['Plan revenue', fmtUSD(revenue), users + ' users']);
+      stats.push(['Plan profit', fmtUSD(revenue - cost), '', revenue - cost >= 0 ? 'good' : 'bad']);
+    } else {
+      const convUsers = users * conv;
+      stats.push(['Cost / free user', fmtUSD(expCost), 'expected / mo']);
+      stats.push(['Worst / free user', fmtUSD(worstCost), 'if cap burned', 'warn']);
+      stats.push(['Tier cost', fmtUSD(cost), users.toLocaleString() + ' users', 'warn']);
+      stats.push(['Upgrades / mo', convUsers.toFixed(1), 'at ' + (conv * 100).toFixed(1) + '% conv']);
+      stats.push(['CAC via free', convUsers > 0 ? fmtUSD(cost / convUsers) : '—', 'cost per convert']);
+      stats.push(['Value to user', monthlyCr + ' cr', 'free every month', 'good']);
+    }
+    $(`${p.id}-stats`).innerHTML = stats.map(([k, v, s, cls]) =>
+      `<div class="stat"><div class="k">${k}</div><div class="v ${cls || ''}">${v}</div><div class="s">${s || ''}</div></div>`
+    ).join('');
+
+    // Utilization bar
+    const barPct = Math.min(util * 100, 100);
+    const beMark = Math.min(breakEvenUtil, 100);
+    const barColor = !p.paid ? 'var(--warn)' : (util * 100 <= beMark ? 'var(--primary)' : 'var(--danger)');
+    $(`${p.id}-bar`).innerHTML = `
+      <div class="bar-label"><span>Expected utilization</span><span>${p.paid && breakEvenUtil < 100 ? 'break-even @ ' + Math.round(breakEvenUtil) + '%' : ''}</span></div>
+      <div class="bar" style="position:relative">
+        <div style="width:${barPct}%; background:${barColor}"></div>
+        ${p.paid && breakEvenUtil < 100 ? `<span style="position:absolute;top:-2px;bottom:-2px;left:${beMark}%;width:2px;background:var(--danger)"></span>` : ''}
+      </div>`;
+
+    perPlan.push({ plan: p, revenue, cost, profit: revenue - cost, valueMultiple, breakEvenUtil, marginPct, netRevenue, worstCost, priceUsd });
+  }
+
+  // --- Verdict ---
+  const profit = totalRevenue - totalCost - infra;
+  const vp = $('v-profit');
+  vp.textContent = fmtUSD(profit) + ' / mo';
+  vp.style.color = profit >= 0 ? 'var(--primary)' : 'var(--danger)';
+  $('v-profit-sub').textContent =
+    `Revenue ${fmtUSD(totalRevenue)} − model costs ${fmtUSD(totalCost)} (incl. free tier ${fmtUSD(freeCost)}) − infra ${fmtUSD(infra)}  ·  ≈ ${fmtEGP(profit * rate)}`;
+
+  // Profit bars per plan
+  const maxAbs = Math.max(...perPlan.map(x => Math.abs(x.profit)), 1);
+  $('v-bars').innerHTML = perPlan.map(x => `
+    <div>
+      <div class="bar-label"><span>${x.plan.name}</span><span>${fmtUSD(x.profit)}</span></div>
+      <div class="bar"><div style="width:${Math.abs(x.profit) / maxAbs * 100}%; background:${x.profit >= 0 ? 'var(--primary)' : 'var(--danger)'}"></div></div>
+    </div>`).join('');
+
+  // Win/win checks
+  const paid = perPlan.filter(x => x.plan.paid);
+  const checks = [
+    {
+      ok: paid.every(x => x.breakEvenUtil >= 100),
+      label: 'You win — worst-case safe',
+      detail: paid.every(x => x.breakEvenUtil >= 100)
+        ? 'Every paid plan stays profitable even if users burn 100% of their credits.'
+        : 'A plan can lose money at full burn: ' + paid.filter(x => x.breakEvenUtil < 100).map(x => x.plan.name + ' (break-even ' + Math.round(x.breakEvenUtil) + '%)').join(', ') + '. Raise markup, raise price, or shrink the budget.',
+    },
+    {
+      ok: paid.every(x => x.marginPct >= 50),
+      label: 'You win — healthy expected margin',
+      detail: paid.map(x => `${x.plan.name}: ${Math.round(x.marginPct)}%`).join('  ·  ') + ' (target ≥ 50% at expected utilization)',
+    },
+    {
+      ok: paid.every(x => x.valueMultiple >= 1.2),
+      label: 'Users win — credits worth more than the price',
+      detail: paid.map(x => `${x.plan.name}: ${x.valueMultiple.toFixed(2)}× face value`).join('  ·  ') + ' (target ≥ 1.2× — the markup funds it, not your margin)',
+    },
+    {
+      ok: PLANS.every(p => {
+        const burst = +$(`${p.id}-burstCr`).value, monthly = +$(`${p.id}-monthlyCr`).value;
+        return monthly === 0 || burst === 0 || burst <= monthly * 0.2;
+      }),
+      label: 'Abuse-proof — real burst windows',
+      detail: '5h burst ≤ 20% of the monthly budget on every plan, so a leaked key or bot can\'t drain a month in one session.',
+    },
+    {
+      ok: (+$('free-weeklyCr').value || 0) > 0,
+      label: 'Free tier is paced weekly',
+      detail: 'A weekly window makes free users come back across the month instead of burning everything on day one and churning.',
+    },
+    {
+      ok: profit >= 0,
+      label: 'Business is net profitable',
+      detail: profit >= 0 ? 'Paid margins cover the free tier and infra with room to grow.' : 'Currently underwater — reduce free-tier exposure or grow paid mix.',
+    },
+  ];
+  $('v-checks').innerHTML = checks.map(c => `
+    <div class="check ${c.ok ? 'ok' : 'no'}">
+      <div class="ico">${c.ok ? '✓' : '✗'}</div>
+      <div><b>${c.label}</b><small>${c.detail}</small></div>
+    </div>`).join('');
+}
+
+recalc();
+</script>
+</body>
+</html>

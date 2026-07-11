@@ -1,0 +1,12 @@
+.git
+.gitignore
+.gitattributes
+*.exe
+*.zip
+*.db
+*.db-shm
+*.db-wal
+gateway
+.env
+GATEWAY_AUDIT.md
+plan-simulator.html

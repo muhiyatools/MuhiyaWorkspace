@@ -121,11 +121,12 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	hasSearched := false
 
 	for iter := 0; iter < maxAgentIterations; iter++ {
-		var activeTools []OpenAITool
-		if !hasSearched {
-			activeTools = tools
-		}
-		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, activeTools, thinkingLevel)
+		// tools stays byte-identical across every iteration of this loop.
+		// It used to be set to nil after the first web_search, which shrank
+		// the rendered tool block and busted the provider's prefix cache
+		// turn to turn. The single-search rule is now enforced by declining
+		// a repeat call (below) instead of hiding the tool definition.
+		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, tools, thinkingLevel)
 		totalInput += turn.usage.PromptTokens
 		totalOutput += turn.usage.CompletionTokens
 		totalCacheRead += turn.usage.CacheReadTokens()
@@ -151,6 +152,24 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 		// Execute each tool call in order, streaming status + result events.
 		for _, call := range turn.toolCalls {
+			if call.Function.Name == "web_search" && hasSearched {
+				// Decline instead of removing the tool from later turns:
+				// keeps the tools array (and the cached prefix) byte-stable
+				// for the rest of the loop.
+				writeSSEJSON(w, flusher, map[string]interface{}{
+					"muhiya_tool": map[string]interface{}{
+						"status": "skipped",
+						"tool":   call.Function.Name,
+						"label":  "Already searched this turn",
+					},
+				})
+				messages = append(messages, OpenAIMessage{
+					Role:       "tool",
+					ToolCallID: call.ID,
+					Content:    "A web_search was already performed this turn. Use its results; do not search again.",
+				})
+				continue
+			}
 			if call.Function.Name == "web_search" {
 				hasSearched = true
 			}
@@ -207,7 +226,7 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	reqLog.CacheReadTokens = totalCacheRead
 	reqLog.Cost = calculateCost(model, totalInput, totalOutput, totalCacheRead, 0)
 	reqLog.LatencyMS = int(time.Since(startTime).Milliseconds())
-	_ = h.db.InsertRequestLog(reqLog)
+	h.saveRequestLog(reqLog)
 	h.limiter.RecordTokens(reqLog.VirtualKeyID, totalOutput)
 
 	sendMuhiyaMetaChunk(w, &reqLog, model.Name)
@@ -327,10 +346,13 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 	accum := newToolCallAccumulator()
 	var textBuf strings.Builder
 	reader := bufio.NewReader(resp.Body)
+	resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+	defer stopIdle()
 
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
+			resetIdle()
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "data:") {
 				dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
@@ -393,9 +415,17 @@ func injectToolGuidance(messages []OpenAIMessage, sourcesSkill string) []OpenAIM
 				out[i].Content = s + "\n\n" + guidance
 				return out
 			}
+			// Structured (array) system content: append a text block instead
+			// of falling through to prepend a whole new system message -
+			// that changed the message array's shape depending on whether
+			// the client sent a string or array system message.
+			if arr, ok := out[i].Content.([]interface{}); ok {
+				out[i].Content = append(arr, map[string]interface{}{"type": "text", "text": guidance})
+				return out
+			}
 		}
 	}
-	// No string system message found — prepend one.
+	// No system message found at all — prepend one.
 	return append([]OpenAIMessage{{Role: "system", Content: guidance}}, out...)
 }
 

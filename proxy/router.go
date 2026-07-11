@@ -30,26 +30,35 @@ func AnalyzePromptComplexity(messages []OpenAIMessage) string {
 		"تحليل", "معادلة", "خوارزمية",
 	}
 
+	// Score only the FIRST user turn. Scoring the whole (monotonically
+	// growing) transcript let a session's measured complexity creep upward
+	// turn by turn and silently cross a tier boundary mid-conversation -
+	// and because DeepSeek's prefix cache is per upstream model, a
+	// mid-session re-route is a full cache wipe. Session stickiness
+	// (stickysession.go) backstops this even if a re-route is attempted
+	// anyway, but not scoring the growing transcript avoids manufacturing
+	// re-route pressure in the first place.
+	var firstUserContent string
 	for _, msg := range messages {
-		// Only analyze complexity based on the user's input, ignore system instructions or assistant replies
-		if msg.Role != "user" {
-			continue
+		if msg.Role == "user" {
+			firstUserContent = GetMessageContentString(msg.Content)
+			break
 		}
-		content := strings.ToLower(GetMessageContentString(msg.Content))
-		totalLen += len(content)
+	}
+	content := strings.ToLower(firstUserContent)
+	totalLen = len(content)
 
-		for _, keyword := range codingKeywords {
-			if strings.Contains(content, keyword) {
-				hasCodingKeywords = true
-				break
-			}
+	for _, keyword := range codingKeywords {
+		if strings.Contains(content, keyword) {
+			hasCodingKeywords = true
+			break
 		}
+	}
 
-		for _, keyword := range reasoningKeywords {
-			if strings.Contains(content, keyword) {
-				hasDeepReasoning = true
-				break
-			}
+	for _, keyword := range reasoningKeywords {
+		if strings.Contains(content, keyword) {
+			hasDeepReasoning = true
+			break
 		}
 	}
 

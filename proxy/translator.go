@@ -12,10 +12,16 @@ import (
 // ==========================================
 
 type OpenAIMessage struct {
-	Role       string            `json:"role"`
-	Content    interface{}       `json:"content,omitempty"` // string or array
-	ToolCalls  []OpenAIToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string            `json:"tool_call_id,omitempty"` // for role: tool
+	Role       string           `json:"role"`
+	Content    interface{}      `json:"content,omitempty"` // string or array
+	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"` // for role: tool
+	// ReasoningContent round-trips DeepSeek's thinking-mode key on assistant
+	// tool-call turns. The OpenAI<->OpenAI passthrough no longer decodes
+	// into this struct at all (it forwards the client's original bytes
+	// verbatim - see serveOpenAIClient), so this field only matters for
+	// typed paths: Anthropic translation and the MuhiyaChat agent loop.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type OpenAIToolCall struct {

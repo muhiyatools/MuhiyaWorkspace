@@ -222,6 +222,14 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 
 	switch family {
 	case famDeepseek:
+		if !isDeepseekReasoner(model) {
+			// deepseek-chat (and any other non-reasoning DeepSeek model)
+			// rejects or ignores the thinking parameter. Injecting it
+			// anyway risked a 400 and, worse, made the wire body shape
+			// depend on the requested effort level even for a model that
+			// can't act on it - pure request-shape variance with no benefit.
+			return "unsupported"
+		}
 		// DeepSeek reasoning supports exactly high|max. Thinking is never
 		// disabled: low/medium effort ride "high", high/max effort ride "max".
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
@@ -326,6 +334,13 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 	}
 }
 
+// isDeepseekReasoner reports whether a DeepSeek target model is the
+// reasoning-capable variant (as opposed to deepseek-chat, which has no
+// thinking mode and rejects or ignores the parameter).
+func isDeepseekReasoner(model string) bool {
+	return strings.Contains(model, "reasoner") || strings.Contains(model, "r1")
+}
+
 // openAISupportsReasoningEffort gates the strict OpenAI parameter to model
 // families documented to accept it.
 func openAISupportsReasoningEffort(model string) bool {
@@ -351,9 +366,10 @@ func ApplyThinkingAnthropic(bodyMap map[string]interface{}, baseURL, targetModel
 	model := strings.ToLower(targetModel)
 	rank := thinkingRank(level)
 
-	if classifyUpstream(baseURL, targetModel) == famDeepseek {
+	if classifyUpstream(baseURL, targetModel) == famDeepseek && isDeepseekReasoner(model) {
 		// DeepSeek's Anthropic-compatible endpoint uses output_config.effort
 		// and supports exactly high|max - thinking is never disabled.
+		// deepseek-chat has no reasoning mode; fall through to "unsupported".
 		effort := "high"
 		if rank >= 3 {
 			effort = "max"

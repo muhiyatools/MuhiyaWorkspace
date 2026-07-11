@@ -2,8 +2,17 @@ package db
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,6 +66,11 @@ type VirtualKey struct {
 	Status    string     `json:"status"` // active, revoked
 	ExpiresAt *time.Time `json:"expires_at"`
 	CreatedAt time.Time  `json:"created_at"`
+	// Token is the plaintext bearer credential. It is populated ONLY by
+	// CreateVirtualKey's return value - the one moment it ever exists in
+	// plaintext outside the caller's memory - and is never scanned from the
+	// database (only its hash, key_hash, is stored).
+	Token string `json:"key,omitempty"`
 }
 
 type Provider struct {
@@ -112,7 +126,11 @@ type RequestLog struct {
 	Complexity       string    `json:"complexity"`
 	ThinkingLevel    string    `json:"thinking_level"`
 	FailoverAttempts int       `json:"failover_attempts"`
-	CreatedAt        time.Time `json:"created_at"`
+	// UsageEstimated is true when the upstream disconnected before sending
+	// its usage payload and InputTokens/OutputTokens/Cost were computed from
+	// the local word-count heuristic instead of provider-reported numbers.
+	UsageEstimated bool      `json:"usage_estimated"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type SystemSetting struct {
@@ -179,12 +197,136 @@ func Open(dsn string) (*DB, error) {
 	}
 
 	db := &DB{conn: conn}
+	if err := db.backfillVirtualKeyHashes(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to backfill virtual key hashes: %w", err)
+	}
 	if err := db.seedDefaults(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to seed defaults: %w", err)
 	}
+	if raw := strings.TrimSpace(os.Getenv("PROVIDER_KEY_ENCRYPTION_KEY")); raw == "" {
+		log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is not set; upstream provider API keys are stored in PLAINTEXT. Set it (32 raw bytes, base64-encoded) to encrypt them at rest.")
+	} else if providerKeyCipher() == nil {
+		log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is set but invalid; upstream provider API keys are stored in PLAINTEXT.")
+	}
 
 	return db, nil
+}
+
+// backfillVirtualKeyHashes computes key_hash for any row that predates
+// migration 006 (whose id IS the bearer token clients already send), so
+// existing keys keep authenticating after the switch to hash-based lookup.
+// Idempotent: only touches rows with a NULL key_hash, safe to run every boot.
+func (db *DB) backfillVirtualKeyHashes() error {
+	rows, err := db.conn.Query("SELECT id FROM virtual_keys WHERE key_hash IS NULL")
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		if _, err := db.conn.Exec("UPDATE virtual_keys SET key_hash = $1 WHERE id = $2 AND key_hash IS NULL", hashToken(id), id); err != nil {
+			return err
+		}
+	}
+	if len(ids) > 0 {
+		log.Printf("[MIGRATION] Backfilled key_hash for %d existing virtual key(s)", len(ids))
+	}
+	return nil
+}
+
+// --- Virtual key secrecy helpers ---
+
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func randomToken(prefix string, nBytes int) string {
+	b := make([]byte, nBytes)
+	_, _ = rand.Read(b)
+	return prefix + hex.EncodeToString(b)
+}
+
+// --- Provider API key encryption at rest ---
+//
+// Encrypted with AES-256-GCM when PROVIDER_KEY_ENCRYPTION_KEY (32 raw bytes,
+// base64) is configured. Ciphertext carries an "enc:v1:" marker so legacy
+// plaintext rows (written before a key was configured) keep working
+// unchanged - encryption is opportunistic rather than mandatory, because
+// losing the encryption key would otherwise permanently lock out every
+// stored upstream credential.
+
+const providerKeyEncPrefix = "enc:v1:"
+
+func providerKeyCipher() cipher.AEAD {
+	raw := strings.TrimSpace(os.Getenv("PROVIDER_KEY_ENCRYPTION_KEY"))
+	if raw == "" {
+		return nil
+	}
+	keyBytes, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(keyBytes) != 32 {
+		return nil
+	}
+	block, err := aes.NewCipher(keyBytes)
+	if err != nil {
+		return nil
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil
+	}
+	return gcm
+}
+
+func encryptProviderKey(plaintext string) string {
+	gcm := providerKeyCipher()
+	if gcm == nil || plaintext == "" {
+		return plaintext
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		log.Printf("[SECURITY] failed to generate nonce, storing provider key in PLAINTEXT: %v", err)
+		return plaintext
+	}
+	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return providerKeyEncPrefix + base64.StdEncoding.EncodeToString(sealed)
+}
+
+func decryptProviderKey(stored string) string {
+	if !strings.HasPrefix(stored, providerKeyEncPrefix) {
+		return stored // legacy plaintext row, or encryption not configured
+	}
+	gcm := providerKeyCipher()
+	if gcm == nil {
+		// Ciphertext exists but no usable key is configured - fail safe by
+		// returning empty rather than the undecryptable blob, which would
+		// otherwise be sent upstream verbatim as a bogus Authorization value.
+		log.Printf("[SECURITY] provider key is encrypted but PROVIDER_KEY_ENCRYPTION_KEY is unavailable/invalid")
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, providerKeyEncPrefix))
+	if err != nil || len(raw) < gcm.NonceSize() {
+		log.Printf("[SECURITY] failed to decode stored provider key ciphertext")
+		return ""
+	}
+	nonce, ciphertext := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		log.Printf("[SECURITY] failed to decrypt provider key: %v", err)
+		return ""
+	}
+	return string(plain)
 }
 
 func (db *DB) Close() error {
@@ -267,10 +409,10 @@ func (db *DB) seedDefaults() error {
 	}
 	for _, pr := range providers {
 		_, err := tx.Exec(`
-			INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) 
-			VALUES ($1, $2, $3, $4, $5, $6) 
+			INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (id) DO NOTHING`,
-			pr.ID, pr.Name, pr.APIKey, pr.BaseURL, pr.AnthropicBaseURL, pr.Status)
+			pr.ID, pr.Name, encryptProviderKey(pr.APIKey), pr.BaseURL, pr.AnthropicBaseURL, pr.Status)
 		if err != nil {
 			return err
 		}
@@ -566,7 +708,26 @@ func (db *DB) DeleteBudgetWindow(id string) error {
 
 // --- Virtual Keys CRUD ---
 
-func (db *DB) GetVirtualKey(id string) (*VirtualKey, error) {
+// GetVirtualKey resolves a presented bearer token by its hash. Only the hash
+// ever touches the database or a comparison - the raw token exists only in
+// the caller's memory and, once, in CreateVirtualKey's return value.
+func (db *DB) GetVirtualKey(presentedToken string) (*VirtualKey, error) {
+	var vk VirtualKey
+	err := db.conn.QueryRow("SELECT id, name, user_id, status, expires_at, created_at FROM virtual_keys WHERE key_hash = $1", hashToken(presentedToken)).
+		Scan(&vk.ID, &vk.Name, &vk.UserID, &vk.Status, &vk.ExpiresAt, &vk.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &vk, nil
+}
+
+// GetVirtualKeyByID looks up a virtual key by its internal (non-secret) ID,
+// as used by the admin UI/API - distinct from GetVirtualKey, which resolves
+// a presented bearer TOKEN by its hash for request authentication.
+func (db *DB) GetVirtualKeyByID(id string) (*VirtualKey, error) {
 	var vk VirtualKey
 	err := db.conn.QueryRow("SELECT id, name, user_id, status, expires_at, created_at FROM virtual_keys WHERE id = $1", id).
 		Scan(&vk.ID, &vk.Name, &vk.UserID, &vk.Status, &vk.ExpiresAt, &vk.CreatedAt)
@@ -615,9 +776,22 @@ func (db *DB) ListVirtualKeysByUserID(userID string) ([]VirtualKey, error) {
 	return list, nil
 }
 
-func (db *DB) CreateVirtualKey(vk VirtualKey) error {
-	_, err := db.conn.Exec("INSERT INTO virtual_keys (id, name, user_id, status, expires_at) VALUES ($1, $2, $3, $4, $5)", vk.ID, vk.Name, vk.UserID, vk.Status, vk.ExpiresAt)
-	return err
+// CreateVirtualKey generates a fresh random bearer token, stores only its
+// hash, and returns it via the result's Token field - the one time it is
+// ever available in plaintext. vk.ID becomes an internal (non-secret)
+// identifier; if the caller left it blank one is generated.
+func (db *DB) CreateVirtualKey(vk VirtualKey) (VirtualKey, error) {
+	if vk.ID == "" {
+		vk.ID = randomToken("vk-", 12)
+	}
+	token := randomToken("sk-virt-", 16)
+	_, err := db.conn.Exec("INSERT INTO virtual_keys (id, key_hash, name, user_id, status, expires_at) VALUES ($1, $2, $3, $4, $5, $6)",
+		vk.ID, hashToken(token), vk.Name, vk.UserID, vk.Status, vk.ExpiresAt)
+	if err != nil {
+		return VirtualKey{}, err
+	}
+	vk.Token = token
+	return vk, nil
 }
 
 func (db *DB) UpdateVirtualKey(vk VirtualKey) error {
@@ -642,6 +816,7 @@ func (db *DB) GetProvider(id string) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.APIKey = decryptProviderKey(p.APIKey)
 	return &p, nil
 }
 
@@ -658,18 +833,19 @@ func (db *DB) ListProviders() ([]Provider, error) {
 		if err := rows.Scan(&p.ID, &p.Name, &p.APIKey, &p.BaseURL, &p.AnthropicBaseURL, &p.Status, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
+		p.APIKey = decryptProviderKey(p.APIKey)
 		list = append(list, p)
 	}
 	return list, nil
 }
 
 func (db *DB) CreateProvider(p Provider) error {
-	_, err := db.conn.Exec("INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) VALUES ($1, $2, $3, $4, $5, $6)", p.ID, p.Name, p.APIKey, p.BaseURL, p.AnthropicBaseURL, p.Status)
+	_, err := db.conn.Exec("INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) VALUES ($1, $2, $3, $4, $5, $6)", p.ID, p.Name, encryptProviderKey(p.APIKey), p.BaseURL, p.AnthropicBaseURL, p.Status)
 	return err
 }
 
 func (db *DB) UpdateProvider(p Provider) error {
-	_, err := db.conn.Exec("UPDATE providers SET name = $1, api_key = $2, base_url = $3, anthropic_base_url = $4, status = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6", p.Name, p.APIKey, p.BaseURL, p.AnthropicBaseURL, p.Status, p.ID)
+	_, err := db.conn.Exec("UPDATE providers SET name = $1, api_key = $2, base_url = $3, anthropic_base_url = $4, status = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6", p.Name, encryptProviderKey(p.APIKey), p.BaseURL, p.AnthropicBaseURL, p.Status, p.ID)
 	return err
 }
 
@@ -858,11 +1034,11 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 	_, err := db.conn.Exec(`INSERT INTO request_logs (
 		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
 		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, latency_ms, error_message, created_at, client_app,
-		requested_model, complexity, failover_attempts, thinking_level
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+		requested_model, complexity, failover_attempts, thinking_level, usage_estimated
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
 		log.ID, log.VirtualKeyID, log.UserID, modelID, providerID, log.RequestPath, log.StatusCode,
 		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp,
-		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel)
+		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel, log.UsageEstimated)
 
 	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
 		_ = db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost)
@@ -877,7 +1053,7 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	query := `
 		SELECT request_logs.id, COALESCE(request_logs.virtual_key_id, ''), COALESCE(request_logs.user_id, ''), COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code,
 		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
-		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, '')
+		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, ''), COALESCE(request_logs.usage_estimated, FALSE)
 		FROM request_logs
 		LEFT JOIN models ON request_logs.model_id = models.id
 		WHERE 1=1`
@@ -911,7 +1087,7 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 		var r RequestLog
 		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
-			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel)
+			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated)
 		if err != nil {
 			return nil, err
 		}
@@ -1177,4 +1353,19 @@ func (db *DB) GetDashboardStats() (*DashboardStats, error) {
 	}
 
 	return &stats, nil
+}
+
+// PruneOldRequestLogs deletes request_logs rows older than the given
+// duration. request_logs has no built-in retention, so a long-running
+// deployment grows it - and the cost of every dashboard/budget aggregate
+// query - without bound. Called periodically by main.go's retention
+// sweeper, gated by REQUEST_LOG_RETENTION_DAYS (opt-in: unset disables it,
+// since some deployments want to keep the full audit history).
+func (db *DB) PruneOldRequestLogs(olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	res, err := db.conn.Exec("DELETE FROM request_logs WHERE created_at < $1", cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

@@ -9,8 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"gateway/admin"
@@ -40,8 +44,12 @@ func main() {
 	}
 	adminPass := os.Getenv("ADMIN_PASSWORD")
 	if adminPass == "" {
-		adminPass = "adminpassword"
-		log.Printf("[SECURITY] ADMIN_PASSWORD is not set; using the insecure default. Set ADMIN_PASSWORD before exposing this gateway.")
+		if strings.EqualFold(os.Getenv("DEV_MODE"), "1") || strings.EqualFold(os.Getenv("DEV_MODE"), "true") {
+			adminPass = "adminpassword"
+			log.Printf("[SECURITY] ADMIN_PASSWORD is not set; DEV_MODE is enabled so the insecure default admin password is in use. Never set DEV_MODE in production.")
+		} else {
+			log.Fatalf("[SECURITY] ADMIN_PASSWORD must be set before starting the gateway (refusing to boot with a guessable default admin password). For local development only, set DEV_MODE=1 to allow the insecure default.")
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -152,10 +160,22 @@ func main() {
 	})
 
 	// Start HTTP server immediately so elest.io reverse proxy gets a response
-	// DB connection happens in background; /health returns 503 until ready
+	// DB connection happens in background; /health returns 503 until ready.
+	// An explicit *http.Server (rather than the http.ListenAndServe shortcut)
+	// gives us header/idle timeouts (Slowloris protection) and lets us drain
+	// in-flight streams on shutdown instead of severing them (see the signal
+	// handling block below the fmt.Println banner).
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           recoveryMiddleware(pathNormalizationMiddleware(loggerMiddleware(mux))),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: SSE responses legitimately stream for many minutes.
+		// Per-stream stall detection lives in proxy's upstream client instead.
+	}
 	go func() {
 		log.Printf("Listening on http://localhost:%s...", port)
-		if err := http.ListenAndServe(":"+port, pathNormalizationMiddleware(loggerMiddleware(mux))); err != nil {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)
 		}
 	}()
@@ -233,6 +253,17 @@ func main() {
 	// where dbReady is true but a handler is still nil.
 	dbReady.Store(true)
 
+	// Optional request_logs retention: unset by default (keeps full audit
+	// history), opt in with REQUEST_LOG_RETENTION_DAYS to bound table growth
+	// and the cost of every dashboard/budget aggregate query.
+	if daysStr := os.Getenv("REQUEST_LOG_RETENTION_DAYS"); daysStr != "" {
+		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
+			go runRetentionSweeper(database, time.Duration(days)*24*time.Hour)
+		} else {
+			log.Printf("[RETENTION] REQUEST_LOG_RETENTION_DAYS=%q is not a positive integer; retention pruning disabled", daysStr)
+		}
+	}
+
 	// DB watchdog: boot-time retry alone is not enough - the external
 	// PostgreSQL can drop MID-RUN (managed-DB restart, idle NAT reset, host
 	// sleep), after which every request used to hang or surface raw query
@@ -262,8 +293,47 @@ func main() {
 ==================================================
 `)
 
-	// Block main goroutine forever
-	select {}
+	// Block until a shutdown signal arrives, then drain in-flight requests
+	// (including active SSE streams) instead of severing them mid-response -
+	// a bare process kill was losing the billing row for whatever request was
+	// in flight at the time.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+	log.Printf("Shutdown signal received, draining in-flight requests (up to 60s)...")
+	dbReady.Store(false)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Graceful shutdown did not complete cleanly: %v", err)
+	}
+	log.Printf("Shutdown complete.")
+}
+
+// recoveryMiddleware stops a single handler panic from aborting the
+// connection with no client-visible reason. Go's net/http server already
+// recovers per-request panics so the PROCESS survives regardless; this adds
+// a structured log line and a clean JSON error response instead of an
+// abrupt connection close (which a streaming SSE client would otherwise see
+// as an opaque network error).
+func recoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[PANIC] %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				func() {
+					// Writing the fallback response can itself fail/panic if
+					// the connection already streamed partial output; swallow
+					// defensively rather than risk a second unrecovered panic.
+					defer func() { _ = recover() }()
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":{"message":"Internal server error","type":"api_error"}}`))
+				}()
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Degrade after this many consecutive failed pings (one flaky ping must not
@@ -292,6 +362,21 @@ func watchDatabase(database *db.DB) {
 		}
 		failures = 0
 		dbReady.Store(true)
+	}
+}
+
+// runRetentionSweeper periodically deletes request_logs rows older than
+// retention. Runs for the life of the process; a failed prune just logs and
+// retries next interval rather than stopping the sweep entirely.
+func runRetentionSweeper(database *db.DB, retention time.Duration) {
+	const interval = 6 * time.Hour
+	for {
+		if n, err := database.PruneOldRequestLogs(retention); err != nil {
+			log.Printf("[RETENTION] prune failed: %v", err)
+		} else if n > 0 {
+			log.Printf("[RETENTION] pruned %d request_logs row(s) older than %s", n, retention)
+		}
+		time.Sleep(interval)
 	}
 }
 

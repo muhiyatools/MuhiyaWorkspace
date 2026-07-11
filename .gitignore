@@ -1,4 +1,5 @@
-# SQLite local databases
+# SQLite local databases (stale from a retired backend - the live store is
+# external PostgreSQL, see DATABASE_URL)
 *.db
 *.db-shm
 *.db-wal
@@ -6,6 +7,7 @@
 # Compiled binaries
 *.exe
 *.zip
+gateway
 
 # Environment files
 .env

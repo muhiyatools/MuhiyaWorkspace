@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Never apply EOL normalization to binaries - it can corrupt them on
+# checkout across operating systems.
+*.exe -text
+*.zip -text
+*.db -text
+*.db-wal -text
+*.db-shm -text
+gateway -text

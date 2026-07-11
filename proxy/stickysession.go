@@ -1,0 +1,87 @@
+package proxy
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+	"sync"
+	"time"
+)
+
+// SessionHeader lets a client pin the router's model choice for the life of a
+// conversation. DeepSeek's prefix cache is per upstream model: without this,
+// muhiya-ai-router re-evaluates complexity/thinking on every request and can
+// silently swap deepseek-chat <-> deepseek-reasoner mid-session (e.g. a
+// /reasoning change), wiping the entire cached prefix. Clients that care
+// about cache stability should send the same opaque value for every request
+// in one conversation.
+const SessionHeader = "X-Muhiya-Session"
+
+const stickyTTL = 24 * time.Hour
+
+// stickyMapCap bounds the in-process map; once exceeded a sweep drops
+// expired entries so long-running instances cannot leak memory indefinitely.
+const stickyMapCap = 10000
+
+type stickyEntry struct {
+	modelID string
+	expires time.Time
+}
+
+// modelSticky remembers the model chosen for a session key so the router
+// reuses it on every subsequent request in that conversation. In-process
+// only: a miss here (e.g. after a restart, or on a different replica behind
+// a load balancer) only costs one cache-cold turn - never a wrong answer -
+// so a distributed store is not required for correctness, only for maximum
+// hit rate under horizontal scaling (a future enhancement, not implemented).
+type modelSticky struct {
+	mu      sync.Mutex
+	entries map[string]stickyEntry
+}
+
+func newModelSticky() *modelSticky {
+	return &modelSticky{entries: make(map[string]stickyEntry)}
+}
+
+// stickyKeyFor derives the stickiness key for a request. An explicit
+// X-Muhiya-Session header (scoped to the virtual key, so one client's session
+// IDs can never collide with another's) is required; absent that, stickiness
+// is unavailable and routing falls back to per-request behavior unchanged.
+func stickyKeyFor(virtualKeyID, sessionHeader string) string {
+	sessionHeader = strings.TrimSpace(sessionHeader)
+	if sessionHeader == "" || virtualKeyID == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(virtualKeyID + "|" + sessionHeader))
+	return hex.EncodeToString(h[:])
+}
+
+func (s *modelSticky) get(key string) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[key]
+	if !ok || time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.modelID, true
+}
+
+func (s *modelSticky) set(key, modelID string) {
+	if key == "" || modelID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries[key] = stickyEntry{modelID: modelID, expires: time.Now().Add(stickyTTL)}
+	if len(s.entries) > stickyMapCap {
+		now := time.Now()
+		for k, v := range s.entries {
+			if now.After(v.expires) {
+				delete(s.entries, k)
+			}
+		}
+	}
+}

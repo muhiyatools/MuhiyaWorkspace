@@ -254,7 +254,7 @@ func TestRateLimiter(t *testing.T) {
 		UserID: userUnlimit.ID,
 		Status: "active",
 	}
-	if err := testDB.CreateVirtualKey(keyUnlimit); err != nil {
+	if _, err := testDB.CreateVirtualKey(keyUnlimit); err != nil {
 		t.Fatalf("failed to create key: %v", err)
 	}
 
@@ -294,7 +294,7 @@ func TestRateLimiter(t *testing.T) {
 		UserID: userLimit.ID,
 		Status: "active",
 	}
-	if err := testDB.CreateVirtualKey(keyLimit); err != nil {
+	if _, err := testDB.CreateVirtualKey(keyLimit); err != nil {
 		t.Fatalf("failed to create key: %v", err)
 	}
 
@@ -373,7 +373,7 @@ func TestRateLimiter(t *testing.T) {
 		UserID: userBudget.ID,
 		Status: "active",
 	}
-	if err := testDB.CreateVirtualKey(keyBudget); err != nil {
+	if _, err := testDB.CreateVirtualKey(keyBudget); err != nil {
 		t.Fatalf("failed to create key: %v", err)
 	}
 
