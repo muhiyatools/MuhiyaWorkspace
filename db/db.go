@@ -1123,6 +1123,19 @@ func (db *DB) GetRemainingExtraCredits(userID string) (float64, error) {
 	return remaining, err
 }
 
+// GetUserSpendingToday sums a user's cost over the current UTC calendar day
+// (003 T005, usage-api.md §2). It uses the same 2xx-only status filter as
+// GetUserSpendingInWindow/GetUserBudgetUsage so the "today" figure sums the
+// identical row set as the budget windows' current_spent.
+func (db *DB) GetUserSpendingToday(userID string) (float64, error) {
+	var total float64
+	err := db.conn.QueryRow(
+		"SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND status_code >= 200 AND status_code < 300 AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')",
+		userID,
+	).Scan(&total)
+	return total, err
+}
+
 func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error {
 	if costUSD <= 0 {
 		return nil

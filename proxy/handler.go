@@ -302,6 +302,21 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 003 (T006): self-service usage for the caller's own key. Authenticated by
+	// the virtual key (no admin credentials), exempt from RPM/TPM counting.
+	if strings.HasSuffix(r.URL.Path, "/usage") {
+		if r.Method != http.MethodGet {
+			h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error")
+			return
+		}
+		key, ok := h.authenticateVirtualKey(w, r)
+		if !ok {
+			return
+		}
+		h.handleUsage(w, key)
+		return
+	}
+
 	if strings.HasSuffix(r.URL.Path, "/tools/web_search") {
 		if r.Method != http.MethodPost {
 			h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error")
@@ -397,6 +412,55 @@ func (h *ProxyHandler) authenticateVirtualKey(w http.ResponseWriter, r *http.Req
 		return nil, false
 	}
 	return key, true
+}
+
+// handleUsage returns the caller's account usage (003 T006, usage-api.md §2):
+// plan budget windows (USD, with current spend + reset), extra credits, and
+// today's spend. Composed from existing db methods plus GetUserSpendingToday.
+func (h *ProxyHandler) handleUsage(w http.ResponseWriter, key *db.VirtualKey) {
+	user, err := h.db.GetUser(key.UserID)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
+	if user == nil {
+		h.writeError(w, http.StatusUnauthorized, "Account not found for this key.", "invalid_request_error")
+		return
+	}
+	today, err := h.db.GetUserSpendingToday(user.ID)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
+	planName := user.PlanID
+	if plan, planErr := h.db.GetPlan(user.PlanID); planErr == nil && plan != nil && plan.Name != "" {
+		planName = plan.Name
+	}
+	windows := make([]map[string]interface{}, 0, len(user.BudgetUsage))
+	for _, wnd := range user.BudgetUsage {
+		reset := ""
+		if wnd.ResetTime != nil {
+			reset = wnd.ResetTime.UTC().Format(time.RFC3339)
+		}
+		windows = append(windows, map[string]interface{}{
+			"name":              wnd.Name,
+			"duration_seconds":  wnd.DurationSeconds,
+			"budget_usd":        wnd.BudgetUSD,
+			"current_spent_usd": wnd.CurrentSpent,
+			"reset_time":        reset,
+		})
+	}
+	response := map[string]interface{}{
+		"user": map[string]interface{}{"id": user.ID, "name": user.Name},
+		"plan": map[string]interface{}{"name": planName, "windows": windows},
+		"credits": map[string]interface{}{
+			"extra_total":     user.ExtraCredits,
+			"extra_remaining": user.RemainingExtraCredits,
+		},
+		"spend": map[string]interface{}{"today_usd": today},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (h *ProxyHandler) handleCapabilities(w http.ResponseWriter, _ *http.Request, _ *db.VirtualKey) {
@@ -1880,8 +1944,16 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	w.Write(respBody)
 }
 
+// metaChunkClientApps is the allowlist of client apps that receive the
+// non-standard muhiya_log cost chunk (003 D1). MuhiyaCode is included so the
+// terminal agent can display exact per-request credits.
+var metaChunkClientApps = map[string]bool{
+	"MuhiyaChat": true,
+	"MuhiyaCode": true,
+}
+
 func sendMuhiyaMetaChunk(w http.ResponseWriter, log *db.RequestLog, modelName string) {
-	if log.ClientApp != "MuhiyaChat" {
+	if !metaChunkClientApps[log.ClientApp] {
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -1899,8 +1971,9 @@ func sendMuhiyaMetaChunk(w http.ResponseWriter, log *db.RequestLog, modelName st
 			"total_tokens":      log.InputTokens + log.OutputTokens,
 		},
 		"muhiya_log": map[string]interface{}{
-			"cost":   log.Cost,
-			"log_id": log.ID,
+			"cost":            log.Cost,
+			"log_id":          log.ID,
+			"usage_estimated": log.UsageEstimated,
 		},
 	})
 	if err == nil {

@@ -432,6 +432,9 @@ func registerProxyRoutes(mux *http.ServeMux, proxyWrapper http.Handler) {
 	mux.Handle("/capabilities", proxyWrapper)
 	mux.Handle("/v1/tools/web_search", proxyWrapper)
 	mux.Handle("/tools/web_search", proxyWrapper)
+	// 003 (T006): self-service account usage, key-authenticated.
+	mux.Handle("/v1/usage", proxyWrapper)
+	mux.Handle("/usage", proxyWrapper)
 }
 
 func loggerMiddleware(next http.Handler) http.Handler {
