@@ -13,11 +13,14 @@ import (
 // depth ONCE, in gateway terms: an `X-Muhiya-Effort` header or a standard
 // `reasoning_effort` body field, normalized to the canonical levels below.
 // The gateway then maps the level onto each provider's SUPPORTED thinking
-// ladder. Thinking is NEVER disabled: a level below a provider's floor rides
-// the floor (e.g. DeepSeek supports only high|max, so low/medium effort ->
-// "high" and high/max effort -> "max").
+// ladder. When a level is requested it is never dropped below a provider's floor:
+// a level under the floor rides the floor (e.g. DeepSeek supports only high|max, so
+// low/medium effort -> "high" and high/max effort -> "max"). DeepSeek is the one
+// provider normalized UNCONDITIONALLY (even when no level is requested) so a raw
+// client value can never leak; with no/off effort its thinking is emitted as
+// type:"disabled" rather than passed through.
 //
-//	DeepSeek  : thinking enabled + reasoning_effort high (low..medium) | max (high..max)
+//	DeepSeek  : thinking enabled + reasoning_effort high (low..medium) | max (high..max); type:disabled when no/off effort
 //	GLM       : thinking enabled (+ reasoning_effort low|medium|high on GLM-5+)
 //	MiniMax   : always-on; only reasoning_split is useful
 //	OpenAI    : reasoning_effort minimal|low|medium|high (reasoning models ONLY - others 400)

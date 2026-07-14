@@ -247,7 +247,9 @@ func main() {
 
 	identitySecret := strings.TrimSpace(os.Getenv("IDENTITY_SECRET"))
 	if identitySecret == "" {
-		log.Printf("[IDENTITY] IDENTITY_SECRET is not set; stable user identity injection is DISABLED (no 'user' field is added to upstream requests).")
+		log.Printf("[IDENTITY] IDENTITY_SECRET is not set; stable per-user identity injection is DISABLED (no 'user_id' is added to upstream requests, so all users share one provider cache namespace).")
+	} else {
+		log.Printf("[IDENTITY] stable per-user identity injection is ENABLED (a derived 'user_id' is added to every DeepSeek request).")
 	}
 
 	proxyMuxHandler = corsMiddleware(proxy.NewProxyHandler(database, limiter, identitySecret))
