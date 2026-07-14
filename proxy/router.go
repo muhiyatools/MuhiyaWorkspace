@@ -3,9 +3,9 @@ package proxy
 import (
 	"bytes"
 	"fmt"
+	"gateway/db"
 	"net/http"
 	"strings"
-	"gateway/db"
 )
 
 // AnalyzePromptComplexity evaluates the messages in an OpenAIRequest and returns 'simple', 'medium', or 'hard'
@@ -104,10 +104,10 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 		}
 		if needsVision {
 			nameLower := strings.ToLower(m.Name)
-			if !strings.Contains(nameLower, "gpt-4o") && 
-			   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
-			   !strings.Contains(nameLower, "vision") && 
-			   !strings.Contains(nameLower, "gemini") {
+			if !strings.Contains(nameLower, "gpt-4o") &&
+				!strings.Contains(nameLower, "claude-3-5-sonnet") &&
+				!strings.Contains(nameLower, "vision") &&
+				!strings.Contains(nameLower, "gemini") {
 				return false
 			}
 		}
@@ -130,10 +130,10 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 			if m.Status == "active" && m.RoutingTier == complexity && !m.Transcribe {
 				if needsVision {
 					nameLower := strings.ToLower(m.Name)
-					if !strings.Contains(nameLower, "gpt-4o") && 
-					   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
-					   !strings.Contains(nameLower, "vision") && 
-					   !strings.Contains(nameLower, "gemini") {
+					if !strings.Contains(nameLower, "gpt-4o") &&
+						!strings.Contains(nameLower, "claude-3-5-sonnet") &&
+						!strings.Contains(nameLower, "vision") &&
+						!strings.Contains(nameLower, "gemini") {
 						continue
 					}
 				}
@@ -159,10 +159,10 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 			if m.Status == "active" && !m.Transcribe {
 				if needsVision {
 					nameLower := strings.ToLower(m.Name)
-					if !strings.Contains(nameLower, "gpt-4o") && 
-					   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
-					   !strings.Contains(nameLower, "vision") && 
-					   !strings.Contains(nameLower, "gemini") {
+					if !strings.Contains(nameLower, "gpt-4o") &&
+						!strings.Contains(nameLower, "claude-3-5-sonnet") &&
+						!strings.Contains(nameLower, "vision") &&
+						!strings.Contains(nameLower, "gemini") {
 						continue
 					}
 				}
@@ -203,10 +203,10 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 		if m.Status == "active" && m.ID != excludeModelID && !m.Transcribe {
 			if needsVision {
 				nameLower := strings.ToLower(m.Name)
-				if !strings.Contains(nameLower, "gpt-4o") && 
-				   !strings.Contains(nameLower, "claude-3-5-sonnet") && 
-				   !strings.Contains(nameLower, "vision") && 
-				   !strings.Contains(nameLower, "gemini") {
+				if !strings.Contains(nameLower, "gpt-4o") &&
+					!strings.Contains(nameLower, "claude-3-5-sonnet") &&
+					!strings.Contains(nameLower, "vision") &&
+					!strings.Contains(nameLower, "gemini") {
 					continue
 				}
 			}
@@ -233,11 +233,11 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 // ====================================================================
 
 type BufferedResponseWriter struct {
-	actual      http.ResponseWriter
-	statusCode  int
-	headers     http.Header
-	buf         bytes.Buffer
-	flushed     bool
+	actual     http.ResponseWriter
+	statusCode int
+	headers    http.Header
+	buf        bytes.Buffer
+	flushed    bool
 }
 
 func NewBufferedResponseWriter(actual http.ResponseWriter) *BufferedResponseWriter {
