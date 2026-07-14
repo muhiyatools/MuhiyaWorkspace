@@ -10,3 +10,9 @@ gateway
 .env
 GATEWAY_AUDIT.md
 plan-simulator.html
+Dockerfile*
+.dockerignore
+*.log*
+.env*
+coverage/
+vendor/

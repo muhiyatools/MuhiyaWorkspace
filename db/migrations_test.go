@@ -32,6 +32,7 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"003_add_indexes.sql",
 		"004_add_thinking_level.sql",
 		"005_preserve_request_logs.sql",
+		"009_minimax_models.sql",
 	} {
 		found := false
 		for _, n := range names {
@@ -42,6 +43,28 @@ func TestMigrationsEmbedded(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("required migration %s missing from embed (have %v)", required, names)
+		}
+	}
+}
+
+func TestMiniMaxMigrationIsAdditiveAndComplete(t *testing.T) {
+	data, err := migrationFS.ReadFile("migrations/009_minimax_models.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(data))
+	for _, required := range []string{
+		"https://api.minimax.io/v1", "minimax-m3", "minimax-m2.7",
+		"minimax-m2.7-highspeed", "minimax-m2.5", "minimax-m2.1", "minimax-m2",
+		"1000000", "204800", "on conflict (id) do nothing",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("MiniMax migration missing %q", required)
+		}
+	}
+	for _, destructive := range []string{"drop table", "drop column", "delete from"} {
+		if strings.Contains(sql, destructive) {
+			t.Fatalf("MiniMax migration contains destructive statement %q", destructive)
 		}
 	}
 }

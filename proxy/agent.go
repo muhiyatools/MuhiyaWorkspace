@@ -117,6 +117,8 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 	msgID := "chatcmpl-" + uuid.New().String()
 	var totalInput, totalOutput, totalCacheRead int
+	var totalCacheMiss int64
+	cacheMissReported := false
 	var streamError string
 	hasSearched := false
 
@@ -129,7 +131,11 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, tools, thinkingLevel)
 		totalInput += turn.usage.PromptTokens
 		totalOutput += turn.usage.CompletionTokens
-		totalCacheRead += turn.usage.CacheReadTokens()
+		totalCacheRead += turn.usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
+		if miss := turn.usage.CacheMissTokensFor(provider.BaseURL, model.TargetModel); miss != nil {
+			totalCacheMiss += *miss
+			cacheMissReported = true
+		}
 		if err != nil {
 			streamError = err.Error()
 			writeSSEJSON(w, flusher, map[string]interface{}{
@@ -224,6 +230,9 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	reqLog.InputTokens = totalInput
 	reqLog.OutputTokens = totalOutput
 	reqLog.CacheReadTokens = totalCacheRead
+	if cacheMissReported {
+		reqLog.CacheMissTokens = &totalCacheMiss
+	}
 	reqLog.Cost = calculateCost(model, totalInput, totalOutput, totalCacheRead, 0)
 	reqLog.LatencyMS = int(time.Since(startTime).Milliseconds())
 	h.saveRequestLog(reqLog)

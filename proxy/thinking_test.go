@@ -184,6 +184,13 @@ func TestApplyThinkingOpenAI_MiniMaxAlwaysOn(t *testing.T) {
 	if body["reasoning_split"] != true {
 		t.Error("minimax should get reasoning_split")
 	}
+	body, applied = applyOpenAI(t, "https://api.minimax.io/v1", "MiniMax-M2.7", "", map[string]interface{}{"reasoning_split": false})
+	if applied != "always-on" || body["reasoning_split"] != true {
+		t.Fatalf("unset/raw MiniMax reasoning control was not normalized: applied=%q body=%v", applied, body)
+	}
+	if _, has := body["reasoning_effort"]; has {
+		t.Fatal("raw reasoning_effort leaked to MiniMax")
+	}
 }
 
 func TestApplyThinkingOpenAI_OpenAIStrict(t *testing.T) {

@@ -1038,14 +1038,8 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			if finalUsage != nil {
 				inputTokens = finalUsage.PromptTokens
 				completionTokens = finalUsage.CompletionTokens
-				cacheRead = finalUsage.CacheReadTokens()
-				// Persist the provider-reported cache miss only when the upstream
-				// actually surfaces it (DeepSeek); leave it NULL otherwise so the
-				// dashboard falls back to the input_tokens approximation.
-				if finalUsage.PromptCacheMissTokens > 0 {
-					miss := int64(finalUsage.PromptCacheMissTokens)
-					log.CacheMissTokens = &miss
-				}
+				cacheRead = finalUsage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
+				log.CacheMissTokens = finalUsage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 			}
 			log.UsageEstimated = finalUsage == nil
 			log.StatusCode = http.StatusOK
@@ -1108,11 +1102,8 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		if err := json.Unmarshal(respBody, &oaiResp); err == nil && oaiResp.Usage.TotalTokens > 0 {
 			log.InputTokens = oaiResp.Usage.PromptTokens
 			completionTokens = oaiResp.Usage.CompletionTokens
-			cacheRead = oaiResp.Usage.CacheReadTokens()
-			if oaiResp.Usage.PromptCacheMissTokens > 0 {
-				miss := int64(oaiResp.Usage.PromptCacheMissTokens)
-				log.CacheMissTokens = &miss
-			}
+			cacheRead = oaiResp.Usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
+			log.CacheMissTokens = oaiResp.Usage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 			log.UsageEstimated = false
 		} else {
 			if len(oaiResp.Choices) > 0 {
@@ -1389,12 +1380,9 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		log.StatusCode = http.StatusOK
 		log.InputTokens = oaiResp.Usage.PromptTokens
 		log.OutputTokens = oaiResp.Usage.CompletionTokens
-		cacheRead := oaiResp.Usage.CacheReadTokens()
+		cacheRead := oaiResp.Usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
 		log.CacheReadTokens = cacheRead
-		if oaiResp.Usage.PromptCacheMissTokens > 0 {
-			miss := int64(oaiResp.Usage.PromptCacheMissTokens)
-			log.CacheMissTokens = &miss
-		}
+		log.CacheMissTokens = oaiResp.Usage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, 0)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
@@ -1820,6 +1808,14 @@ func estimateTokens(text string) int {
 
 func calculateCost(model *db.Model, input, output, cacheRead, cacheWrite int) float64 {
 	// Cost calculation supporting prompt caching tokens
+	inputRate := model.InputCostPerMillion
+	outputRate := model.OutputCostPerMillion
+	cacheReadRate := model.CacheReadCostPerMillion
+	if isMiniMaxM3(model) && input > 512000 {
+		inputRate = 0.60
+		outputRate = 2.40
+		cacheReadRate = 0.12
+	}
 	standardInput := input - cacheRead - cacheWrite
 	if standardInput < 0 {
 		standardInput = 0
@@ -1828,11 +1824,24 @@ func calculateCost(model *db.Model, input, output, cacheRead, cacheWrite int) fl
 	if writeCostPerMillion == 0 && cacheWrite > 0 {
 		writeCostPerMillion = model.InputCostPerMillion
 	}
-	inputCost := (float64(standardInput) / 1000000.0) * model.InputCostPerMillion
-	outputCost := (float64(output) / 1000000.0) * model.OutputCostPerMillion
-	cacheReadCost := (float64(cacheRead) / 1000000.0) * model.CacheReadCostPerMillion
+	inputCost := (float64(standardInput) / 1000000.0) * inputRate
+	outputCost := (float64(output) / 1000000.0) * outputRate
+	cacheReadCost := (float64(cacheRead) / 1000000.0) * cacheReadRate
 	cacheWriteCost := (float64(cacheWrite) / 1000000.0) * writeCostPerMillion
 	return inputCost + outputCost + cacheReadCost + cacheWriteCost
+}
+
+func isMiniMaxM3(model *db.Model) bool {
+	if model == nil {
+		return false
+	}
+	for _, value := range []string{model.Name, model.TargetModel} {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "minimax-m3" || normalized == "m3" {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.Request, bodyBytes []byte, key *db.VirtualKey) {

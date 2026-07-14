@@ -247,6 +247,16 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 		bodyMap["reasoning_effort"] = "high"
 		return "high"
 	}
+	if family == famMiniMax {
+		// MiniMax reasoning is always on. Force its documented separated
+		// reasoning channel on every request and discard any caller-supplied
+		// control value so an unsupported/raw dialect can never leak upstream.
+		delete(bodyMap, "reasoning_effort")
+		delete(bodyMap, "thinking")
+		delete(bodyMap, "reasoning_split")
+		bodyMap["reasoning_split"] = true
+		return "always-on"
+	}
 
 	if level == "" {
 		return ""
@@ -271,12 +281,6 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 			return applied
 		}
 		return "enabled"
-
-	case famMiniMax:
-		// M2+ thinking is always on and cannot be disabled. The only useful
-		// request is a separated reasoning channel instead of <think> tags.
-		bodyMap["reasoning_split"] = true
-		return "always-on"
 
 	case famOpenAI:
 		// Strict provider: non-reasoning models 400 on reasoning_effort.

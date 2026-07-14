@@ -15,3 +15,11 @@ gateway
 # IDE
 .vscode/
 .idea/
+*.test
+*.out
+*.log
+vendor/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp

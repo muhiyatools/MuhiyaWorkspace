@@ -37,7 +37,7 @@ type OpenAIFunctionCall struct {
 }
 
 type OpenAITool struct {
-	Type     string           `json:"type"` // "function"
+	Type     string            `json:"type"` // "function"
 	Function OpenAIFunctionDef `json:"function"`
 }
 
@@ -104,6 +104,43 @@ func (u *OpenAIUsage) CacheReadTokens() int {
 	return read
 }
 
+const minimaxCacheThresholdTokens = 512
+
+// CacheReadTokensFor applies provider-specific reporting guarantees without
+// changing the legacy dialect parser. MiniMax only caches prompts at or above
+// 512 tokens, so a contradictory sub-threshold cached count is ignored.
+func (u *OpenAIUsage) CacheReadTokensFor(baseURL, targetModel string) int {
+	read := u.CacheReadTokens()
+	if u == nil || classifyUpstream(baseURL, targetModel) != famMiniMax {
+		return read
+	}
+	if u.PromptTokens < minimaxCacheThresholdTokens {
+		return 0
+	}
+	if read > u.PromptTokens {
+		return u.PromptTokens
+	}
+	return read
+}
+
+// CacheMissTokensFor returns the provider-reported DeepSeek miss count or the
+// MiniMax-derived miss (prompt minus cached). A nil result means unavailable,
+// including every MiniMax prompt below its documented cache threshold.
+func (u *OpenAIUsage) CacheMissTokensFor(baseURL, targetModel string) *int64 {
+	if u == nil {
+		return nil
+	}
+	if u.PromptCacheMissTokens > 0 {
+		miss := int64(u.PromptCacheMissTokens)
+		return &miss
+	}
+	if classifyUpstream(baseURL, targetModel) != famMiniMax || u.PromptTokens < minimaxCacheThresholdTokens || u.PromptTokensDetails == nil {
+		return nil
+	}
+	miss := int64(u.PromptTokens - u.CacheReadTokensFor(baseURL, targetModel))
+	return &miss
+}
+
 type OpenAIChoice struct {
 	Index        int           `json:"index"`
 	Message      OpenAIMessage `json:"message"`
@@ -120,10 +157,10 @@ type OpenAIResponse struct {
 }
 
 type OpenAIDelta struct {
-	Role             string            `json:"role,omitempty"`
-	Content          string            `json:"content,omitempty"`
-	ReasoningContent string            `json:"reasoning_content,omitempty"`
-	ToolCalls        []OpenAIToolCall  `json:"tool_calls,omitempty"`
+	Role             string           `json:"role,omitempty"`
+	Content          string           `json:"content,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIChunkChoice struct {
@@ -152,17 +189,17 @@ type AnthropicSource struct {
 }
 
 type AnthropicContent struct {
-	Type       string              `json:"type"` // "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking"
-	Text       string              `json:"text,omitempty"`
-	Thinking   string              `json:"thinking,omitempty"` // For Claude 3.7
-	Signature  string              `json:"signature,omitempty"`
-	ID         string              `json:"id,omitempty"`   // tool_use ID
-	Name       string              `json:"name,omitempty"` // tool_use Name
-	Input      interface{}         `json:"input,omitempty"` // tool_use Input
-	ToolUseID  string              `json:"tool_use_id,omitempty"` // tool_result ID
-	Content    interface{}         `json:"content,omitempty"` // tool_result Content (string or array)
-	IsError    bool                `json:"is_error,omitempty"` // tool_result IsError
-	Source     *AnthropicSource    `json:"source,omitempty"`
+	Type      string           `json:"type"` // "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking"
+	Text      string           `json:"text,omitempty"`
+	Thinking  string           `json:"thinking,omitempty"` // For Claude 3.7
+	Signature string           `json:"signature,omitempty"`
+	ID        string           `json:"id,omitempty"`          // tool_use ID
+	Name      string           `json:"name,omitempty"`        // tool_use Name
+	Input     interface{}      `json:"input,omitempty"`       // tool_use Input
+	ToolUseID string           `json:"tool_use_id,omitempty"` // tool_result ID
+	Content   interface{}      `json:"content,omitempty"`     // tool_result Content (string or array)
+	IsError   bool             `json:"is_error,omitempty"`    // tool_result IsError
+	Source    *AnthropicSource `json:"source,omitempty"`
 }
 
 type AnthropicMessage struct {
@@ -412,9 +449,9 @@ func TranslateOpenAIToAnthropic(orig *OpenAIRequest, targetModel string) (*Anthr
 				var input map[string]interface{}
 				_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
 				content = append(content, AnthropicContent{
-					Type: "tool_use",
-					ID:   tc.ID,
-					Name: tc.Function.Name,
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
 					Input: input,
 				})
 			}
@@ -605,9 +642,9 @@ func TranslateOpenAIToAnthropicResponse(oaiResp *OpenAIResponse, virtualModel st
 			var input map[string]interface{}
 			_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
 			content = append(content, AnthropicContent{
-				Type: "tool_use",
-				ID:   tc.ID,
-				Name: tc.Function.Name,
+				Type:  "tool_use",
+				ID:    tc.ID,
+				Name:  tc.Function.Name,
 				Input: input,
 			})
 		}
@@ -623,11 +660,11 @@ func TranslateOpenAIToAnthropicResponse(oaiResp *OpenAIResponse, virtualModel st
 	cacheRead := oaiResp.Usage.CacheReadTokens()
 
 	return &AnthropicResponse{
-		ID:      oaiResp.ID,
-		Type:    "message",
-		Role:    "assistant",
-		Content: content,
-		Model:   virtualModel,
+		ID:         oaiResp.ID,
+		Type:       "message",
+		Role:       "assistant",
+		Content:    content,
+		Model:      virtualModel,
 		StopReason: finishReason,
 		Usage: AnthropicUsage{
 			InputTokens:          oaiResp.Usage.PromptTokens,
@@ -740,11 +777,11 @@ func TranslateOpenAIChunkToAnthropic(line string, msgID string, virtualModel str
 		event := map[string]interface{}{
 			"type": "message_start",
 			"message": map[string]interface{}{
-				"id":   msgID,
-				"type": "message",
-				"role": "assistant",
+				"id":      msgID,
+				"type":    "message",
+				"role":    "assistant",
 				"content": []interface{}{},
-				"model": virtualModel,
+				"model":   virtualModel,
 				"usage": map[string]interface{}{
 					"input_tokens": usageTracker.InputTokens,
 				},
@@ -757,10 +794,10 @@ func TranslateOpenAIChunkToAnthropic(line string, msgID string, virtualModel str
 	// Case 2: Content Delta (Reasoning / Thinking)
 	if delta.ReasoningContent != "" {
 		event := map[string]interface{}{
-			"type": "content_block_delta",
+			"type":  "content_block_delta",
 			"index": 0,
 			"delta": map[string]interface{}{
-				"type": "thinking_delta",
+				"type":     "thinking_delta",
 				"thinking": delta.ReasoningContent,
 			},
 		}
@@ -771,7 +808,7 @@ func TranslateOpenAIChunkToAnthropic(line string, msgID string, virtualModel str
 	// Case 3: Content Delta (Text Content)
 	if delta.Content != "" {
 		event := map[string]interface{}{
-			"type": "content_block_delta",
+			"type":  "content_block_delta",
 			"index": 0,
 			"delta": map[string]interface{}{
 				"type": "text_delta",
@@ -788,12 +825,12 @@ func TranslateOpenAIChunkToAnthropic(line string, msgID string, virtualModel str
 		// If it's the start of a tool call
 		if tc.Function.Name != "" {
 			event := map[string]interface{}{
-				"type": "content_block_start",
+				"type":  "content_block_start",
 				"index": 1,
 				"content_block": map[string]interface{}{
-					"type": "tool_use",
-					"id":   tc.ID,
-					"name": tc.Function.Name,
+					"type":  "tool_use",
+					"id":    tc.ID,
+					"name":  tc.Function.Name,
 					"input": map[string]interface{}{},
 				},
 			}
@@ -803,10 +840,10 @@ func TranslateOpenAIChunkToAnthropic(line string, msgID string, virtualModel str
 		// If it has inputs arguments (which are accumulated as string chunks)
 		if tc.Function.Arguments != "" {
 			event := map[string]interface{}{
-				"type": "content_block_delta",
+				"type":  "content_block_delta",
 				"index": 1,
 				"delta": map[string]interface{}{
-					"type": "input_json_delta",
+					"type":         "input_json_delta",
 					"partial_json": tc.Function.Arguments,
 				},
 			}
@@ -950,7 +987,7 @@ func TranslateAnthropicChunkToOpenAI(line string, msgID string, virtualModel str
 	case "message_delta":
 		deltaMap, _ := raw["delta"].(map[string]interface{})
 		stopReason, _ := deltaMap["stop_reason"].(string)
-		
+
 		var finishReason string
 		if stopReason == "end_turn" {
 			finishReason = "stop"
@@ -1000,4 +1037,3 @@ func TranslateAnthropicChunkToOpenAI(line string, msgID string, virtualModel str
 
 	return nil, false, nil
 }
-

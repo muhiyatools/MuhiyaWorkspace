@@ -63,6 +63,26 @@ func TestStreamChunkCarriesDeepSeekCacheFields(t *testing.T) {
 	}
 }
 
+func TestMiniMaxCacheAccounting(t *testing.T) {
+	const baseURL = "https://api.minimax.io/v1"
+	var warm OpenAIUsage
+	if err := json.Unmarshal([]byte(`{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":700}}`), &warm); err != nil {
+		t.Fatal(err)
+	}
+	if got := warm.CacheReadTokensFor(baseURL, "MiniMax-M3"); got != 700 {
+		t.Fatalf("cached tokens = %d, want 700", got)
+	}
+	miss := warm.CacheMissTokensFor(baseURL, "MiniMax-M3")
+	if miss == nil || *miss != 300 {
+		t.Fatalf("derived miss = %v, want 300", miss)
+	}
+
+	below := OpenAIUsage{PromptTokens: 511, PromptTokensDetails: &PromptTokensDetail{CachedTokens: 400}}
+	if got := below.CacheReadTokensFor(baseURL, "MiniMax-M3"); got != 0 || below.CacheMissTokensFor(baseURL, "MiniMax-M3") != nil {
+		t.Fatalf("sub-threshold cache accounting must be zero/unavailable: read=%d miss=%v", got, below.CacheMissTokensFor(baseURL, "MiniMax-M3"))
+	}
+}
+
 func TestInjectAnthropicCacheControlStringShapes(t *testing.T) {
 	body := map[string]interface{}{
 		"system": "You are a coding agent.",
