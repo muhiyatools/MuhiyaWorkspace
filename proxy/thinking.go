@@ -205,33 +205,37 @@ func classifyUpstream(baseURL, targetModel string) upstreamFamily {
 // provider. When a level is requested it strips the gateway-level fields and
 // injects the provider's native parameter. When NO level is requested the
 // body passes through untouched (pre-existing behavior for clients that speak
-// a provider's dialect directly). The return value is the setting that was
-// actually applied ("" when nothing was requested; "unsupported" when the
-// model has no controllable thinking).
+// a provider's dialect directly) - EXCEPT DeepSeek, whose raw client
+// reasoning_effort/thinking are ALWAYS stripped and re-emitted in DeepSeek's
+// documented form, so an undocumented value (e.g. reasoning_effort:"low") can
+// never reach it. The return value is the setting that was actually applied
+// ("" when nothing was requested; "unsupported" when the model has no
+// controllable thinking; "disabled" when DeepSeek thinking is turned off).
 func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, level string) string {
-	if level == "" {
-		return ""
-	}
-	// Gateway-level control fields never reach a provider verbatim.
-	delete(bodyMap, "reasoning_effort")
-	delete(bodyMap, "thinking")
-
 	family := classifyUpstream(baseURL, targetModel)
 	model := strings.ToLower(targetModel)
 	rank := thinkingRank(level)
 
-	switch family {
-	case famDeepseek:
+	// DeepSeek is normalized UNCONDITIONALLY - even when no effort was resolved
+	// the client's raw reasoning_effort/thinking must never reach DeepSeek
+	// verbatim. Always strip the gateway-level fields and re-emit DeepSeek's
+	// documented form.
+	if family == famDeepseek {
+		delete(bodyMap, "reasoning_effort")
+		delete(bodyMap, "thinking")
 		if !isDeepseekReasoner(model) {
 			// deepseek-chat (and any other non-reasoning DeepSeek model)
-			// rejects or ignores the thinking parameter. Injecting it
-			// anyway risked a 400 and, worse, made the wire body shape
-			// depend on the requested effort level even for a model that
-			// can't act on it - pure request-shape variance with no benefit.
+			// rejects or ignores the thinking parameter - inject nothing. The
+			// raw client fields are still gone, so nothing leaks through.
 			return "unsupported"
 		}
-		// DeepSeek reasoning supports exactly high|max. Thinking is never
-		// disabled: low/medium effort ride "high", high/max effort ride "max".
+		// DeepSeek reasoning supports exactly high|max: low/medium effort ride
+		// "high", high/max ride "max". Off/none - or no effort at all -
+		// disables thinking rather than leaking a raw client value.
+		if rank < 1 {
+			bodyMap["thinking"] = map[string]interface{}{"type": "disabled"}
+			return "disabled"
+		}
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
 		if rank >= 3 {
 			bodyMap["reasoning_effort"] = "max"
@@ -239,7 +243,16 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 		}
 		bodyMap["reasoning_effort"] = "high"
 		return "high"
+	}
 
+	if level == "" {
+		return ""
+	}
+	// Gateway-level control fields never reach a provider verbatim.
+	delete(bodyMap, "reasoning_effort")
+	delete(bodyMap, "thinking")
+
+	switch family {
 	case famGLM:
 		// GLM-4.5+ honors the thinking toggle (always enabled); GLM-5+ adds
 		// effort levels low|medium|high - map onto that ladder.

@@ -93,9 +93,9 @@ type Model struct {
 	OutputCostPerMillion     float64   `json:"output_cost_per_million"`
 	CacheReadCostPerMillion  float64   `json:"cache_read_cost_per_million"`
 	CacheWriteCostPerMillion float64   `json:"cache_write_cost_per_million"`
-	Status                   string    `json:"status"` // active, inactive
+	Status                   string    `json:"status"`       // active, inactive
 	RoutingTier              string    `json:"routing_tier"` // none, simple, medium, hard
-	ModelType                string    `json:"model_type"` // llm, transcript
+	ModelType                string    `json:"model_type"`   // llm, transcript
 	PricePerMinute           float64   `json:"price_per_minute"`
 	Transcribe               bool      `json:"transcribe"`
 	ContextWindow            int       `json:"context_window"`
@@ -107,25 +107,30 @@ type Model struct {
 }
 
 type RequestLog struct {
-	ID               string    `json:"id"`
-	VirtualKeyID     string    `json:"virtual_key_id"`
-	UserID           string    `json:"user_id"`
-	ModelID          string    `json:"model_id"`
-	ProviderID       string    `json:"provider_id"`
-	RequestPath      string    `json:"request_path"`
-	StatusCode       int       `json:"status_code"`
-	InputTokens      int       `json:"input_tokens"`
-	OutputTokens     int       `json:"output_tokens"`
-	CacheReadTokens  int       `json:"cache_read_tokens"`
-	CacheWriteTokens int       `json:"cache_write_tokens"`
-	Cost             float64   `json:"cost"`
-	LatencyMS        int       `json:"latency_ms"`
-	ErrorMessage     string    `json:"error_message"`
-	ClientApp        string    `json:"client_app"`
-	RequestedModel   string    `json:"requested_model"`
-	Complexity       string    `json:"complexity"`
-	ThinkingLevel    string    `json:"thinking_level"`
-	FailoverAttempts int       `json:"failover_attempts"`
+	ID               string `json:"id"`
+	VirtualKeyID     string `json:"virtual_key_id"`
+	UserID           string `json:"user_id"`
+	ModelID          string `json:"model_id"`
+	ProviderID       string `json:"provider_id"`
+	RequestPath      string `json:"request_path"`
+	StatusCode       int    `json:"status_code"`
+	InputTokens      int    `json:"input_tokens"`
+	OutputTokens     int    `json:"output_tokens"`
+	CacheReadTokens  int    `json:"cache_read_tokens"`
+	CacheWriteTokens int    `json:"cache_write_tokens"`
+	// CacheMissTokens is the provider-reported non-cached (cache-miss) prompt
+	// token count. It is nil for rows logged before feature 007 or by upstreams
+	// that do not report it, in which case the dashboard hit-rate falls back to
+	// the input_tokens-based approximation.
+	CacheMissTokens  *int64  `json:"cache_miss_tokens,omitempty"`
+	Cost             float64 `json:"cost"`
+	LatencyMS        int     `json:"latency_ms"`
+	ErrorMessage     string  `json:"error_message"`
+	ClientApp        string  `json:"client_app"`
+	RequestedModel   string  `json:"requested_model"`
+	Complexity       string  `json:"complexity"`
+	ThinkingLevel    string  `json:"thinking_level"`
+	FailoverAttempts int     `json:"failover_attempts"`
 	// UsageEstimated is true when the upstream disconnected before sending
 	// its usage payload and InputTokens/OutputTokens/Cost were computed from
 	// the local word-count heuristic instead of provider-reported numbers.
@@ -903,7 +908,7 @@ func (db *DB) GetModel(id string) (*Model, error) {
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '') 
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, 
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy)
 	if err == sql.ErrNoRows {
@@ -931,7 +936,7 @@ func (db *DB) ListModels() ([]Model, error) {
 	for rows.Next() {
 		var m Model
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType, 
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy)
 		if err != nil {
@@ -956,7 +961,7 @@ func (db *DB) CreateModel(m Model) error {
 		display_name, description, owned_by
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, 
+		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
 		m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
 		m.DisplayName, m.Description, m.OwnedBy)
 	return err
@@ -975,8 +980,8 @@ func (db *DB) UpdateModel(m Model) error {
 		model_type = $10, price_per_minute = $11, transcribe = $12, context_window = $13, max_output_tokens = $14,
 		display_name = $15, description = $16, owned_by = $17 WHERE id = $18`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
-		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType, 
-		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description, 
+		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType,
+		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
 		m.OwnedBy, m.ID)
 	return err
 }
@@ -1033,11 +1038,11 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 
 	_, err := db.conn.Exec(`INSERT INTO request_logs (
 		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
-		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, latency_ms, error_message, created_at, client_app,
+		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_miss_tokens, cost, latency_ms, error_message, created_at, client_app,
 		requested_model, complexity, failover_attempts, thinking_level, usage_estimated
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
 		log.ID, log.VirtualKeyID, log.UserID, modelID, providerID, log.RequestPath, log.StatusCode,
-		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp,
+		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.CacheMissTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp,
 		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel, log.UsageEstimated)
 
 	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
@@ -1309,7 +1314,7 @@ func (db *DB) GetDashboardStats() (*DashboardStats, error) {
 			COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 100.0),
 			COALESCE(SUM(cache_read_tokens), 0),
 			COALESCE(SUM(cache_write_tokens), 0),
-			COALESCE(SUM(cache_read_tokens) * 100.0 / NULLIF(SUM(input_tokens), 0), 0.0)
+			COALESCE(SUM(cache_read_tokens) * 100.0 / NULLIF(SUM(CASE WHEN cache_miss_tokens IS NOT NULL THEN cache_read_tokens + cache_miss_tokens ELSE input_tokens END), 0), 0.0)
 		FROM request_logs`).Scan(&stats.TotalRequests, &stats.TotalCost, &stats.TotalTokens, &stats.AvgLatency, &stats.SuccessRate, &stats.CacheReadTokens, &stats.CacheWriteTokens, &stats.CacheHitRate)
 	if err != nil {
 		return nil, err

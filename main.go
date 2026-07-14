@@ -245,7 +245,12 @@ func main() {
 	})
 	adminMuxHandler = basicAuth(adminUser, adminPass, adminMux)
 
-	proxyMuxHandler = corsMiddleware(proxy.NewProxyHandler(database, limiter))
+	identitySecret := strings.TrimSpace(os.Getenv("IDENTITY_SECRET"))
+	if identitySecret == "" {
+		log.Printf("[IDENTITY] IDENTITY_SECRET is not set; stable user identity injection is DISABLED (no 'user' field is added to upstream requests).")
+	}
+
+	proxyMuxHandler = corsMiddleware(proxy.NewProxyHandler(database, limiter, identitySecret))
 
 	// Publish readiness only after all sub-handlers are assigned. The atomic
 	// Store here happens-before the atomic Load in each request wrapper, so the

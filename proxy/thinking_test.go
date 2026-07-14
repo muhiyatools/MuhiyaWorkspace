@@ -274,9 +274,10 @@ func TestApplyThinkingOpenAI_UnknownStripsEverything(t *testing.T) {
 }
 
 func TestApplyThinkingOpenAI_UnsetLeavesBodyUntouched(t *testing.T) {
-	// No level requested: a client speaking the provider's dialect directly
-	// keeps full control (pre-existing pass-through behavior).
-	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-v4-pro", "", nil)
+	// No level requested: a client speaking the provider's own dialect keeps
+	// full control (pre-existing pass-through behavior) for every provider
+	// EXCEPT DeepSeek, which is normalized unconditionally (see below).
+	body, applied := applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-4.6", "", nil)
 	if applied != "" {
 		t.Fatalf("applied = %q", applied)
 	}
@@ -285,6 +286,21 @@ func TestApplyThinkingOpenAI_UnsetLeavesBodyUntouched(t *testing.T) {
 	}
 	if body["thinking"].(map[string]interface{})["type"] != "enabled" {
 		t.Error("client thinking must pass through when no level is requested")
+	}
+
+	// DeepSeek is the documented exception: even with no level requested, the
+	// raw client reasoning_effort/thinking are ALWAYS stripped and re-emitted in
+	// DeepSeek's own form so an undocumented value can never reach it. A
+	// non-reasoning target has no thinking mode, so nothing is injected.
+	dsBody, dsApplied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-chat", "", nil)
+	if dsApplied != "unsupported" {
+		t.Fatalf("deepseek unset applied = %q, want unsupported", dsApplied)
+	}
+	if _, has := dsBody["reasoning_effort"]; has {
+		t.Error("raw client reasoning_effort must never survive to DeepSeek, even when no level is requested")
+	}
+	if _, has := dsBody["thinking"]; has {
+		t.Error("raw client thinking must never survive to DeepSeek, even when no level is requested")
 	}
 }
 

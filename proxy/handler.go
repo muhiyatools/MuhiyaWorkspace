@@ -29,9 +29,14 @@ var httpClient = &http.Client{
 		// 15-minute client timeout with no way to distinguish it from a
 		// legitimately slow reasoning model. These bound only the
 		// connection-establishment phases, not in-progress streaming.
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 90 * time.Second,
+		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+		// A DeepSeek/reasoning upstream can withhold response headers for up to
+		// its documented 10-minute pre-inference window (queue + prompt-cache
+		// build) before the first byte. 630s (10m + margin) keeps that
+		// legitimate wait from being killed as a stall; in-progress streaming
+		// remains governed separately by streamIdleTimeout.
+		ResponseHeaderTimeout: 630 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	},
 }
@@ -77,14 +82,18 @@ type ProxyHandler struct {
 	limiter *RateLimiter
 	sticky  *modelSticky
 	outbox  *logOutbox
+	// identitySecret is the HMAC key used to derive a stable, opaque upstream
+	// "user" identifier (see DeriveUserID). Empty disables identity injection.
+	identitySecret string
 }
 
-func NewProxyHandler(database *db.DB, limiter *RateLimiter) *ProxyHandler {
+func NewProxyHandler(database *db.DB, limiter *RateLimiter, identitySecret string) *ProxyHandler {
 	return &ProxyHandler{
-		db:      database,
-		limiter: limiter,
-		sticky:  newModelSticky(),
-		outbox:  newLogOutbox(database),
+		db:             database,
+		limiter:        limiter,
+		sticky:         newModelSticky(),
+		outbox:         newLogOutbox(database),
+		identitySecret: identitySecret,
 	}
 }
 
@@ -624,6 +633,9 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+		// The RPM/TPM windows are one minute wide; advise clients to back off
+		// for that long rather than hammering into a still-full window.
+		w.Header().Set("Retry-After", "60")
 		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
 		return
 	}
@@ -831,6 +843,9 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+		// The RPM/TPM windows are one minute wide; advise clients to back off
+		// for that long rather than hammering into a still-full window.
+		w.Header().Set("Retry-After", "60")
 		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
 		return
 	}
@@ -928,6 +943,23 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 // Proxies Implementation
 // ------------------------------------------
 
+// sanitizeUpstreamIdentity conditions an OpenAI-dialect body for a DeepSeek
+// upstream (feature 007 upstream-request §2/§3): it drops sampling knobs
+// DeepSeek rejects (frequency_penalty, presence_penalty) and any caller-supplied
+// identity fields (user, user_id), then, when identity injection is configured,
+// stamps a stable opaque per-caller user_id derived server-side. Dropping the
+// inbound identity fields first guarantees the caller can never forge or leak
+// one; the derived value is added only if both the secret and a userID exist.
+func sanitizeUpstreamIdentity(bodyMap map[string]interface{}, identitySecret, userID string) {
+	delete(bodyMap, "frequency_penalty")
+	delete(bodyMap, "presence_penalty")
+	delete(bodyMap, "user")
+	delete(bodyMap, "user_id")
+	if derived := DeriveUserID(identitySecret, userID); derived != "" {
+		bodyMap["user_id"] = derived
+	}
+}
+
 func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Request, origBody []byte, model *db.Model, provider *db.Provider, log db.RequestLog, startTime time.Time) {
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(origBody, &bodyMap)
@@ -945,6 +977,8 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			"include_usage": true,
 		}
 	}
+
+	sanitizeUpstreamIdentity(bodyMap, h.identitySecret, log.UserID)
 
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
@@ -969,7 +1003,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		h.logFailedUpstream(w, resp.StatusCode, respBody, &log, startTime)
+		h.logFailedUpstream(w, resp.StatusCode, respBody, resp.Header, &log, startTime)
 		return
 	}
 
@@ -1005,6 +1039,13 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 				inputTokens = finalUsage.PromptTokens
 				completionTokens = finalUsage.CompletionTokens
 				cacheRead = finalUsage.CacheReadTokens()
+				// Persist the provider-reported cache miss only when the upstream
+				// actually surfaces it (DeepSeek); leave it NULL otherwise so the
+				// dashboard falls back to the input_tokens approximation.
+				if finalUsage.PromptCacheMissTokens > 0 {
+					miss := int64(finalUsage.PromptCacheMissTokens)
+					log.CacheMissTokens = &miss
+				}
 			}
 			log.UsageEstimated = finalUsage == nil
 			log.StatusCode = http.StatusOK
@@ -1068,6 +1109,10 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.InputTokens = oaiResp.Usage.PromptTokens
 			completionTokens = oaiResp.Usage.CompletionTokens
 			cacheRead = oaiResp.Usage.CacheReadTokens()
+			if oaiResp.Usage.PromptCacheMissTokens > 0 {
+				miss := int64(oaiResp.Usage.PromptCacheMissTokens)
+				log.CacheMissTokens = &miss
+			}
 			log.UsageEstimated = false
 		} else {
 			if len(oaiResp.Choices) > 0 {
@@ -1128,7 +1173,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		h.logFailedUpstream(w, resp.StatusCode, respBody, &log, startTime)
+		h.logFailedUpstream(w, resp.StatusCode, respBody, resp.Header, &log, startTime)
 		return
 	}
 
@@ -1238,6 +1283,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 	_ = json.Unmarshal(translated, &bodyMap)
 	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
+	sanitizeUpstreamIdentity(bodyMap, h.identitySecret, log.UserID)
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
 	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/completions") {
@@ -1261,7 +1307,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		h.logFailedUpstream(w, resp.StatusCode, respBody, &log, startTime)
+		h.logFailedUpstream(w, resp.StatusCode, respBody, resp.Header, &log, startTime)
 		return
 	}
 
@@ -1345,6 +1391,10 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		log.OutputTokens = oaiResp.Usage.CompletionTokens
 		cacheRead := oaiResp.Usage.CacheReadTokens()
 		log.CacheReadTokens = cacheRead
+		if oaiResp.Usage.PromptCacheMissTokens > 0 {
+			miss := int64(oaiResp.Usage.PromptCacheMissTokens)
+			log.CacheMissTokens = &miss
+		}
 		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, 0)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
@@ -1390,7 +1440,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		h.logFailedUpstream(w, resp.StatusCode, respBody, &log, startTime)
+		h.logFailedUpstream(w, resp.StatusCode, respBody, resp.Header, &log, startTime)
 		return
 	}
 
@@ -1705,13 +1755,18 @@ func (h *ProxyHandler) logAndWriteError(w http.ResponseWriter, code int, msg str
 	h.writeError(w, code, msg, errType)
 }
 
-func (h *ProxyHandler) logFailedUpstream(w http.ResponseWriter, statusCode int, respBytes []byte, log *db.RequestLog, startTime time.Time) {
+func (h *ProxyHandler) logFailedUpstream(w http.ResponseWriter, statusCode int, respBytes []byte, respHeader http.Header, log *db.RequestLog, startTime time.Time) {
 	log.StatusCode = statusCode
 	log.ErrorMessage = string(respBytes)
 	log.LatencyMS = int(time.Since(startTime).Milliseconds())
 	h.saveRequestLog(*log)
 
 	w.Header().Set("Content-Type", "application/json")
+	// Relay the upstream's Retry-After (rate-limit / overloaded backpressure) so
+	// clients honor the provider's requested cooldown instead of retrying blind.
+	if ra := respHeader.Get("Retry-After"); ra != "" {
+		w.Header().Set("Retry-After", ra)
+	}
 	w.WriteHeader(statusCode)
 
 	r := h.getRequest(w)

@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,20 @@ func (s *modelSticky) set(key, modelID string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Observe genuine mid-session model swaps (feature 007 R10 / FR-012): a
+	// session key that still resolves to a *different* model is about to be
+	// repinned, which abandons DeepSeek's per-model prefix cache for that
+	// conversation. A first-time pin (no prior entry) or a refresh to the same
+	// model is not a swap and stays silent. The pinning posture is unchanged -
+	// this only records the event. The key is already a sha256 hash, so a short
+	// prefix is safe to log for correlation without exposing the session secret.
+	if prev, ok := s.entries[key]; ok && !time.Now().After(prev.expires) && prev.modelID != modelID {
+		hashPrefix := key
+		if len(hashPrefix) > 12 {
+			hashPrefix = hashPrefix[:12]
+		}
+		log.Printf("[ROUTER-STICKY-SWAP] session %s… repinned from model %s to %s (per-model prefix cache abandoned)", hashPrefix, prev.modelID, modelID)
+	}
 	s.entries[key] = stickyEntry{modelID: modelID, expires: time.Now().Add(stickyTTL)}
 	if len(s.entries) > stickyMapCap {
 		now := time.Now()
