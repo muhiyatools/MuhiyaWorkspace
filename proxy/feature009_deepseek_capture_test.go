@@ -17,7 +17,12 @@ func TestFeature009DeepSeekCaptureMatchesPinnedBefore(t *testing.T) {
 		identity                    bool
 	}{
 		{"reasoner-max", "deepseek-reasoner", "max", "max", true},
-		{"chat-absent", "deepseek-chat", "", "unsupported", true},
+		// Absent effort passes the body through untouched (the deployed
+		// pre-009 gateway's behavior): applied is "" and the client's raw
+		// reasoning_effort/thinking survive verbatim. Locks in the audit fix
+		// for the force-disabled regression.
+		{"chat-absent", "deepseek-chat", "", "", true},
+		{"reasoner-absent", "deepseek-reasoner", "", "", true},
 		{"reasoner-no-identity", "deepseek-reasoner", "medium", "high", false},
 	}
 	for _, scenario := range scenarios {
@@ -27,7 +32,7 @@ func TestFeature009DeepSeekCaptureMatchesPinnedBefore(t *testing.T) {
 			delete(body, "web_search")
 			applied := ApplyThinkingOpenAI(body, "https://api.deepseek.com", scenario.model, scenario.level)
 			body["stream_options"] = map[string]interface{}{"include_usage": true}
-			sanitizeUpstreamIdentity(body, "", "")
+			sanitizeUpstreamIdentity(body, famDeepseek, "", "")
 			if scenario.identity {
 				// Pinned output of the server-side HMAC identity fixture captured
 				// before feature 009. identity_test.go independently freezes the
@@ -66,6 +71,15 @@ func feature009DeepSeekBody() map[string]interface{} {
 
 func assertFeature009Golden(t *testing.T, path string, got []byte) {
 	t.Helper()
+	// DEEPSEEK_GOLDEN_UPDATE=1 rewrites the goldens instead of comparing —
+	// use ONLY when a behavior change is intentional and reviewed; the diff
+	// of the golden files is the reviewable record of the wire change.
+	if os.Getenv("DEEPSEEK_GOLDEN_UPDATE") == "1" {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	want, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

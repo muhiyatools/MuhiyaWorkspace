@@ -15,12 +15,15 @@ import (
 // The gateway then maps the level onto each provider's SUPPORTED thinking
 // ladder. When a level is requested it is never dropped below a provider's floor:
 // a level under the floor rides the floor (e.g. DeepSeek supports only high|max, so
-// low/medium effort -> "high" and high/max effort -> "max"). DeepSeek is the one
-// provider normalized UNCONDITIONALLY (even when no level is requested) so a raw
-// client value can never leak; with no/off effort its thinking is emitted as
-// type:"disabled" rather than passed through.
+// low/medium effort -> "high" and high/max effort -> "max"). When no level is
+// requested the body passes through untouched - DeepSeek included - so a bare
+// reasoner request keeps the provider's own default and the forwarded bytes
+// match the pre-normalization gateway exactly. An EXPLICIT none/off effort on
+// DeepSeek emits thinking type:"disabled" (the one true disable). MiniMax is
+// the sole exception: a brand-new provider with no pre-existing deployments,
+// its documented reasoning_split control is emitted unconditionally (MX-4).
 //
-//	DeepSeek  : thinking enabled + reasoning_effort high (low..medium) | max (high..max); type:disabled when no/off effort
+//	DeepSeek  : thinking enabled + reasoning_effort high (low..medium) | max (high..max); type:disabled on explicit none/off; untouched when unset
 //	GLM       : thinking enabled (+ reasoning_effort low|medium|high on GLM-5+)
 //	MiniMax   : always-on; only reasoning_split is useful
 //	OpenAI    : reasoning_effort minimal|low|medium|high (reasoning models ONLY - others 400)
@@ -207,23 +210,28 @@ func classifyUpstream(baseURL, targetModel string) upstreamFamily {
 // ApplyThinkingOpenAI rewrites an OpenAI-format wire body for the target
 // provider. When a level is requested it strips the gateway-level fields and
 // injects the provider's native parameter. When NO level is requested the
-// body passes through untouched (pre-existing behavior for clients that speak
-// a provider's dialect directly) - EXCEPT DeepSeek, whose raw client
-// reasoning_effort/thinking are ALWAYS stripped and re-emitted in DeepSeek's
-// documented form, so an undocumented value (e.g. reasoning_effort:"low") can
-// never reach it. The return value is the setting that was actually applied
-// ("" when nothing was requested; "unsupported" when the model has no
-// controllable thinking; "disabled" when DeepSeek thinking is turned off).
+// body passes through untouched for every family (pre-existing behavior for
+// clients that speak a provider's dialect directly; keeps DeepSeek-only
+// deployments byte-identical). The return value is the setting that was
+// actually applied ("" when nothing was requested; "unsupported" when the
+// model has no controllable thinking; "disabled" when an explicit none/off
+// effort turned DeepSeek thinking off).
 func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, level string) string {
 	family := classifyUpstream(baseURL, targetModel)
 	model := strings.ToLower(targetModel)
 	rank := thinkingRank(level)
 
-	// DeepSeek is normalized UNCONDITIONALLY - even when no effort was resolved
-	// the client's raw reasoning_effort/thinking must never reach DeepSeek
-	// verbatim. Always strip the gateway-level fields and re-emit DeepSeek's
-	// documented form.
+	// DeepSeek is normalized whenever an effort level IS resolved: the
+	// client's raw reasoning_effort/thinking are stripped and re-emitted in
+	// DeepSeek's documented form. When NO level was resolved the body passes
+	// through untouched, exactly like every other family - a bare reasoner
+	// request keeps DeepSeek's own default (reasoning ON) and the forwarded
+	// bytes stay identical to the pre-normalization gateway, so effort-less
+	// deployments see zero wire change.
 	if family == famDeepseek {
+		if level == "" {
+			return ""
+		}
 		delete(bodyMap, "reasoning_effort")
 		delete(bodyMap, "thinking")
 		if !isDeepseekReasoner(model) {
@@ -233,9 +241,9 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 			return "unsupported"
 		}
 		// DeepSeek reasoning supports exactly high|max: low/medium effort ride
-		// "high", high/max ride "max". Off/none - or no effort at all -
-		// disables thinking rather than leaking a raw client value.
-		if rank < 1 {
+		// "high", high/max ride "max". An EXPLICIT none/off request disables
+		// thinking - only a stated preference ever turns reasoning off.
+		if rank == 0 {
 			bodyMap["thinking"] = map[string]interface{}{"type": "disabled"}
 			return "disabled"
 		}
@@ -253,7 +261,6 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 		// control value so an unsupported/raw dialect can never leak upstream.
 		delete(bodyMap, "reasoning_effort")
 		delete(bodyMap, "thinking")
-		delete(bodyMap, "reasoning_split")
 		bodyMap["reasoning_split"] = true
 		return "always-on"
 	}

@@ -943,16 +943,20 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 // Proxies Implementation
 // ------------------------------------------
 
-// sanitizeUpstreamIdentity conditions an OpenAI-dialect body for a DeepSeek
-// upstream (feature 007 upstream-request §2/§3): it drops sampling knobs
-// DeepSeek rejects (frequency_penalty, presence_penalty) and any caller-supplied
-// identity fields (user, user_id), then, when identity injection is configured,
-// stamps a stable opaque per-caller user_id derived server-side. Dropping the
-// inbound identity fields first guarantees the caller can never forge or leak
-// one; the derived value is added only if both the secret and a userID exist.
-func sanitizeUpstreamIdentity(bodyMap map[string]interface{}, identitySecret, userID string) {
-	delete(bodyMap, "frequency_penalty")
-	delete(bodyMap, "presence_penalty")
+// sanitizeUpstreamIdentity conditions an OpenAI-dialect body before it is
+// forwarded (feature 007 upstream-request §2/§3). For every upstream it drops
+// any caller-supplied identity fields (user, user_id), then, when identity
+// injection is configured, stamps a stable opaque per-caller user_id derived
+// server-side - dropping the inbound fields first guarantees the caller can
+// never forge or leak one. The sampling-knob strip (frequency_penalty,
+// presence_penalty) applies to DeepSeek ONLY: DeepSeek rejects those params,
+// while GLM/OpenAI/others support them legitimately and must receive them
+// untouched.
+func sanitizeUpstreamIdentity(bodyMap map[string]interface{}, family upstreamFamily, identitySecret, userID string) {
+	if family == famDeepseek {
+		delete(bodyMap, "frequency_penalty")
+		delete(bodyMap, "presence_penalty")
+	}
 	delete(bodyMap, "user")
 	delete(bodyMap, "user_id")
 	if derived := DeriveUserID(identitySecret, userID); derived != "" {
@@ -978,7 +982,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	sanitizeUpstreamIdentity(bodyMap, h.identitySecret, log.UserID)
+	sanitizeUpstreamIdentity(bodyMap, classifyUpstream(provider.BaseURL, model.TargetModel), h.identitySecret, log.UserID)
 
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
@@ -1274,7 +1278,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 	_ = json.Unmarshal(translated, &bodyMap)
 	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
-	sanitizeUpstreamIdentity(bodyMap, h.identitySecret, log.UserID)
+	sanitizeUpstreamIdentity(bodyMap, classifyUpstream(provider.BaseURL, model.TargetModel), h.identitySecret, log.UserID)
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
 	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/completions") {
@@ -1806,15 +1810,28 @@ func estimateTokens(text string) int {
 	return tokens
 }
 
+// MiniMax-M3 bills a second, doubled rate tier once the request's input
+// exceeds 512k tokens (platform.minimax.io pricing, captured 2026-07-14).
+// The base tier (0.30/1.20/0.06 per M in/out/cached) lives on the model row
+// seeded by db/migrations (009 MiniMax models); the >512k tier below MUST be
+// updated in lockstep if that row is ever repriced. Data-driven tier columns
+// are the durable follow-up; today only M3 is tier-priced.
+const (
+	minimaxM3TierThresholdTokens   = 512000
+	minimaxM3HighTierInputRate     = 0.60
+	minimaxM3HighTierOutputRate    = 2.40
+	minimaxM3HighTierCacheReadRate = 0.12
+)
+
 func calculateCost(model *db.Model, input, output, cacheRead, cacheWrite int) float64 {
 	// Cost calculation supporting prompt caching tokens
 	inputRate := model.InputCostPerMillion
 	outputRate := model.OutputCostPerMillion
 	cacheReadRate := model.CacheReadCostPerMillion
-	if isMiniMaxM3(model) && input > 512000 {
-		inputRate = 0.60
-		outputRate = 2.40
-		cacheReadRate = 0.12
+	if isMiniMaxM3(model) && input > minimaxM3TierThresholdTokens {
+		inputRate = minimaxM3HighTierInputRate
+		outputRate = minimaxM3HighTierOutputRate
+		cacheReadRate = minimaxM3HighTierCacheReadRate
 	}
 	standardInput := input - cacheRead - cacheWrite
 	if standardInput < 0 {
@@ -1831,13 +1848,22 @@ func calculateCost(model *db.Model, input, output, cacheRead, cacheWrite int) fl
 	return inputCost + outputCost + cacheReadCost + cacheWriteCost
 }
 
+// isMiniMaxM3 reports whether a model row is a MiniMax-M3 variant (the only
+// tier-priced family). Prefix matching mirrors classifyUpstream's family
+// detection so an M3 variant row (e.g. a future minimax-m3-highspeed) cannot
+// be famMiniMax for cache/reasoning yet silently miss the pricing tier. M2.x
+// rows never match ("minimax-m2..." fails every prefix). Residual assumption:
+// a hypothetical minimax-m3.5 with different pricing would need its own rule.
 func isMiniMaxM3(model *db.Model) bool {
 	if model == nil {
 		return false
 	}
 	for _, value := range []string{model.Name, model.TargetModel} {
 		normalized := strings.ToLower(strings.TrimSpace(value))
-		if normalized == "minimax-m3" || normalized == "m3" {
+		if normalized == "m3" ||
+			strings.HasPrefix(normalized, "m3-") ||
+			strings.HasPrefix(normalized, "minimax-m3") ||
+			strings.HasPrefix(normalized, "minimax m3") {
 			return true
 		}
 	}

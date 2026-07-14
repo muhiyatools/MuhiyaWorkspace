@@ -114,8 +114,9 @@ func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
 		t.Errorf("thinking = %v", thinking)
 	}
 
-	// Thinking is NEVER disabled: DeepSeek supports high|max only, so
-	// low/medium ride the "high" floor and high/max ride "max".
+	// A requested level is never dropped below the floor: DeepSeek supports
+	// high|max only, so low/medium ride the "high" floor and high/max ride
+	// "max" (only an explicit none/off disables - tested separately).
 	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "low", nil)
 	if applied != "high" || body["reasoning_effort"] != "high" {
 		t.Fatalf("low -> %q / %v", applied, body["reasoning_effort"])
@@ -282,8 +283,8 @@ func TestApplyThinkingOpenAI_UnknownStripsEverything(t *testing.T) {
 
 func TestApplyThinkingOpenAI_UnsetLeavesBodyUntouched(t *testing.T) {
 	// No level requested: a client speaking the provider's own dialect keeps
-	// full control (pre-existing pass-through behavior) for every provider
-	// EXCEPT DeepSeek, which is normalized unconditionally (see below).
+	// full control (pre-existing pass-through behavior). This applies to every
+	// family except always-on MiniMax (a new provider, normalized per MX-4).
 	body, applied := applyOpenAI(t, "https://open.bigmodel.cn/api/paas/v4", "glm-4.6", "", nil)
 	if applied != "" {
 		t.Fatalf("applied = %q", applied)
@@ -295,19 +296,45 @@ func TestApplyThinkingOpenAI_UnsetLeavesBodyUntouched(t *testing.T) {
 		t.Error("client thinking must pass through when no level is requested")
 	}
 
-	// DeepSeek is the documented exception: even with no level requested, the
-	// raw client reasoning_effort/thinking are ALWAYS stripped and re-emitted in
-	// DeepSeek's own form so an undocumented value can never reach it. A
-	// non-reasoning target has no thinking mode, so nothing is injected.
-	dsBody, dsApplied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-chat", "", nil)
-	if dsApplied != "unsupported" {
-		t.Fatalf("deepseek unset applied = %q, want unsupported", dsApplied)
+	// DeepSeek follows the same rule. A bare deepseek-reasoner request keeps
+	// DeepSeek's own default (reasoning ON) and the forwarded bytes stay
+	// identical to the pre-normalization gateway. This locks in the fix for
+	// the audit finding where unset effort force-injected
+	// thinking:{type:"disabled"} and silently turned reasoning off.
+	dsBody, dsApplied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "", nil)
+	if dsApplied != "" {
+		t.Fatalf("deepseek-reasoner unset applied = %q, want \"\"", dsApplied)
 	}
-	if _, has := dsBody["reasoning_effort"]; has {
-		t.Error("raw client reasoning_effort must never survive to DeepSeek, even when no level is requested")
+	if dsBody["reasoning_effort"] != "high" {
+		t.Error("client reasoning_effort must pass through to DeepSeek when no level is requested")
 	}
-	if _, has := dsBody["thinking"]; has {
-		t.Error("raw client thinking must never survive to DeepSeek, even when no level is requested")
+	if dsBody["thinking"].(map[string]interface{})["type"] != "enabled" {
+		t.Error("client thinking must pass through to DeepSeek when no level is requested")
+	}
+
+	// Non-reasoning DeepSeek at unset: same untouched passthrough.
+	chatBody, chatApplied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-chat", "", nil)
+	if chatApplied != "" {
+		t.Fatalf("deepseek-chat unset applied = %q, want \"\"", chatApplied)
+	}
+	if chatBody["reasoning_effort"] != "high" {
+		t.Error("deepseek-chat unset must pass the body through untouched")
+	}
+}
+
+// TestApplyThinkingOpenAI_DeepSeekExplicitOffDisables locks in the boundary of
+// the disable path: ONLY a stated none/off/minimal preference turns DeepSeek
+// reasoning off; an unset level never does (see the passthrough test above).
+func TestApplyThinkingOpenAI_DeepSeekExplicitOffDisables(t *testing.T) {
+	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "minimal", nil)
+	if applied != "disabled" {
+		t.Fatalf("explicit off applied = %q, want disabled", applied)
+	}
+	if body["thinking"].(map[string]interface{})["type"] != "disabled" {
+		t.Errorf("thinking = %v", body["thinking"])
+	}
+	if _, has := body["reasoning_effort"]; has {
+		t.Error("disabled requests must not carry reasoning_effort")
 	}
 }
 
