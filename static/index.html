@@ -198,7 +198,10 @@
             <section id="tab-users" class="tab-content">
                 <div class="section-actions">
                     <h2>Platform Users</h2>
-                    <button class="btn btn-primary" id="btn-add-user"><i class="fa-solid fa-user-plus"></i> Create User</button>
+                    <div style="display:flex; gap:0.5rem;">
+                        <button class="btn btn-secondary" onclick="resetAllUsage()" title="Reset current usage to zero for every user (a usage gift). Scheduled reset times are unchanged."><i class="fa-solid fa-gift"></i> Reset All Usage</button>
+                        <button class="btn btn-primary" id="btn-add-user"><i class="fa-solid fa-user-plus"></i> Create User</button>
+                    </div>
                 </div>
                 <div class="table-container">
                     <table id="users-table">
@@ -733,6 +736,10 @@
                     <label for="topup-credits">Add Top-up Credits (1 Credit = $0.01)</label>
                     <input type="number" id="topup-credits" min="1" required placeholder="e.g. 100">
                 </div>
+                <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                    <label for="topup-expires">Expires (optional)</label>
+                    <input type="date" id="topup-expires">
+                </div>
                 <button type="submit" class="btn btn-primary" style="height: 38px;"><i class="fa-solid fa-plus"></i> Add Credits</button>
             </form>
             
@@ -746,6 +753,8 @@
                             <th>Credits</th>
                             <th>Used</th>
                             <th>Consumption</th>
+                            <th>Expires</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>

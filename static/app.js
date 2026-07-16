@@ -57,6 +57,45 @@ document.addEventListener('DOMContentLoaded', () => {
         el.innerHTML = `<div class="text-danger" style="grid-column: 1/-1; text-align: center; padding: 1rem;">⚠ Failed to load: ${escapeHtml(message)}</div>`;
     }
 
+    // --- Mutation helpers (U1) ---
+    // Ephemeral toast so a write's success OR failure is actually visible. Before
+    // this, every create/update/delete used raw fetch with no res.ok check, so a
+    // 4xx/5xx parsed as JSON and ran the success branch — the modal closed and the
+    // list reloaded as if it had worked (the "I clicked Save and nothing happened"
+    // report). mutateJSON routes writes through the same throw-on-error path as
+    // reads (fetchJSON); the caller shows the server's message with showToast.
+    function showToast(message, kind) {
+        let host = document.getElementById('toast-host');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'toast-host';
+            host.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;';
+            document.body.appendChild(host);
+        }
+        const el = document.createElement('div');
+        el.textContent = message;
+        el.style.cssText = 'padding:0.75rem 1rem;border-radius:8px;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,0.25);max-width:360px;font-size:0.9rem;' +
+            (kind === 'error' ? 'background:#c0392b;' : 'background:#1e8e4e;');
+        host.appendChild(el);
+        setTimeout(() => el.remove(), kind === 'error' ? 6000 : 3000);
+    }
+
+    function mutateJSON(url, method, body) {
+        return fetchJSON(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: body === undefined ? undefined : JSON.stringify(body)
+        });
+    }
+
+    // U8: the plaintext virtual key exists exactly once — the server returns it on
+    // create and never again. Surface it (and copy it to the clipboard) so the
+    // admin can capture it, instead of silently discarding the response as before.
+    function showGeneratedKey(token) {
+        try { navigator.clipboard.writeText(token); } catch (e) { /* clipboard may be unavailable */ }
+        window.prompt('New API key — copied to clipboard. It is shown ONCE and cannot be retrieved later:', token);
+    }
+
     // DOM Elements
     const navItems = document.querySelectorAll('.nav-item');
     const tabContents = document.querySelectorAll('.tab-content');
@@ -257,17 +296,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const payload = { id, name, email, plan_id, status };
         const method = id ? 'PUT' : 'POST';
 
-        fetch('/api/users', {
-            method: method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        })
-        .then(res => res.json())
-        .then(() => {
-            modalUser.classList.remove('show');
-            loadUsers();
-        })
-        .catch(err => console.error(err));
+        mutateJSON('/api/users', method, payload)
+            .then(() => { modalUser.classList.remove('show'); loadUsers(); showToast('User saved', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     });
 
     document.getElementById('key-form').addEventListener('submit', (e) => {
@@ -284,17 +315,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const method = id ? 'PUT' : 'POST';
 
-        fetch('/api/keys', {
-            method: method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        })
-        .then(res => res.json())
-        .then(() => {
-            modalKey.classList.remove('show');
-            loadKeys();
-        })
-        .catch(err => console.error(err));
+        mutateJSON('/api/keys', method, payload)
+            .then((created) => {
+                modalKey.classList.remove('show');
+                loadKeys();
+                if (method === 'POST' && created && created.key) {
+                    showGeneratedKey(created.key);
+                } else {
+                    showToast('Key saved', 'success');
+                }
+            })
+            .catch(err => showToast(err.message, 'error'));
     });
 
     document.getElementById('plan-form').addEventListener('submit', (e) => {
@@ -338,17 +369,9 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         const method = idInput ? 'PUT' : 'POST';
 
-        fetch('/api/plans', {
-            method: method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        })
-        .then(res => res.json())
-        .then(() => {
-            modalPlan.classList.remove('show');
-            loadPlansAndBudgets();
-        })
-        .catch(err => console.error(err));
+        mutateJSON('/api/plans', method, payload)
+            .then(() => { modalPlan.classList.remove('show'); loadPlansAndBudgets(); showToast('Plan saved', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     });
 
     document.getElementById('provider-form').addEventListener('submit', (e) => {
@@ -370,17 +393,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const payload = { id, name, api_key, base_url, anthropic_base_url, status };
         const method = idInput ? 'PUT' : 'POST';
 
-        fetch('/api/providers', {
-            method: method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        })
-        .then(res => res.json())
-        .then(() => {
-            modalProvider.classList.remove('show');
-            loadProvidersAndModels();
-        })
-        .catch(err => console.error(err));
+        mutateJSON('/api/providers', method, payload)
+            .then(() => { modalProvider.classList.remove('show'); loadProvidersAndModels(); showToast('Provider saved', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     });
 
     document.getElementById('model-form').addEventListener('submit', (e) => {
@@ -422,17 +437,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const method = id ? 'PUT' : 'POST';
 
-        fetch('/api/models', {
-            method: method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        })
-        .then(res => res.json())
-        .then(() => {
-            modalModel.classList.remove('show');
-            loadProvidersAndModels();
-        })
-        .catch(err => console.error(err));
+        mutateJSON('/api/models', method, body)
+            .then(() => { modalModel.classList.remove('show'); loadProvidersAndModels(); showToast('Model saved', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     });
 
     // --- Inline Plan Budget Window Editor Builder ---
@@ -745,6 +752,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${new Date(u.created_at).toLocaleDateString()}</td>
                         <td>
                             <button class="btn btn-secondary btn-sm" onclick="manageUserTopups('${u.id}')" title="Manage Top-ups"><i class="fa-solid fa-coins"></i> Top-ups</button>
+                            <button class="btn btn-secondary btn-sm" onclick="resetUserUsage('${u.id}')" title="Reset current usage now (schedule unchanged)"><i class="fa-solid fa-rotate-left"></i> Reset</button>
                             <button class="btn btn-secondary btn-sm" onclick="editUser('${u.id}')"><i class="fa-solid fa-pen"></i> Edit</button>
                             <button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
                         </td>
@@ -773,9 +781,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.deleteUser = (id) => {
         if (!confirm('Are you sure you want to delete this user? All associated virtual keys will be permanently deleted.')) return;
-        fetch(`/api/users?id=${id}`, { method: 'DELETE' })
-            .then(() => loadUsers())
-            .catch(err => console.error(err));
+        mutateJSON(`/api/users?id=${id}`, 'DELETE')
+            .then(() => { loadUsers(); showToast('User deleted', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
+    };
+
+    // B: bonus "gift" reset — zeroes CURRENT in-window usage without moving any
+    // scheduled reset time (the floor rises; the schedule stays anchored).
+    window.resetUserUsage = (id) => {
+        if (!confirm("Reset this user's current usage to zero now? Their scheduled reset time is unchanged.")) return;
+        mutateJSON('/api/users/reset-usage', 'POST', { scope: 'user', user_id: id, note: 'admin panel (single user)' })
+            .then(() => { loadUsers(); showToast('Usage reset for user', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
+    };
+
+    window.resetAllUsage = () => {
+        if (!confirm('Reset CURRENT usage to zero for ALL users now (a usage gift)? Scheduled reset times are unchanged.')) return;
+        mutateJSON('/api/users/reset-usage', 'POST', { scope: 'all', note: 'admin panel (all users)' })
+            .then((res) => { loadUsers(); showToast('Usage reset for ' + ((res && res.users_reset) || 'all') + ' user(s)', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     };
 
     // --- Virtual Keys CRUD ---
@@ -854,9 +878,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.revokeKey = (id) => {
         if (!confirm('Are you sure you want to delete this API key? Connection clients will be locked out immediately.')) return;
-        fetch(`/api/keys?id=${id}`, { method: 'DELETE' })
-            .then(() => loadKeys())
-            .catch(err => console.error(err));
+        mutateJSON(`/api/keys?id=${id}`, 'DELETE')
+            .then(() => { loadKeys(); showToast('Key revoked', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     };
 
     // --- Plans CRUD ---
@@ -920,9 +944,9 @@ document.addEventListener('DOMContentLoaded', () => {
     window.deletePlan = (id) => {
         if (id === 'plan-dev') return alert('Cannot delete default system plans.');
         if (!confirm('Are you sure you want to delete this plan? All budget windows and users under this plan will be affected.')) return;
-        fetch(`/api/plans?id=${id}`, { method: 'DELETE' })
-            .then(() => loadPlansAndBudgets())
-            .catch(err => console.error(err));
+        mutateJSON(`/api/plans?id=${id}`, 'DELETE')
+            .then(() => { loadPlansAndBudgets(); showToast('Plan deleted', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     };
 
     // --- Providers & Models CRUD ---
@@ -1027,9 +1051,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.deleteProvider = (id) => {
         if (!confirm('Deleting this provider will break all mappings linked to it. Proceed?')) return;
-        fetch(`/api/providers?id=${id}`, { method: 'DELETE' })
-            .then(() => loadProvidersAndModels())
-            .catch(err => console.error(err));
+        mutateJSON(`/api/providers?id=${id}`, 'DELETE')
+            .then(() => { loadProvidersAndModels(); showToast('Provider deleted', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     };
 
     window.editModel = (id) => {
@@ -1066,9 +1090,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.deleteModel = (id) => {
         if (!confirm('Are you sure you want to delete this model mapping?')) return;
-        fetch(`/api/models?id=${id}`, { method: 'DELETE' })
-            .then(() => loadProvidersAndModels())
-            .catch(err => console.error(err));
+        mutateJSON(`/api/models?id=${id}`, 'DELETE')
+            .then(() => { loadProvidersAndModels(); showToast('Model deleted', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     };
 
     function loadLogs() {
@@ -1269,33 +1293,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.loadUserTopups = (userId) => {
         const tbody = document.querySelector('#topups-table tbody');
-        tbody.innerHTML = `<tr><td colspan="5" class="text-muted text-center" style="text-align: center;">Loading top-ups...</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center" style="text-align: center;">Loading top-ups...</td></tr>`;
 
-        fetch(`/api/users/topups?user_id=${userId}`)
-            .then(res => res.json())
+        fetchJSON(`/api/users/topups?user_id=${userId}`)
             .then(topups => {
-                if (!topups || topups.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="5" class="text-muted text-center" style="text-align: center;">No top-up logs found for this user.</td></tr>`;
+                topups = topups || [];
+                if (topups.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="7" class="text-muted text-center" style="text-align: center;">No top-up logs found for this user.</td></tr>`;
                     return;
                 }
-
+                const now = Date.now();
                 tbody.innerHTML = topups.map(t => {
                     const pct = Math.min((t.used_credits / t.credits) * 100, 100);
+                    // C: expired or deleted top-ups no longer count for the user; badge
+                    // them here (admins keep seeing them — the money paths hide them).
+                    const isDeleted = !!t.deleted_at;
+                    const isExpired = t.expires_at && new Date(t.expires_at).getTime() <= now;
                     let barColor = 'var(--primary)';
                     let statusLabel = 'Active';
-                    if (pct >= 100) {
-                        barColor = 'var(--text-muted-dark)';
-                        statusLabel = 'Consumed';
-                    } else if (pct > 0) {
-                        barColor = '#fbbf24'; // warning gold
-                        statusLabel = 'In Use';
-                    }
+                    if (isDeleted) { barColor = 'var(--text-muted-dark)'; statusLabel = 'Deleted'; }
+                    else if (isExpired) { barColor = 'var(--text-muted-dark)'; statusLabel = 'Expired'; }
+                    else if (pct >= 100) { barColor = 'var(--text-muted-dark)'; statusLabel = 'Consumed'; }
+                    else if (pct > 0) { barColor = '#fbbf24'; statusLabel = 'In Use'; }
 
                     const dateStr = new Date(t.created_at).toLocaleString();
+                    const expiresStr = t.expires_at ? new Date(t.expires_at).toLocaleDateString() : '—';
+                    const actions = isDeleted ? '' : `<button class="btn btn-danger btn-sm" onclick="deleteTopup('${t.id}','${userId}')" title="Delete top-up"><i class="fa-solid fa-trash"></i></button>`;
                     return `
-                        <tr>
+                        <tr${(isDeleted || isExpired) ? ' style="opacity:0.55;"' : ''}>
                             <td>${dateStr}</td>
-                            <td><code>${t.id.substring(0, 12)}...</code></td>
+                            <td><code>${escapeHtml(t.id.substring(0, 12))}...</code></td>
                             <td><strong>${t.credits.toFixed(2)}</strong></td>
                             <td><strong>${t.used_credits.toFixed(2)}</strong></td>
                             <td>
@@ -1309,14 +1336,24 @@ document.addEventListener('DOMContentLoaded', () => {
                                     </div>
                                 </div>
                             </td>
+                            <td>${expiresStr}</td>
+                            <td>${actions}</td>
                         </tr>
                     `;
                 }).join('');
             })
             .catch(err => {
-                console.error(err);
-                tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center" style="text-align: center;">Failed to load top-up logs.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="text-danger text-center" style="text-align: center;">⚠ Failed to load: ${escapeHtml(err.message)}</td></tr>`;
             });
+    };
+
+    // C: delete a top-up — its remaining credits vanish from the user immediately
+    // (soft delete; the row is retained for the admin audit trail).
+    window.deleteTopup = (id, userId) => {
+        if (!confirm('Delete this top-up? Its remaining credits disappear from the user at once. The row is kept for audit.')) return;
+        mutateJSON(`/api/users/topups?id=${id}`, 'DELETE')
+            .then(() => { loadUserTopups(userId); loadUsers(); showToast('Top-up deleted', 'success'); })
+            .catch(err => showToast(err.message, 'error'));
     };
 
     // Setup submit listener for top-up form once
@@ -1324,33 +1361,25 @@ document.addEventListener('DOMContentLoaded', () => {
         e.preventDefault();
         const userId = document.getElementById('topup-user-id').value;
         const credits = parseFloat(document.getElementById('topup-credits').value);
+        const expiresVal = document.getElementById('topup-expires').value;
 
         if (!userId || isNaN(credits) || credits <= 0) {
-            alert('Please enter a valid amount of credits.');
+            showToast('Please enter a valid amount of credits.', 'error');
             return;
         }
 
-        fetch('/api/users/topups', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: userId, credits: credits })
-        })
-        .then(res => {
-            if (!res.ok) {
-                return res.text().then(text => { throw new Error(text) });
-            }
-            return res.json();
-        })
-        .then(() => {
-            // Reload user top-ups table
-            loadUserTopups(userId);
-            // Refresh global users list to reflect the balance
-            loadUsers();
-        })
-        .catch(err => {
-            console.error(err);
-            alert('Failed to add top-up credits: ' + err.message);
-        });
+        const payload = { user_id: userId, credits: credits };
+        if (expiresVal) { payload.expires_at = new Date(expiresVal).toISOString(); }
+
+        mutateJSON('/api/users/topups', 'POST', payload)
+            .then(() => {
+                document.getElementById('topup-credits').value = '';
+                document.getElementById('topup-expires').value = '';
+                loadUserTopups(userId);
+                loadUsers(); // reflect the new balance
+                showToast('Top-up added', 'success');
+            })
+            .catch(err => showToast('Failed to add top-up: ' + err.message, 'error'));
     });
 
     window.showLogDetails = (id) => {

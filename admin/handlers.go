@@ -30,6 +30,48 @@ func RegisterRoutes(mux *http.ServeMux, database *db.DB) {
 	mux.HandleFunc("/api/settings", api.handleSettings)
 	mux.HandleFunc("/api/logs", api.handleLogs)
 	mux.HandleFunc("/api/users/topups", api.handleUserTopups)
+	mux.HandleFunc("/api/users/reset-usage", api.handleResetUsage)
+}
+
+// handleResetUsage is the admin bonus budget-reset (Part B). POST {scope:"all"|
+// "user", user_id?, note?} raises the usage floor to now — clearing current
+// in-window usage WITHOUT moving any scheduled reset time (INV-5). Protected by
+// the same Basic auth as every /api route (main.go wraps this mux).
+func (api *AdminAPI) handleResetUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	var body struct {
+		Scope  string `json:"scope"`
+		UserID string `json:"user_id"`
+		Note   string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		api.errorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	switch body.Scope {
+	case "all":
+		affected, err := api.db.ResetAllUsersUsage(body.Note)
+		if err != nil {
+			api.dbErrorResponse(w, err)
+			return
+		}
+		api.jsonResponse(w, http.StatusOK, map[string]interface{}{"scope": "all", "users_reset": affected})
+	case "user":
+		if body.UserID == "" {
+			api.errorResponse(w, http.StatusBadRequest, "user_id is required for scope=user")
+			return
+		}
+		if err := api.db.ResetUserUsage(body.UserID, body.Note); err != nil {
+			api.dbErrorResponse(w, err)
+			return
+		}
+		api.jsonResponse(w, http.StatusOK, map[string]interface{}{"scope": "user", "user_id": body.UserID})
+	default:
+		api.errorResponse(w, http.StatusBadRequest, "scope must be 'all' or 'user'")
+	}
 }
 
 func (api *AdminAPI) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -695,6 +737,39 @@ func (api *AdminAPI) handleUserTopups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		api.jsonResponse(w, http.StatusCreated, t)
+
+	case http.MethodPut:
+		// Set or clear a top-up's expiry (Part C). Body: {id, expires_at?}. A null
+		// or omitted expires_at makes the top-up permanent.
+		var body struct {
+			ID        string     `json:"id"`
+			ExpiresAt *time.Time `json:"expires_at"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
+			return
+		}
+		if body.ID == "" {
+			api.errorResponse(w, http.StatusBadRequest, "id is required")
+			return
+		}
+		if err := api.db.SetUserTopupExpiry(body.ID, body.ExpiresAt); err != nil {
+			api.dbErrorResponse(w, err)
+			return
+		}
+		api.jsonResponse(w, http.StatusOK, map[string]interface{}{"id": body.ID, "expires_at": body.ExpiresAt})
+
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			api.errorResponse(w, http.StatusBadRequest, "id is required")
+			return
+		}
+		if err := api.db.DeleteUserTopup(id); err != nil {
+			api.dbErrorResponse(w, err)
+			return
+		}
+		api.jsonResponse(w, http.StatusOK, map[string]interface{}{"id": id, "deleted": true})
 
 	default:
 		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")

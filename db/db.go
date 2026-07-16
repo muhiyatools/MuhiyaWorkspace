@@ -144,11 +144,20 @@ type SystemSetting struct {
 }
 
 type UserTopup struct {
-	ID          string    `json:"id"`
-	UserID      string    `json:"user_id"`
-	Credits     float64   `json:"credits"`
-	UsedCredits float64   `json:"used_credits"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string     `json:"id"`
+	UserID      string     `json:"user_id"`
+	Credits     float64    `json:"credits"`
+	UsedCredits float64    `json:"used_credits"`
+	CreatedAt   time.Time  `json:"created_at"`
+	// ExpiresAt (migration 012) lapses a top-up on a date; DeletedAt is a soft
+	// delete. Either one hides the top-up from all user-facing balances and from
+	// consumption (INV-6); admins still see it, badged. Nil = never / not deleted.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	// IdemKey (migration 013) makes a top-up idempotent: a retried insert with the
+	// same key is a no-op (ON CONFLICT DO NOTHING), so a gift-card redemption or a
+	// double-submit can never double-credit. Nil for ordinary admin top-ups.
+	IdemKey *string `json:"idem_key,omitempty"`
 }
 
 type DashboardStats struct {
@@ -474,7 +483,7 @@ func (db *DB) GetUser(id string) (*User, error) {
 		u.BudgetUsage = usage
 	}
 	var extra, remaining float64
-	err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1", u.ID).Scan(&extra, &remaining)
+	err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, u.ID).Scan(&extra, &remaining)
 	if err == nil {
 		u.ExtraCredits = extra
 		u.RemainingExtraCredits = remaining
@@ -500,7 +509,7 @@ func (db *DB) ListUsers() ([]User, error) {
 			u.BudgetUsage = usage
 		}
 		var extra, remaining float64
-		err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1", u.ID).Scan(&extra, &remaining)
+		err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, u.ID).Scan(&extra, &remaining)
 		if err == nil {
 			u.ExtraCredits = extra
 			u.RemainingExtraCredits = remaining
@@ -1046,9 +1055,21 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel, log.UsageEstimated)
 
 	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
-		_ = db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost)
+		if derr := db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost); derr != nil {
+			// F2: never swallow a credit-deduction failure — the billing row is
+			// already committed, so a lost deduction is a revenue leak. Surface it
+			// with request context for the ops log / alerting.
+			logCreditFailure(log.UserID, log.Cost, derr)
+		}
 	}
 	return err
+}
+
+// logCreditFailure surfaces a (no-longer-swallowed) credit-deduction error (F2).
+// It uses the package-level standard logger because inside InsertRequestLog the
+// identifier `log` is shadowed by the RequestLog parameter.
+func logCreditFailure(userID string, costUSD float64, err error) {
+	log.Printf("[BILLING] credit deduction failed for user %s (cost %.6f): %v", userID, costUSD, err)
 }
 
 func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string) ([]RequestLog, error) {
@@ -1103,28 +1124,20 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 
 func (db *DB) GetUserSpendingInWindow(userID string, durationSeconds int) (float64, error) {
 	var planAssignedAt time.Time
-	err := db.conn.QueryRow("SELECT plan_assigned_at FROM users WHERE id = $1", userID).Scan(&planAssignedAt)
+	var usageResetAt sql.NullTime
+	err := db.conn.QueryRow("SELECT plan_assigned_at, usage_reset_at FROM users WHERE id = $1", userID).Scan(&planAssignedAt, &usageResetAt)
 	if err != nil {
 		return 0, err
 	}
-
-	duration := time.Duration(durationSeconds) * time.Second
-	now := time.Now()
-	elapsed := now.Sub(planAssignedAt)
-	if elapsed < 0 {
-		elapsed = 0
-	}
-	periods := int64(elapsed / duration)
-	periodStart := planAssignedAt.Add(time.Duration(periods) * duration)
-
+	floor := effectiveFloor(windowPeriodStart(planAssignedAt, durationSeconds, time.Now()), usageResetAt)
 	var total float64
-	err = db.conn.QueryRow("SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, periodStart).Scan(&total)
+	err = db.conn.QueryRow("SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, floor).Scan(&total)
 	return total, err
 }
 
 func (db *DB) GetRemainingExtraCredits(userID string) (float64, error) {
 	var remaining float64
-	err := db.conn.QueryRow("SELECT COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1", userID).Scan(&remaining)
+	err := db.conn.QueryRow("SELECT COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, userID).Scan(&remaining)
 	return remaining, err
 }
 
@@ -1141,103 +1154,83 @@ func (db *DB) GetUserSpendingToday(userID string) (float64, error) {
 	return total, err
 }
 
+// DeductExtraCreditsIfExceeded charges a user's top-up credits for the over-budget
+// portion of a just-billed request, atomically and exactly once (findings F1/F7).
+// The whole operation — spend read, overage computation, and credit deduction —
+// runs in ONE transaction under a per-user advisory lock, so concurrent 2xx
+// requests for the same user serialize instead of racing. Each budget window keeps
+// a charge watermark (migration 010): the amount charged is the increase in
+// over-budget spend since the last charge, so a replay or a concurrent double-read
+// charges nothing. plan_assigned_at is read once (finding F6) and every window's
+// period start derives from it via windowPeriodStart. The math lives in billing.go
+// as pure, unit-tested functions.
 func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error {
 	if costUSD <= 0 {
 		return nil
 	}
-	var planID string
-	err := db.conn.QueryRow("SELECT plan_id FROM users WHERE id = $1", userID).Scan(&planID)
-	if err != nil {
-		return err
-	}
-	windows, err := db.ListBudgetWindowsByPlan(planID)
-	if err != nil {
-		return err
-	}
-	var maxExceeded float64
-	for _, w := range windows {
-		if w.BudgetUSD <= 0 {
-			continue
-		}
-		currentSpending, err := db.GetUserSpendingInWindow(userID, w.DurationSeconds)
-		if err != nil {
-			return err
-		}
-		previousSpending := currentSpending - costUSD
-		limit := w.BudgetUSD
-
-		var prevExceeded float64
-		if previousSpending > limit {
-			prevExceeded = previousSpending
-		} else {
-			prevExceeded = limit
-		}
-		exceeded := currentSpending - prevExceeded
-		if exceeded < 0 {
-			exceeded = 0
-		}
-		if exceeded > maxExceeded {
-			maxExceeded = exceeded
-		}
-	}
-
-	if maxExceeded <= 0 {
-		return nil
-	}
-
-	deductCredits := maxExceeded * 100.0
-
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.Query("SELECT id, credits, used_credits FROM user_topups WHERE user_id = $1 AND used_credits < credits ORDER BY created_at ASC FOR UPDATE", userID)
+	// Serialize all credit accounting for this user; the lock releases on
+	// commit/rollback. hashtext maps the id into the advisory-lock key space.
+	if _, err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext($1))", userID); err != nil {
+		return err
+	}
+
+	var planID string
+	var planAssignedAt time.Time
+	var usageResetAt sql.NullTime
+	if err := tx.QueryRow("SELECT plan_id, plan_assigned_at, usage_reset_at FROM users WHERE id = $1", userID).Scan(&planID, &planAssignedAt, &usageResetAt); err != nil {
+		return err
+	}
+	windows, err := listBudgetWindowsByPlanTx(tx, planID)
 	if err != nil {
 		return err
 	}
 
-	type topupRow struct {
-		id          string
-		credits     float64
-		usedCredits float64
-	}
-	var activeTopups []topupRow
-	for rows.Next() {
-		var r topupRow
-		if err := rows.Scan(&r.id, &r.credits, &r.usedCredits); err != nil {
-			rows.Close()
-			return err
+	now := time.Now()
+	var maxCredits float64
+	for _, w := range windows {
+		if w.BudgetUSD <= 0 {
+			continue
 		}
-		activeTopups = append(activeTopups, r)
-	}
-	rows.Close()
-
-	for _, r := range activeTopups {
-		if deductCredits <= 0 {
-			break
-		}
-		rem := r.credits - r.usedCredits
-		var toAdd float64
-		if deductCredits <= rem {
-			toAdd = deductCredits
-			deductCredits = 0
-		} else {
-			toAdd = rem
-			deductCredits -= rem
-		}
-		_, err = tx.Exec("UPDATE user_topups SET used_credits = used_credits + $1 WHERE id = $2", toAdd, r.id)
+		floor := effectiveFloor(windowPeriodStart(planAssignedAt, w.DurationSeconds, now), usageResetAt)
+		currentSpend, err := spendInWindowTx(tx, userID, floor)
 		if err != nil {
 			return err
 		}
+		lastBilled, err := loadChargeWatermark(tx, userID, w.ID, currentSpend, costUSD)
+		if err != nil {
+			return err
+		}
+		credits, newWatermark := overageChargeCredits(currentSpend, w.BudgetUSD, lastBilled)
+		if credits > maxCredits {
+			maxCredits = credits
+		}
+		if err := saveChargeWatermark(tx, userID, w.ID, newWatermark); err != nil {
+			return err
+		}
 	}
 
+	// Charge the single worst window's marginal overage — unchanged semantics:
+	// overlapping windows (e.g. 5h and monthly) count the same spend, so summing
+	// them would double-charge.
+	if maxCredits > 0 {
+		if err := deductFromTopups(tx, userID, maxCredits); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
+// ListUserTopups returns a user's top-ups for the ADMIN view, newest first. Unlike
+// the user-facing sums it does NOT hide expired/deleted rows — admins keep full
+// visibility (badged in the UI); only the money paths apply activeTopupFilter.
 func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
-	rows, err := db.conn.Query("SELECT id, user_id, credits, used_credits, created_at FROM user_topups WHERE user_id = $1 ORDER BY created_at DESC", userID)
+	rows, err := db.conn.Query("SELECT id, user_id, credits, used_credits, created_at, expires_at, deleted_at FROM user_topups WHERE user_id = $1 ORDER BY created_at DESC", userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1246,22 +1239,50 @@ func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
 	list := []UserTopup{}
 	for rows.Next() {
 		var u UserTopup
-		if err := rows.Scan(&u.ID, &u.UserID, &u.Credits, &u.UsedCredits, &u.CreatedAt); err != nil {
+		var expiresAt, deletedAt sql.NullTime
+		if err := rows.Scan(&u.ID, &u.UserID, &u.Credits, &u.UsedCredits, &u.CreatedAt, &expiresAt, &deletedAt); err != nil {
 			return nil, err
+		}
+		if expiresAt.Valid {
+			u.ExpiresAt = &expiresAt.Time
+		}
+		if deletedAt.Valid {
+			u.DeletedAt = &deletedAt.Time
 		}
 		list = append(list, u)
 	}
 	return list, nil
 }
 
+// CreateUserTopup inserts a top-up. When IdemKey is set, a second insert with the
+// same key is silently ignored (migration 013 partial unique index) so retries and
+// gift-card redemptions can never double-credit. A NULL IdemKey never conflicts.
 func (db *DB) CreateUserTopup(t UserTopup) error {
-	_, err := db.conn.Exec("INSERT INTO user_topups (id, user_id, credits, used_credits, created_at) VALUES ($1, $2, $3, $4, $5)", t.ID, t.UserID, t.Credits, t.UsedCredits, t.CreatedAt)
+	_, err := db.conn.Exec(
+		"INSERT INTO user_topups (id, user_id, credits, used_credits, created_at, expires_at, idem_key) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (idem_key) WHERE idem_key IS NOT NULL DO NOTHING",
+		t.ID, t.UserID, t.Credits, t.UsedCredits, t.CreatedAt, t.ExpiresAt, t.IdemKey)
+	return err
+}
+
+// DeleteUserTopup soft-deletes a top-up (migration 012): it vanishes from every
+// user-facing balance immediately (INV-6) while the row survives for audit. A
+// second delete is a no-op.
+func (db *DB) DeleteUserTopup(id string) error {
+	_, err := db.conn.Exec("UPDATE user_topups SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL", id)
+	return err
+}
+
+// SetUserTopupExpiry sets or clears a top-up's expiry (pass nil to make it
+// permanent). Takes effect immediately across the user-facing balances.
+func (db *DB) SetUserTopupExpiry(id string, expiresAt *time.Time) error {
+	_, err := db.conn.Exec("UPDATE user_topups SET expires_at = $2 WHERE id = $1", id, expiresAt)
 	return err
 }
 
 func (db *DB) GetUserBudgetUsage(userID string, planID string) ([]UserBudgetUsage, error) {
 	var planAssignedAt time.Time
-	err := db.conn.QueryRow("SELECT plan_assigned_at FROM users WHERE id = $1", userID).Scan(&planAssignedAt)
+	var usageResetAt sql.NullTime
+	err := db.conn.QueryRow("SELECT plan_assigned_at, usage_reset_at FROM users WHERE id = $1", userID).Scan(&planAssignedAt, &usageResetAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1271,20 +1292,17 @@ func (db *DB) GetUserBudgetUsage(userID string, planID string) ([]UserBudgetUsag
 		return nil, err
 	}
 
+	now := time.Now()
 	var usage []UserBudgetUsage
 	for _, w := range windows {
-		duration := time.Duration(w.DurationSeconds) * time.Second
-		now := time.Now()
-		elapsed := now.Sub(planAssignedAt)
-		if elapsed < 0 {
-			elapsed = 0
-		}
-		periods := int64(elapsed / duration)
-		periodStart := planAssignedAt.Add(time.Duration(periods) * duration)
-		resetTime := periodStart.Add(duration)
+		periodStart := windowPeriodStart(planAssignedAt, w.DurationSeconds, now)
+		// resetTime derives from plan_assigned_at ONLY — a bonus reset never shifts
+		// the displayed schedule (INV-5). The floor only lowers the spend sum.
+		resetTime := periodStart.Add(time.Duration(w.DurationSeconds) * time.Second)
+		floor := effectiveFloor(periodStart, usageResetAt)
 
 		var spent float64
-		err := db.conn.QueryRow("SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, periodStart).Scan(&spent)
+		err := db.conn.QueryRow("SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, floor).Scan(&spent)
 		if err != nil {
 			return nil, err
 		}

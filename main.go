@@ -52,6 +52,16 @@ func main() {
 		}
 	}
 
+	// I3/T212: optional SCOPED service credential for the platform (MP). When set,
+	// it is accepted ONLY for the /api endpoints MP actually calls (see
+	// serviceOrAdminAuth) — never the HTML admin panel. This lets MP stop shipping
+	// the human ADMIN credential in its env. Unset = behaviour unchanged.
+	svcUser := os.Getenv("SERVICE_USERNAME")
+	svcPass := os.Getenv("SERVICE_PASSWORD")
+	if svcUser != "" && svcPass != "" {
+		log.Printf("[AUTH] Scoped service credential enabled for /api/{users,keys,logs,stats,plans,settings,health}.")
+	}
+
 	mux := http.NewServeMux()
 
 	// Dynamic handler wrappers so we can register paths immediately at startup
@@ -193,7 +203,7 @@ func main() {
 	// Instantiate actual sub-routers now that DB is connected
 	apiMux := http.NewServeMux()
 	admin.RegisterRoutes(apiMux, database)
-	apiMuxHandler = basicAuth(adminUser, adminPass, apiMux)
+	apiMuxHandler = serviceOrAdminAuth(adminUser, adminPass, svcUser, svcPass, apiMux)
 
 	adminMux := http.NewServeMux()
 	adminMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -482,6 +492,57 @@ func basicAuth(username, password string, next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// serviceAllowlist is the set of /api path prefixes the platform (MP) uses. The
+// scoped SERVICE credential is accepted only for these; the human ADMIN
+// credential is accepted everywhere.
+var serviceAllowlist = []string{
+	"/api/users", // users CRUD + /api/users/topups + /api/users/reset-usage
+	"/api/keys",  // key issuance / rotation / delete
+	"/api/logs",  // usage reads
+	"/api/stats", // dashboard stats
+	"/api/plans", // plan reads
+	"/api/settings",
+	"/api/health",
+}
+
+func servicePathAllowed(p string) bool {
+	for _, pref := range serviceAllowlist {
+		if p == pref || strings.HasPrefix(p, pref+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// serviceOrAdminAuth accepts the full ADMIN credential for any request, and —
+// when a SERVICE credential is configured — also accepts it, but only for the
+// allowlisted platform endpoints. Both comparisons are constant-time. When no
+// service credential is set this behaves exactly like basicAuth(admin).
+func serviceOrAdminAuth(adminUser, adminPass, svcUser, svcPass string, next http.Handler) http.Handler {
+	svcEnabled := svcUser != "" && svcPass != ""
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if ok {
+			adminOK := subtle.ConstantTimeCompare([]byte(u), []byte(adminUser)) == 1 &&
+				subtle.ConstantTimeCompare([]byte(p), []byte(adminPass)) == 1
+			if adminOK {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if svcEnabled {
+				svcOK := subtle.ConstantTimeCompare([]byte(u), []byte(svcUser)) == 1 &&
+					subtle.ConstantTimeCompare([]byte(p), []byte(svcPass)) == 1
+				if svcOK && servicePathAllowed(r.URL.Path) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="Admin Area"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	})
 }
 
