@@ -94,9 +94,15 @@ func modelSupportsThinking(targetModel string) bool {
 // vision model with one of these substrings makes routing pick it up
 // automatically; e.g. gemma-4-vision → google/gemma-4-31b-it:free (OpenRouter).
 func modelMatchesVision(m *db.Model) bool {
+	// The operator-set flag is authoritative — a vision model with ANY name is
+	// routed correctly once flagged.
+	if m.SupportsVision {
+		return true
+	}
+	// Fallback heuristic for rows that predate the flag / were never flagged.
 	nameLower := strings.ToLower(m.Name)
 	targetLower := strings.ToLower(m.TargetModel)
-	for _, kw := range []string{"gpt-4o", "claude-3-5-sonnet", "vision", "gemini", "gemma"} {
+	for _, kw := range []string{"gpt-4o", "claude-3-5-sonnet", "vision", "-vl", "gemini", "gemma", "pixtral", "llava"} {
 		if strings.Contains(nameLower, kw) || strings.Contains(targetLower, kw) {
 			return true
 		}

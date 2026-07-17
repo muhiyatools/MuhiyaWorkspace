@@ -277,6 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('model-type').value = 'llm';
         document.getElementById('model-price-minute').value = '';
         document.getElementById('model-transcribe').checked = false;
+        document.getElementById('model-supports-vision').checked = false;
         toggleModelTypeFields();
         document.getElementById('model-status-group').style.display = 'none';
         document.getElementById('model-modal-title').innerText = "Define Model Mapping";
@@ -407,6 +408,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const model_type = document.getElementById('model-type').value || 'llm';
         const price_per_minute = parseFloat(document.getElementById('model-price-minute').value) || 0.0;
         const transcribe = document.getElementById('model-transcribe').checked;
+        const supports_vision = document.getElementById('model-supports-vision').checked;
         const inCost = parseFloat(document.getElementById('model-cost-in').value) || 0;
         const outCost = parseFloat(document.getElementById('model-cost-out').value) || 0;
         const readCost = parseFloat(document.getElementById('model-cost-read').value) || 0;
@@ -432,7 +434,8 @@ document.addEventListener('DOMContentLoaded', () => {
             owned_by,
             context_window,
             max_output_tokens,
-            description
+            description,
+            supports_vision
         };
 
         const method = id ? 'PUT' : 'POST';
@@ -1066,6 +1069,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-type').value = m.model_type || 'llm';
             document.getElementById('model-price-minute').value = m.price_per_minute || 0.0;
             document.getElementById('model-transcribe').checked = !!m.transcribe;
+            document.getElementById('model-supports-vision').checked = !!m.supports_vision;
             toggleModelTypeFields();
             document.getElementById('model-cost-in').value = m.input_cost_per_million;
             document.getElementById('model-cost-out').value = m.output_cost_per_million;

@@ -103,7 +103,11 @@ type Model struct {
 	DisplayName              string    `json:"display_name"`
 	Description              string    `json:"description"`
 	OwnedBy                  string    `json:"owned_by"`
-	CreatedAt                time.Time `json:"created_at"`
+	// SupportsVision is the operator-set flag that a model accepts image input.
+	// It is the source of truth for vision routing (the name heuristic is only a
+	// fallback), so a vision model with any name is routed correctly.
+	SupportsVision bool      `json:"supports_vision"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type RequestLog struct {
@@ -890,7 +894,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '')
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE)
 		FROM models
 		WHERE status = 'active' AND (name = $1 OR id = $1 OR lower(display_name) = lower($1))
 		ORDER BY (name = $1) DESC, (id = $1) DESC
@@ -898,7 +902,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -914,12 +918,12 @@ func (db *DB) GetModel(id string) (*Model, error) {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '') 
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE) 
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -934,7 +938,7 @@ func (db *DB) ListModels() ([]Model, error) {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '') 
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE) 
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -947,7 +951,7 @@ func (db *DB) ListModels() ([]Model, error) {
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision)
 		if err != nil {
 			return nil, err
 		}
@@ -964,15 +968,15 @@ func (db *DB) CreateModel(m Model) error {
 		m.ModelType = "llm"
 	}
 	_, err := db.conn.Exec(`INSERT INTO models (
-		id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
+		id, name, provider_id, target_model, input_cost_per_million,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
 		routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
-		display_name, description, owned_by
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+		display_name, description, owned_by, supports_vision
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
 		m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
-		m.DisplayName, m.Description, m.OwnedBy)
+		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision)
 	return err
 }
 
@@ -983,15 +987,15 @@ func (db *DB) UpdateModel(m Model) error {
 	if m.ModelType == "" {
 		m.ModelType = "llm"
 	}
-	_, err := db.conn.Exec(`UPDATE models SET name = $1, provider_id = $2, target_model = $3, 
-		input_cost_per_million = $4, output_cost_per_million = $5, 
+	_, err := db.conn.Exec(`UPDATE models SET name = $1, provider_id = $2, target_model = $3,
+		input_cost_per_million = $4, output_cost_per_million = $5,
 		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9,
 		model_type = $10, price_per_minute = $11, transcribe = $12, context_window = $13, max_output_tokens = $14,
-		display_name = $15, description = $16, owned_by = $17 WHERE id = $18`,
+		display_name = $15, description = $16, owned_by = $17, supports_vision = $18 WHERE id = $19`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
 		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType,
 		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
-		m.OwnedBy, m.ID)
+		m.OwnedBy, m.SupportsVision, m.ID)
 	return err
 }
 
