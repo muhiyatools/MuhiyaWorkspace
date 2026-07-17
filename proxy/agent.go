@@ -104,6 +104,13 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 	sourcesSkill := h.loadSearchSourcesSkill()
 	messages := injectToolGuidance(oaiReq.Messages, sourcesSkill)
+	// Text-only targets must never receive image parts: DeepSeek's API accepts
+	// text content only and 400s on image_url parts, so an image anywhere in a
+	// conversation's history would break every later turn on an explicit
+	// text model. Replaced with a stable text note. (Router-selected vision
+	// requests keep their images — requestNeedsVision routes them to a
+	// vision-capable model.)
+	messages = stripUnsupportedImageParts(messages, model)
 
 	// Set up the SSE stream once.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -245,12 +252,14 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		totalInput = promptTokens
 	}
 	reqLog.StatusCode = http.StatusOK
+	failedWithNoOutput := false
 	if streamError != "" {
 		reqLog.ErrorMessage = streamError
 		// Honest status: a turn error that produced no output is a real failure,
 		// not "200 Primary Succeeded". Surfaces truthfully in the admin log.
 		if totalOutput == 0 {
 			reqLog.StatusCode = http.StatusBadGateway
+			failedWithNoOutput = true
 		}
 	}
 	reqLog.InputTokens = totalInput
@@ -259,7 +268,13 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	if cacheMissReported {
 		reqLog.CacheMissTokens = &totalCacheMiss
 	}
-	reqLog.Cost = calculateCost(model, totalInput, totalOutput, totalCacheRead, 0)
+	// A rejected request (4xx/429 upstream, zero output) costs the platform
+	// nothing at the provider — never bill the user's credits for it.
+	if failedWithNoOutput {
+		reqLog.Cost = 0
+	} else {
+		reqLog.Cost = calculateCost(model, totalInput, totalOutput, totalCacheRead, 0)
+	}
 	reqLog.LatencyMS = int(time.Since(startTime).Milliseconds())
 	h.saveRequestLog(reqLog)
 	h.limiter.RecordTokens(reqLog.VirtualKeyID, totalOutput)
@@ -307,6 +322,54 @@ func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel st
 		return nil, nil, complexity, nil, fmt.Errorf("provider for model '%s' is unavailable", model.Name)
 	}
 	return model, provider, complexity, fallbacks, nil
+}
+
+// stripUnsupportedImageParts removes image_url content parts from every message
+// when the target model cannot read images, replacing them with a short text
+// note so the model knows something was omitted. Text-only providers (DeepSeek)
+// reject image parts outright with a 400, which would otherwise permanently
+// break any conversation that ever contained an image. Vision-capable targets
+// get the messages back untouched.
+func stripUnsupportedImageParts(messages []OpenAIMessage, model *db.Model) []OpenAIMessage {
+	if model == nil || modelMatchesVision(model) {
+		return messages
+	}
+	out := make([]OpenAIMessage, len(messages))
+	copy(out, messages)
+	for i := range out {
+		arr, ok := out[i].Content.([]interface{})
+		if !ok {
+			continue
+		}
+		dropped := 0
+		kept := make([]interface{}, 0, len(arr))
+		for _, item := range arr {
+			if m, isMap := item.(map[string]interface{}); isMap && m["type"] == "image_url" {
+				dropped++
+				continue
+			}
+			kept = append(kept, item)
+		}
+		if dropped == 0 {
+			continue
+		}
+		note := "[image omitted — this model reads text only]"
+		appended := false
+		for _, item := range kept {
+			if m, isMap := item.(map[string]interface{}); isMap && m["type"] == "text" {
+				if txt, isStr := m["text"].(string); isStr {
+					m["text"] = txt + "\n" + note
+					appended = true
+					break
+				}
+			}
+		}
+		if !appended {
+			kept = append(kept, map[string]interface{}{"type": "text", "text": note})
+		}
+		out[i].Content = kept
+	}
+	return out
 }
 
 func requestNeedsVision(messages []OpenAIMessage) bool {
