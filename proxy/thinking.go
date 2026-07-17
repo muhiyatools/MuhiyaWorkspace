@@ -70,6 +70,13 @@ func NormalizeThinkingLevel(value string) string {
 	}
 }
 
+// isOpenRouterBase reports whether an upstream base URL is OpenRouter, whose
+// OpenAI-compatible API uses the unified `reasoning` field rather than any
+// provider-native thinking parameter.
+func isOpenRouterBase(baseURL string) bool {
+	return strings.Contains(strings.ToLower(baseURL), "openrouter.ai")
+}
+
 func thinkingRank(level string) int {
 	switch level {
 	case ThinkingMinimal:
@@ -220,6 +227,37 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 	family := classifyUpstream(baseURL, targetModel)
 	model := strings.ToLower(targetModel)
 	rank := thinkingRank(level)
+
+	// OpenRouter exposes a UNIFIED `reasoning` field and normalizes it to each
+	// underlying provider's native thinking format. The native per-family params
+	// below (enable_thinking, thinking{}, reasoning_effort) are NOT valid on
+	// OpenRouter's OpenAI-compatible endpoint and make it 400 (e.g. a Qwen model
+	// via OpenRouter with thinking On/Off). So whenever the upstream is
+	// OpenRouter we speak `reasoning` and let it translate — this is what makes
+	// "add ANY OpenRouter model and thinking just works" actually true.
+	if isOpenRouterBase(baseURL) {
+		delete(bodyMap, "reasoning_effort")
+		delete(bodyMap, "thinking")
+		delete(bodyMap, "enable_thinking")
+		if level == "" {
+			return "" // no effort resolved → leave the model's own default
+		}
+		var effort string
+		switch rank {
+		case 0:
+			effort = "none" // explicit off/minimal → suppress reasoning
+		case 1:
+			effort = "low"
+		case 2:
+			effort = "medium"
+		case 4:
+			effort = "xhigh"
+		default:
+			effort = "high"
+		}
+		bodyMap["reasoning"] = map[string]interface{}{"effort": effort}
+		return effort
+	}
 
 	// DeepSeek is normalized whenever an effort level IS resolved: the
 	// client's raw reasoning_effort/thinking are stripped and re-emitted in
