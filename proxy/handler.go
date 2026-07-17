@@ -560,6 +560,9 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	var fallbackModels []*db.Model
 	var err error
 	complexity := "direct"
+	// Sticky key + repin lifecycle: set AFTER a candidate succeeds, evict on
+	// total failure, so a conversation is never trapped on a broken model.
+	var stKey string
 
 	if isRouterRequest {
 		complexity = AnalyzePromptComplexity(oaiReq.Messages)
@@ -593,16 +596,30 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		// would wipe the whole cached prefix for a request that could have
 		// reused it. A client that sends X-Muhiya-Session pins the model for
 		// the session's lifetime; without the header, routing is unchanged.
-		stKey := stickyKeyFor(key.ID, r.Header.Get(SessionHeader))
+		stKey = stickyKeyFor(key.ID, r.Header.Get(SessionHeader))
 		if pinnedID, ok := h.sticky.get(stKey); ok {
-			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil && pinned.Status == "active" {
-				if pinned.ID != targetModel.ID {
-					log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
+			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil {
+				// Reuse the pin only if it is still ELIGIBLE for this request:
+				// active, vision-capable when an image is present, and not a free
+				// (rate-limited) model on a text turn. Otherwise keep the fresh
+				// route (preferPaid already made it paid/vision-correct) and let
+				// it repin after success — this self-heals sessions previously
+				// pinned to a broken/free model, with no 24h TTL wait.
+				eligible := pinned.Status == "active" &&
+					(!needsVision || modelMatchesVision(pinned)) &&
+					(needsVision || !modelIsFree(pinned))
+				if eligible {
+					if pinned.ID != targetModel.ID {
+						log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
+					}
+					targetModel = pinned
+				} else {
+					log.Printf("[ROUTER-STICKY] pinned model %s ineligible (vision=%v free=%v); re-routing to %s", pinned.Name, needsVision, modelIsFree(pinned), targetModel.Name)
 				}
-				targetModel = pinned
 			}
 		}
-		h.sticky.set(stKey, targetModel.ID)
+		// NOTE: the pin is set AFTER a candidate succeeds (see end of the
+		// candidates loop), not here — so a failed model is never pinned.
 
 		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needsVision)
 		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, vision: %v) with %d fallback(s)", targetModel.Name, complexity, needsVision, len(fallbackModels))
@@ -722,6 +739,10 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		// Check if request was successful
 		if bufW.statusCode > 0 && bufW.statusCode < 400 {
 			success = true
+			// Pin the model that actually SUCCEEDED (not the one first chosen),
+			// so the conversation sticks to a working model and a failed primary
+			// is never pinned.
+			h.sticky.set(stKey, model.ID)
 			if idx > 0 {
 				log.Printf("[ROUTER-SUCCESS] Router failover succeeded with model %s on attempt %d", model.Name, idx+1)
 			}
@@ -731,9 +752,13 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		log.Printf("[ROUTER-FAILOVER] Model %s failed (status %d). Trying next candidate...", model.Name, bufW.statusCode)
 	}
 
-	// If all candidates failed, flush the last failure response to the client
-	if !success && lastBuffer != nil {
-		lastBuffer.FlushToActual()
+	// If every candidate failed, evict any stale pin so the next turn routes
+	// fresh, and flush the last failure response to the client.
+	if !success {
+		h.sticky.evict(stKey)
+		if lastBuffer != nil {
+			lastBuffer.FlushToActual()
+		}
 	}
 }
 

@@ -104,6 +104,36 @@ func modelMatchesVision(m *db.Model) bool {
 	return false
 }
 
+// modelIsFree reports a $0 model — a rate-limited specialist (e.g. a free
+// OpenRouter tier), NOT a general route. Without this guard a $0 model wins the
+// cheapest-first price sort and captures ALL traffic (including text), then its
+// free-tier rate limit 429s every request. Free models are reached on demand
+// (e.g. the free Gemma vision model for image input), never as the default.
+func modelIsFree(m *db.Model) bool {
+	return m.InputCostPerMillion == 0 && m.OutputCostPerMillion == 0
+}
+
+// preferPaid drops free models from a candidate set when at least one paid model
+// remains and the request does not need a free-only capability. Vision requests
+// keep free models (that is how the $0 Gemma vision model is intended to be
+// reached). If every candidate is free, the set is returned unchanged so routing
+// never dead-ends.
+func preferPaid(candidates []*db.Model, needsVision bool) []*db.Model {
+	if needsVision {
+		return candidates
+	}
+	paid := make([]*db.Model, 0, len(candidates))
+	for _, m := range candidates {
+		if !modelIsFree(m) {
+			paid = append(paid, m)
+		}
+	}
+	if len(paid) > 0 {
+		return paid
+	}
+	return candidates
+}
+
 func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkingRequested bool) (*db.Model, error) {
 	models, err := h.db.ListModels()
 	if err != nil {
@@ -173,6 +203,10 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 		return nil, fmt.Errorf("no active models available for routing")
 	}
 
+	// Keep free models out of general (non-vision) routing when a paid model is
+	// available, so a $0 rate-limited model never becomes the default route.
+	candidates = preferPaid(candidates, needsVision)
+
 	// Sort candidates by price (cheapest first) to guarantee credit optimization!
 	for i := 0; i < len(candidates); i++ {
 		for j := i + 1; j < len(candidates); j++ {
@@ -205,6 +239,10 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 			fallbacks = append(fallbacks, m)
 		}
 	}
+
+	// A text request must never fail over INTO a free (rate-limited) model when a
+	// paid alternative exists; a vision request keeps free vision models.
+	fallbacks = preferPaid(fallbacks, needsVision)
 
 	// Sort fallbacks so that cheaper ones are tried first (smart credit usage!)
 	for i := 0; i < len(fallbacks); i++ {

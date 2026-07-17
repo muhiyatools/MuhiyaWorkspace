@@ -70,6 +70,18 @@ func (s *modelSticky) get(key string) (string, bool) {
 	return e.modelID, true
 }
 
+// evict removes a session's pin so the next request in that conversation routes
+// fresh. Called when the pinned model failed (e.g. a free-tier 429) so a session
+// is never trapped on a broken model for the 24h TTL.
+func (s *modelSticky) evict(key string) {
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.entries, key)
+	s.mu.Unlock()
+}
+
 func (s *modelSticky) set(key, modelID string) {
 	if key == "" || modelID == "" {
 		return

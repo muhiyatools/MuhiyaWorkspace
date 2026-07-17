@@ -892,8 +892,8 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, '')
 		FROM models
-		WHERE status = 'active' AND (name = $1 OR lower(display_name) = lower($1))
-		ORDER BY (name = $1) DESC
+		WHERE status = 'active' AND (name = $1 OR id = $1 OR lower(display_name) = lower($1))
+		ORDER BY (name = $1) DESC, (id = $1) DESC
 		LIMIT 1`, normalizedName).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,

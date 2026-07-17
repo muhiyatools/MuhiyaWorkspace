@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -56,7 +57,7 @@ func (h *ProxyHandler) shouldRunAgentLoop(r *http.Request, oaiReq *OpenAIRequest
 // false so the caller can fall back to the standard proxy path.
 func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, oaiReq *OpenAIRequest, key *db.VirtualKey, settings ToolSettings) (handled bool) {
 	thinkingLevel := ResolveThinkingLevel(r, oaiReq.ReasoningEffort)
-	model, provider, complexity, err := h.resolveAgentModel(oaiReq, thinkingLevel)
+	model, provider, complexity, fallbacks, err := h.resolveAgentModel(oaiReq, thinkingLevel)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
 		return true
@@ -129,6 +130,26 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		// turn to turn. The single-search rule is now enforced by declining
 		// a repeat call (below) instead of hiding the tool definition.
 		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, tools, thinkingLevel)
+		// First-turn failover: streamOpenAITurn only returns an error BEFORE any
+		// byte is streamed (build/connect/status>=400), so retrying with the next
+		// candidate is invisible to the client. Once text has streamed, we can't
+		// un-stream, so failover applies to the first turn only. This rescues a
+		// primary that 429s (e.g. a free-tier vision model) without the user
+		// seeing "No response received".
+		for err != nil && iter == 0 && len(fallbacks) > 0 {
+			next := fallbacks[0]
+			fallbacks = fallbacks[1:]
+			np, pErr := h.db.GetProvider(next.ProviderID)
+			if pErr != nil || np == nil || np.Status != "active" {
+				continue
+			}
+			log.Printf("[AGENT-FAILOVER] model %s failed (%v); retrying with %s", model.Name, err, next.Name)
+			model, provider = next, np
+			reqLog.ModelID = model.ID
+			reqLog.ProviderID = provider.ID
+			reqLog.FailoverAttempts++
+			turn, err = h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, tools, thinkingLevel)
+		}
 		totalInput += turn.usage.PromptTokens
 		totalOutput += turn.usage.CompletionTokens
 		totalCacheRead += turn.usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
@@ -226,6 +247,11 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	reqLog.StatusCode = http.StatusOK
 	if streamError != "" {
 		reqLog.ErrorMessage = streamError
+		// Honest status: a turn error that produced no output is a real failure,
+		// not "200 Primary Succeeded". Surfaces truthfully in the admin log.
+		if totalOutput == 0 {
+			reqLog.StatusCode = http.StatusBadGateway
+		}
 	}
 	reqLog.InputTokens = totalInput
 	reqLog.OutputTokens = totalOutput
@@ -246,9 +272,10 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 // resolveAgentModel picks the model + provider for the request, honoring the
 // router alias exactly like serveOpenAIClient does.
-func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel string) (*db.Model, *db.Provider, string, error) {
+func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel string) (*db.Model, *db.Provider, string, []*db.Model, error) {
 	complexity := "direct"
 	var model *db.Model
+	var fallbacks []*db.Model
 	var err error
 
 	if oaiReq.Model == "muhiya-ai-router" {
@@ -258,26 +285,28 @@ func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel st
 		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
 		model, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
 		if err != nil {
-			return nil, nil, complexity, err
+			return nil, nil, complexity, nil, err
 		}
+		// Failover candidates for the agent loop (free-safe per preferPaid).
+		fallbacks, _ = h.GetFallbackModels(model.ID, needsVision)
 	} else {
 		model, err = h.db.GetModelByName(oaiReq.Model)
 		if err != nil {
-			return nil, nil, complexity, err
+			return nil, nil, complexity, nil, err
 		}
 		if model == nil {
-			return nil, nil, complexity, fmt.Errorf("model '%s' not found or inactive", oaiReq.Model)
+			return nil, nil, complexity, nil, fmt.Errorf("model '%s' not found or inactive", oaiReq.Model)
 		}
 	}
 
 	provider, err := h.db.GetProvider(model.ProviderID)
 	if err != nil {
-		return nil, nil, complexity, err
+		return nil, nil, complexity, nil, err
 	}
 	if provider == nil || provider.Status != "active" {
-		return nil, nil, complexity, fmt.Errorf("provider for model '%s' is unavailable", model.Name)
+		return nil, nil, complexity, nil, fmt.Errorf("provider for model '%s' is unavailable", model.Name)
 	}
-	return model, provider, complexity, nil
+	return model, provider, complexity, fallbacks, nil
 }
 
 func requestNeedsVision(messages []OpenAIMessage) bool {
@@ -341,6 +370,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	setOpenRouterHeaders(req, provider, r)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
