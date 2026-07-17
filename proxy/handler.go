@@ -964,6 +964,21 @@ func sanitizeUpstreamIdentity(bodyMap map[string]interface{}, family upstreamFam
 	}
 }
 
+// setOpenRouterHeaders adds OpenRouter-specific request headers when the
+// upstream provider is OpenRouter: attribution (rankings) and X-Session-Id,
+// which pins the same underlying provider across a conversation so OpenRouter's
+// prompt cache stays warm. No-op for every other provider.
+func setOpenRouterHeaders(req *http.Request, provider *db.Provider, r *http.Request) {
+	if provider == nil || provider.ID != "openrouter" {
+		return
+	}
+	req.Header.Set("HTTP-Referer", "https://muhiya.com")
+	req.Header.Set("X-Title", "Muhiya")
+	if sess := r.Header.Get("X-Muhiya-Session"); sess != "" {
+		req.Header.Set("X-Session-Id", sess)
+	}
+}
+
 func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Request, origBody []byte, model *db.Model, provider *db.Provider, log db.RequestLog, startTime time.Time) {
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(origBody, &bodyMap)
@@ -997,6 +1012,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	setOpenRouterHeaders(req, provider, r)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -1039,10 +1055,12 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			completionTokens := estimateTokens(textAccumulator.String())
 			inputTokens := log.InputTokens
 			cacheRead := 0
+			cacheWrite := 0
 			if finalUsage != nil {
 				inputTokens = finalUsage.PromptTokens
 				completionTokens = finalUsage.CompletionTokens
 				cacheRead = finalUsage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
+				cacheWrite = finalUsage.CacheWriteTokensReported()
 				log.CacheMissTokens = finalUsage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 			}
 			log.UsageEstimated = finalUsage == nil
@@ -1050,7 +1068,8 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.InputTokens = inputTokens
 			log.OutputTokens = completionTokens
 			log.CacheReadTokens = cacheRead
-			log.Cost = calculateCost(model, inputTokens, completionTokens, cacheRead, 0)
+			log.CacheWriteTokens = cacheWrite
+			log.Cost = calculateCost(model, inputTokens, completionTokens, cacheRead, cacheWrite)
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
@@ -1103,10 +1122,12 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		var oaiResp OpenAIResponse
 		completionTokens := 0
 		cacheRead := 0
+		cacheWrite := 0
 		if err := json.Unmarshal(respBody, &oaiResp); err == nil && oaiResp.Usage.TotalTokens > 0 {
 			log.InputTokens = oaiResp.Usage.PromptTokens
 			completionTokens = oaiResp.Usage.CompletionTokens
 			cacheRead = oaiResp.Usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
+			cacheWrite = oaiResp.Usage.CacheWriteTokensReported()
 			log.CacheMissTokens = oaiResp.Usage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 			log.UsageEstimated = false
 		} else {
@@ -1119,7 +1140,8 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		log.StatusCode = http.StatusOK
 		log.OutputTokens = completionTokens
 		log.CacheReadTokens = cacheRead
-		log.Cost = calculateCost(model, log.InputTokens, completionTokens, cacheRead, 0)
+		log.CacheWriteTokens = cacheWrite
+		log.Cost = calculateCost(model, log.InputTokens, completionTokens, cacheRead, cacheWrite)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
 		h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
@@ -1292,6 +1314,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	setOpenRouterHeaders(req, provider, r)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

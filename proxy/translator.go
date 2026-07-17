@@ -73,6 +73,9 @@ type OpenAIRequest struct {
 
 type PromptTokensDetail struct {
 	CachedTokens int `json:"cached_tokens"`
+	// OpenRouter reports cache-write (creation) tokens here for providers that
+	// charge for writes (e.g. Anthropic/Qwen). Absent for auto-caching providers.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type OpenAIUsage struct {
@@ -86,6 +89,19 @@ type OpenAIUsage struct {
 	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
 	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
 	CacheWriteTokens      int `json:"-"` // internal tracking
+}
+
+// CacheWriteTokensReported returns cache-write (creation) tokens the upstream
+// reported, whether under prompt_tokens_details (OpenRouter) or the internal
+// field. 0 for auto-caching providers that don't bill writes.
+func (u *OpenAIUsage) CacheWriteTokensReported() int {
+	if u == nil {
+		return 0
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CacheWriteTokens > 0 {
+		return u.PromptTokensDetails.CacheWriteTokens
+	}
+	return u.CacheWriteTokens
 }
 
 // CacheReadTokens returns the prompt tokens served from the provider's

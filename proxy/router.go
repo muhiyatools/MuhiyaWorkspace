@@ -88,6 +88,22 @@ func modelSupportsThinking(targetModel string) bool {
 }
 
 // RouteToModel resolves a complexity level, optional vision requirement, and thinking preference to the cheapest active model
+// modelMatchesVision reports whether a model can accept image input. It keys on
+// the virtual name OR the provider target model containing a known vision
+// keyword (gpt-4o, claude-3-5-sonnet, vision, gemini, gemma). Naming a new
+// vision model with one of these substrings makes routing pick it up
+// automatically; e.g. gemma-4-vision → google/gemma-4-31b-it:free (OpenRouter).
+func modelMatchesVision(m *db.Model) bool {
+	nameLower := strings.ToLower(m.Name)
+	targetLower := strings.ToLower(m.TargetModel)
+	for _, kw := range []string{"gpt-4o", "claude-3-5-sonnet", "vision", "gemini", "gemma"} {
+		if strings.Contains(nameLower, kw) || strings.Contains(targetLower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkingRequested bool) (*db.Model, error) {
 	models, err := h.db.ListModels()
 	if err != nil {
@@ -102,14 +118,8 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 		if tierCheck && m.RoutingTier != complexity {
 			return false
 		}
-		if needsVision {
-			nameLower := strings.ToLower(m.Name)
-			if !strings.Contains(nameLower, "gpt-4o") &&
-				!strings.Contains(nameLower, "claude-3-5-sonnet") &&
-				!strings.Contains(nameLower, "vision") &&
-				!strings.Contains(nameLower, "gemini") {
-				return false
-			}
+		if needsVision && !modelMatchesVision(m) {
+			return false
 		}
 		return modelSupportsThinking(m.TargetModel) == thinkingRequested
 	}
@@ -128,14 +138,8 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 		for i := range models {
 			m := &models[i]
 			if m.Status == "active" && m.RoutingTier == complexity && !m.Transcribe {
-				if needsVision {
-					nameLower := strings.ToLower(m.Name)
-					if !strings.Contains(nameLower, "gpt-4o") &&
-						!strings.Contains(nameLower, "claude-3-5-sonnet") &&
-						!strings.Contains(nameLower, "vision") &&
-						!strings.Contains(nameLower, "gemini") {
-						continue
-					}
+				if needsVision && !modelMatchesVision(m) {
+					continue
 				}
 				candidates = append(candidates, m)
 			}
@@ -157,14 +161,8 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 		for i := range models {
 			m := &models[i]
 			if m.Status == "active" && !m.Transcribe {
-				if needsVision {
-					nameLower := strings.ToLower(m.Name)
-					if !strings.Contains(nameLower, "gpt-4o") &&
-						!strings.Contains(nameLower, "claude-3-5-sonnet") &&
-						!strings.Contains(nameLower, "vision") &&
-						!strings.Contains(nameLower, "gemini") {
-						continue
-					}
+				if needsVision && !modelMatchesVision(m) {
+					continue
 				}
 				candidates = append(candidates, m)
 			}
@@ -201,14 +199,8 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 	for i := range models {
 		m := &models[i]
 		if m.Status == "active" && m.ID != excludeModelID && !m.Transcribe {
-			if needsVision {
-				nameLower := strings.ToLower(m.Name)
-				if !strings.Contains(nameLower, "gpt-4o") &&
-					!strings.Contains(nameLower, "claude-3-5-sonnet") &&
-					!strings.Contains(nameLower, "vision") &&
-					!strings.Contains(nameLower, "gemini") {
-					continue
-				}
+			if needsVision && !modelMatchesVision(m) {
+				continue
 			}
 			fallbacks = append(fallbacks, m)
 		}
