@@ -1951,7 +1951,31 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		h.internalErrorResponse(w, "database error", err)
 		return
 	}
+	// saveTranscriptionFailure records a failed transcription so it is VISIBLE in
+	// the admin logs (previously only successes were logged, so a misconfigured
+	// or upstream-rejected transcription vanished silently). Cost is always 0 on
+	// failure — the provider produced nothing.
+	saveTranscriptionFailure := func(status int, msg string, started time.Time) {
+		h.saveRequestLog(db.RequestLog{
+			ID:             "log-" + uuid.New().String(),
+			VirtualKeyID:   key.ID,
+			UserID:         key.UserID,
+			ModelID:        targetModel.ID,
+			ProviderID:     targetModel.ProviderID,
+			RequestPath:    "/v1/audio/transcriptions",
+			StatusCode:     status,
+			Cost:           0,
+			LatencyMS:      int(time.Since(started).Milliseconds()),
+			ErrorMessage:   msg,
+			ClientApp:      getClientAppName(r),
+			RequestedModel: targetModel.Name,
+			Complexity:     "direct",
+			CreatedAt:      time.Now(),
+		})
+	}
+
 	if provider == nil || provider.Status != "active" {
+		saveTranscriptionFailure(http.StatusBadRequest, fmt.Sprintf("provider '%s' is inactive or missing", targetModel.ProviderID), time.Now())
 		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("Provider '%s' is inactive or missing", targetModel.ProviderID), "invalid_request_error")
 		return
 	}
@@ -2015,6 +2039,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		saveTranscriptionFailure(http.StatusBadGateway, "connection to upstream failed: "+err.Error(), startTime)
 		h.writeError(w, http.StatusBadGateway, "Connection to upstream failed: "+err.Error(), "api_error")
 		return
 	}
@@ -2029,6 +2054,13 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	latencyMs := int(time.Since(startTime).Milliseconds())
 
 	if resp.StatusCode >= 400 {
+		// Log the upstream rejection (e.g. an unkeyed provider's 401, or a 429)
+		// so the failure is visible in the admin logs with its real cause.
+		upstreamMsg := string(respBody)
+		if len(upstreamMsg) > 500 {
+			upstreamMsg = upstreamMsg[:500]
+		}
+		saveTranscriptionFailure(resp.StatusCode, "upstream returned status "+strconv.Itoa(resp.StatusCode)+": "+upstreamMsg, startTime)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
