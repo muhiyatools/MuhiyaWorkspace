@@ -1037,6 +1037,15 @@ func (db *DB) SetSetting(key, value string) error {
 // --- Logging & Budget Queries ---
 
 func (db *DB) InsertRequestLog(log RequestLog) error {
+	// Every budget path sums this column (GetUserSpendingInWindow and friends), so
+	// one negative row subtracts from a user's measured spend and hands them budget
+	// they never paid for. No caller has a legitimate negative: calculateCost floors
+	// every component at zero. Reject rather than clamp — a clamped row would
+	// silently persist a forged billing record.
+	if log.Cost < 0 {
+		return fmt.Errorf("refusing to insert request log %s: negative cost %.6f", log.ID, log.Cost)
+	}
+
 	var modelID, providerID interface{}
 	if log.ModelID != "" {
 		modelID = log.ModelID

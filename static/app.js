@@ -460,8 +460,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         row.innerHTML = `
-            <input type="hidden" class="plan-budget-id" value="${data.id || ''}">
-            <input type="text" placeholder="Label" class="plan-budget-name" value="${data.name || ''}" style="flex: 2; font-size: 0.85rem;" required>
+            <input type="hidden" class="plan-budget-id" value="${escapeHtml(data.id || '')}">
+            <input type="text" placeholder="Label" class="plan-budget-name" value="${escapeHtml(data.name || '')}" style="flex: 2; font-size: 0.85rem;" required>
             <input type="number" placeholder="Value" class="plan-budget-duration" value="${val || ''}" style="flex: 1; font-size: 0.85rem;" required>
             <select class="plan-budget-unit" style="flex: 1.2; font-size: 0.85rem;" required>
                 <option value="hours" ${unit === 'hours' ? 'selected' : ''}>Hours</option>
@@ -642,8 +642,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.className = 'budget-progress-card';
                 card.innerHTML = `
                     <div class="budget-progress-header">
-                        <span class="budget-user-name">${u.name}</span>
-                        <span class="budget-window-label">${bu.name}</span>
+                        <span class="budget-user-name">${escapeHtml(u.name)}</span>
+                        <span class="budget-window-label">${escapeHtml(bu.name)}</span>
                     </div>
                     <div class="budget-progress-bar-container">
                         <div class="budget-progress-bar ${colorClass}" style="width: ${percentage}%"></div>
@@ -675,7 +675,7 @@ document.addEventListener('DOMContentLoaded', () => {
             state.users = users;
 
             const select = document.getElementById('user-plan-id');
-            select.innerHTML = plans.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+            select.innerHTML = plans.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
 
             if (!users || users.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="8" class="text-muted text-center" style="text-align: center;">No users registered yet.</td></tr>`;
@@ -701,7 +701,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         return `
                             <div style="margin-bottom: 0.5rem; min-width: 180px;">
                                 <div style="display: flex; justify-content: space-between; font-size: 0.75rem; font-weight: 600; margin-bottom: 2px;">
-                                    <span style="color:var(--text-muted);">${bu.name}</span>
+                                    <span style="color:var(--text-muted);">${escapeHtml(bu.name)}</span>
                                     <span>$${spent.toFixed(4)} / $${bu.budget_usd.toFixed(2)}</span>
                                 </div>
                                 <div style="background: var(--panel-border); height: 6px; border-radius: 3px; overflow: hidden; width: 100%;">
@@ -737,9 +737,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 return `
                     <tr>
-                        <td><strong>${u.name}</strong></td>
-                        <td><code>${u.email}</code></td>
-                        <td><span class="badge">${u.plan_id}</span></td>
+                        <td><strong>${escapeHtml(u.name)}</strong></td>
+                        <td><code>${escapeHtml(u.email)}</code></td>
+                        <td><span class="badge">${escapeHtml(u.plan_id)}</span></td>
                         <td>
                             <div style="display: flex; flex-direction: column; gap: 0.25rem;">
                                 ${budgetsHTML}
@@ -748,7 +748,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>
                             ${extraCreditsHTML}
                         </td>
-                        <td><span class="status-pill ${u.status === 'active' ? 'active' : 'suspended'}">${u.status}</span></td>
+                        <td><span class="status-pill ${u.status === 'active' ? 'active' : 'suspended'}">${escapeHtml(u.status)}</span></td>
                         <td>${new Date(u.created_at).toLocaleDateString()}</td>
                         <td>
                             <button class="btn btn-secondary btn-sm" onclick="manageUserTopups('${u.id}')" title="Manage Top-ups"><i class="fa-solid fa-coins"></i> Top-ups</button>
@@ -809,7 +809,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 users = users || [];
                 state.users = users;
                 const select = document.getElementById('key-user-id');
-                select.innerHTML = users.map(u => `<option value="${u.id}">${u.name} (${u.email})</option>`).join('');
+                select.innerHTML = users.map(u => `<option value="${escapeHtml(u.id)}">${escapeHtml(u.name)} (${escapeHtml(u.email)})</option>`).join('');
             })
             .catch(err => console.error('Error loading users for key form:', err));
 
@@ -832,15 +832,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 const expDate = k.expires_at ? new Date(k.expires_at).toLocaleDateString() : 'Never';
                 return `
                     <tr>
-                        <td><strong>${k.name}</strong></td>
+                        <td><strong>${escapeHtml(k.name)}</strong></td>
                         <td>
                             <div class="copy-block">
-                                <span>${k.id}</span>
+                                <span>${escapeHtml(k.id)}</span>
                                 <button class="copy-btn" onclick="copyKey('${k.id}', this)"><i class="fa-regular fa-copy"></i></button>
                             </div>
                         </td>
-                        <td><span class="badge" style="background:#27272a;">${ownerName}</span></td>
-                        <td><span class="status-pill ${k.status === 'active' ? 'active' : 'revoked'}">${k.status}</span></td>
+                        <td><span class="badge" style="background:#27272a;">${escapeHtml(ownerName)}</span></td>
+                        <td><span class="status-pill ${k.status === 'active' ? 'active' : 'revoked'}">${escapeHtml(k.status)}</span></td>
                         <td>${expDate}</td>
                         <td>${new Date(k.created_at).toLocaleDateString()}</td>
                         <td>
@@ -896,12 +896,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 tbody.innerHTML = plans.map(p => {
                     const planBudgets = p.budget_windows || [];
-                    const budgetBadges = planBudgets.map(b => `<span class="badge" style="background:rgba(16,185,129,0.05); margin-right:4px;">${b.name}: $${b.budget_usd.toFixed(2)}</span>`).join(' ');
+                    const budgetBadges = planBudgets.map(b => `<span class="badge" style="background:rgba(16,185,129,0.05); margin-right:4px;">${escapeHtml(b.name)}: $${b.budget_usd.toFixed(2)}</span>`).join(' ');
                     
                     return `
                         <tr>
-                            <td><code>${p.id}</code></td>
-                            <td><strong>${p.name}</strong></td>
+                            <td><code>${escapeHtml(p.id)}</code></td>
+                            <td><strong>${escapeHtml(p.name)}</strong></td>
                             <td>${p.rpm_limit > 0 ? p.rpm_limit + ' RPM' : '<span class="text-muted">Unlimited</span>'}</td>
                             <td>${p.tpm_limit > 0 ? p.tpm_limit.toLocaleString() + ' TPM' : '<span class="text-muted">Unlimited</span>'}</td>
                             <td>${budgetBadges ? budgetBadges : '<span class="text-muted">No limits configured</span>'}</td>
@@ -957,7 +957,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 providers = providers || [];
                 state.providers = providers;
                 const select = document.getElementById('model-provider-id');
-                select.innerHTML = providers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+                select.innerHTML = providers.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
 
                 if (!providers || providers.length === 0) {
                     list.innerHTML = `<div class="text-muted" style="grid-column: 1/-1; text-align: center;">No providers connected.</div>`;
@@ -966,12 +966,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 list.innerHTML = providers.map(p => `
                     <div class="provider-card">
                         <div class="provider-card-header">
-                            <span class="provider-title">${p.name}</span>
+                            <span class="provider-title">${escapeHtml(p.name)}</span>
                             <span class="provider-badge ${p.status === 'active' ? 'active' : 'inactive'}">${p.status === 'active' ? 'Active' : 'Inactive'}</span>
                         </div>
                         <div class="provider-meta">
-                            ${p.base_url ? `<span><strong>OpenAI URL:</strong> ${p.base_url}</span>` : ''}
-                            ${p.anthropic_base_url ? `<span><strong>Anthropic URL:</strong> ${p.anthropic_base_url}</span>` : ''}
+                            ${p.base_url ? `<span><strong>OpenAI URL:</strong> ${escapeHtml(p.base_url)}</span>` : ''}
+                            ${p.anthropic_base_url ? `<span><strong>Anthropic URL:</strong> ${escapeHtml(p.anthropic_base_url)}</span>` : ''}
                             <span><strong>Key:</strong> ••••••••••••••••</span>
                         </div>
                         <div class="provider-actions">
@@ -1000,21 +1000,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     return `
                     <tr>
                         <td>
-                            <div style="font-weight: 600;">${m.name}</div>
-                            ${m.display_name ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 1px;">${m.display_name}</div>` : ''}
+                            <div style="font-weight: 600;">${escapeHtml(m.name)}</div>
+                            ${m.display_name ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 1px;">${escapeHtml(m.display_name)}</div>` : ''}
                             ${!isTrans ? `<div style="font-size: 0.68rem; color: var(--text-muted-dark); margin-top: 3px;">Ctx: ${m.context_window ? m.context_window.toLocaleString() : 'N/A'} | Out: ${m.max_output_tokens ? m.max_output_tokens.toLocaleString() : 'N/A'}</div>` : ''}
                         </td>
-                        <td><span class="badge" style="background:#27272a;">${m.provider_id}</span></td>
-                        <td><code>${m.target_model}</code></td>
-                        <td><span class="badge" style="background:${isTrans ? '#0f766e' : '#1e3a8a'};">${(m.model_type || 'llm').toUpperCase()}</span></td>
+                        <td><span class="badge" style="background:#27272a;">${escapeHtml(m.provider_id)}</span></td>
+                        <td><code>${escapeHtml(m.target_model)}</code></td>
+                        <td><span class="badge" style="background:${isTrans ? '#0f766e' : '#1e3a8a'};">${escapeHtml((m.model_type || 'llm').toUpperCase())}</span></td>
                         <td>${m.transcribe ? '<span class="badge" style="background:#b45309;">Yes</span>' : '<span class="text-muted">No</span>'}</td>
                         <td>${isTrans ? `$${(m.price_per_minute || 0).toFixed(4)}` : '-'}</td>
                         <td>${!isTrans ? `$${m.input_cost_per_million.toFixed(4)}` : '-'}</td>
                         <td>${!isTrans ? `$${m.output_cost_per_million.toFixed(4)}` : '-'}</td>
                         <td>${!isTrans ? `$${m.cache_read_cost_per_million.toFixed(4)}` : '-'}</td>
                         <td>${!isTrans ? `$${m.cache_write_cost_per_million.toFixed(4)}` : '-'}</td>
-                        <td><span class="tier-badge ${m.routing_tier || 'none'}" style="font-size: 11px; padding: 2px 6px;">${m.routing_tier ? m.routing_tier.toUpperCase() : 'NONE'}</span></td>
-                        <td><span class="status-pill ${m.status === 'active' ? 'active' : 'inactive'}">${m.status}</span></td>
+                        <td><span class="tier-badge ${escapeHtml(m.routing_tier || 'none')}" style="font-size: 11px; padding: 2px 6px;">${m.routing_tier ? escapeHtml(m.routing_tier.toUpperCase()) : 'NONE'}</span></td>
+                        <td><span class="status-pill ${m.status === 'active' ? 'active' : 'inactive'}">${escapeHtml(m.status)}</span></td>
                         <td>
                             <button class="btn btn-secondary btn-sm" onclick="editModel('${m.id}')"><i class="fa-solid fa-pen"></i> Edit</button>
                             <button class="btn btn-danger btn-sm" onclick="deleteModel('${m.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
@@ -1111,7 +1111,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const currentVal = modelFilterSelect.value;
                 const models = [...new Set(logs.map(l => l.model_id))].filter(Boolean);
                 modelFilterSelect.innerHTML = '<option value="all">All Models</option>' +
-                    models.map(m => `<option value="${m}">${m}</option>`).join('');
+                    models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
                 modelFilterSelect.value = currentVal;
             }
 
@@ -1219,7 +1219,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const nameObj = settings.find(s => s.key === 'gateway_name');
                 if (nameObj) document.getElementById('setting-gateway-name').value = nameObj.value;
                 const tavilyObj = settings.find(s => s.key === 'tavily_api_key');
-                if (tavilyObj) document.getElementById('setting-tavily-key').value = tavilyObj.value;
+                if (tavilyObj) {
+                    const el = document.getElementById('setting-tavily-key');
+                    el.value = '';
+                    el.placeholder = tavilyObj.has_value ? '•••••••• (configured — leave blank to keep)' : 'tvly-...';
+                }
             })
             .catch(err => console.error("Error loading settings:", err));
 
@@ -1417,8 +1421,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const isRouter = l.requested_model === 'muhiya-ai-router';
         let routerHTML = '';
         if (isRouter) {
-            const complexityBadge = l.complexity ? l.complexity.toUpperCase() : 'UNKNOWN';
-            const compClass = l.complexity || 'simple';
+            const complexityBadge = escapeHtml(l.complexity ? l.complexity.toUpperCase() : 'UNKNOWN');
+            const compClass = escapeHtml(l.complexity || 'simple');
             routerHTML = `
                 <div class="details-section router-info" style="background: rgba(16, 185, 129, 0.03); border: 1px solid rgba(16, 185, 129, 0.15); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1450,9 +1454,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="details-card" style="background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 1rem;">
                     <h4 style="margin-bottom: 0.75rem; border-bottom: 1px solid var(--panel-border); padding-bottom: 0.25rem;">Metadata</h4>
                     <table class="details-subtable" style="width:100%; font-size: 0.8rem; line-height: 1.6;">
-                        <tr><td style="color:var(--text-muted); width:100px;">Log ID:</td><td><small><code>${l.id}</code></small></td></tr>
+                        <tr><td style="color:var(--text-muted); width:100px;">Log ID:</td><td><small><code>${escapeHtml(l.id)}</code></small></td></tr>
                         <tr><td style="color:var(--text-muted);">Timestamp:</td><td>${dateStr}</td></tr>
-                        <tr><td style="color:var(--text-muted);">Virtual Key:</td><td><small><code>${l.virtual_key_id.substring(0,18)}...</code></small></td></tr>
+                        <tr><td style="color:var(--text-muted);">Virtual Key:</td><td><small><code>${escapeHtml(l.virtual_key_id.substring(0,18))}...</code></small></td></tr>
                         <tr><td style="color:var(--text-muted);">User:</td><td><strong>${escapeHtml(ownerName)}</strong></td></tr>
                         <tr><td style="color:var(--text-muted);">Client App:</td><td><code>${escapeHtml(l.client_app || 'API Client')}</code></td></tr>
                         <tr><td style="color:var(--text-muted);">Path:</td><td><code>${escapeHtml(l.request_path)}</code></td></tr>
@@ -1538,15 +1542,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     card.style = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem;';
                     card.innerHTML = `
                         <div style="display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 0.85rem;">
-                            <span>${m.name}</span>
-                            <span class="badge" style="background:#27272a; font-size:9px; padding: 2px 4px; border-radius: 4px; text-transform:none;">${m.provider_id}</span>
+                            <span>${escapeHtml(m.name)}</span>
+                            <span class="badge" style="background:#27272a; font-size:9px; padding: 2px 4px; border-radius: 4px; text-transform:none;">${escapeHtml(m.provider_id)}</span>
                         </div>
                         <div style="display: flex; justify-content: space-between; margin-top: 0.4rem; font-size: 0.75rem; color: var(--text-muted);">
                             <span>In: $${m.input_cost_per_million.toFixed(2)}/1M</span>
                             <span>Out: $${m.output_cost_per_million.toFixed(2)}/1M</span>
                         </div>
                         <div style="font-size: 0.68rem; color: var(--text-muted-dark); margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 3px;">
-                            Target: <code>${m.target_model}</code>
+                            Target: <code>${escapeHtml(m.target_model)}</code>
                         </div>
                     `;
                     

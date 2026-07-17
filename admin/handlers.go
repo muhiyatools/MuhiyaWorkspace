@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/mail"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +120,26 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
 			return
 		}
+		if u.ID != "" && !validID(u.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid user ID")
+			return
+		}
+		if !validName(u.Name) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid name")
+			return
+		}
+		if !validEmail(u.Email) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid email")
+			return
+		}
+		if u.PlanID != "" && !validID(u.PlanID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid plan ID")
+			return
+		}
+		if u.Status != "" && !validStatus(u.Status, "active", "suspended") {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid status")
+			return
+		}
 		if u.ID == "" {
 			u.ID = "user-" + generateRandomString(8)
 		}
@@ -140,6 +162,26 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		if u.ID == "" {
 			api.errorResponse(w, http.StatusBadRequest, "User ID is required")
+			return
+		}
+		if !validID(u.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid user ID")
+			return
+		}
+		if !validName(u.Name) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid name")
+			return
+		}
+		if !validEmail(u.Email) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid email")
+			return
+		}
+		if u.PlanID != "" && !validID(u.PlanID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid plan ID")
+			return
+		}
+		if u.Status != "" && !validStatus(u.Status, "active", "suspended") {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid status")
 			return
 		}
 		existing, err := api.db.GetUser(u.ID)
@@ -333,6 +375,14 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
 			return
 		}
+		if !validName(vk.Name) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid name")
+			return
+		}
+		if !validID(vk.UserID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid user ID")
+			return
+		}
 		// CreateVirtualKey generates both the internal ID and the bearer
 		// token itself (storing only the token's hash); any client-supplied
 		// ID is ignored so a caller can never choose - and thereby learn
@@ -360,6 +410,14 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "Key ID is required")
 			return
 		}
+		if !validID(vk.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid key ID")
+			return
+		}
+		if vk.Status != "" && !validStatus(vk.Status, "active", "revoked") {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid status")
+			return
+		}
 		existing, err := api.db.GetVirtualKeyByID(vk.ID)
 		if err != nil {
 			api.dbErrorResponse(w, err)
@@ -375,6 +433,16 @@ func (api *AdminAPI) handleKeys(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
+			return
+		}
+		// Validate the fields that are about to be persisted (the revoke path
+		// above deletes and carries none of them).
+		if !validName(vk.Name) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid name")
+			return
+		}
+		if !validID(vk.UserID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid user ID")
 			return
 		}
 		if vk.Status == "" {
@@ -592,6 +660,37 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- System Settings Handler ---
+
+// secretSettingKeys is the set of system_settings whose value is a live
+// credential: never serialized on read, honors blank-means-keep on write. Every
+// other setting (gateway_name, theme_accent, ...) round-trips normally.
+var secretSettingKeys = map[string]bool{
+	"tavily_api_key": true,
+	"serper_api_key": true,
+}
+
+// settingView is the browser-safe projection of a system setting: a secret
+// value is never serialized, only whether one is configured. Mirrors
+// providerView above.
+type settingView struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	HasValue bool   `json:"has_value"`
+}
+
+func redactSettings(list []db.SystemSetting) []settingView {
+	out := make([]settingView, 0, len(list))
+	for _, s := range list {
+		hasValue := strings.TrimSpace(s.Value) != ""
+		value := s.Value
+		if secretSettingKeys[s.Key] {
+			value = ""
+		}
+		out = append(out, settingView{Key: s.Key, Value: value, HasValue: hasValue})
+	}
+	return out
+}
+
 func (api *AdminAPI) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -600,7 +699,7 @@ func (api *AdminAPI) handleSettings(w http.ResponseWriter, r *http.Request) {
 			api.dbErrorResponse(w, err)
 			return
 		}
-		api.jsonResponse(w, http.StatusOK, list)
+		api.jsonResponse(w, http.StatusOK, redactSettings(list))
 
 	case http.MethodPost:
 		var s db.SystemSetting
@@ -610,6 +709,13 @@ func (api *AdminAPI) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.Key == "" {
 			api.errorResponse(w, http.StatusBadRequest, "Key is required")
+			return
+		}
+		// A blank incoming secret means "unchanged" (the GET response redacts
+		// it), so keep the stored value instead of wiping it. Non-secret keys
+		// keep their normal set-to-anything behavior.
+		if secretSettingKeys[s.Key] && strings.TrimSpace(s.Value) == "" {
+			api.jsonResponse(w, http.StatusOK, s)
 			return
 		}
 		if err := api.db.SetSetting(s.Key, s.Value); err != nil {
@@ -675,6 +781,60 @@ func (api *AdminAPI) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Helpers ---
+
+// idPattern is the opaque-slug charset every server-generated ID in this file
+// uses (user-<hex>, plan-<hex>, model-<hex>, budget-<hex>, log-<hex>,
+// topup_<base36>, lowercased provider names). A client-chosen ID outside it
+// could break out of the JS-string context the admin panel interpolates it
+// into (onclick="fn('...')") - escaping the panel side does not help, since the
+// HTML parser entity-decodes an attribute before the JS is compiled.
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func validID(s string) bool {
+	return idPattern.MatchString(s)
+}
+
+// validName rejects control characters and the angle brackets that open an HTML
+// tag; the admin panel renders these free-text fields into innerHTML.
+func validName(s string) bool {
+	if s == "" || len(s) > 255 {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == '<' || r == '>' {
+			return false
+		}
+	}
+	return true
+}
+
+// validEmail requires a syntactically real address (net/mail) and bans the
+// angle brackets and control characters a stored-XSS payload would need. The
+// addr.Address == s check rejects the display-name form ParseAddress accepts,
+// e.g. "Alice <a@b.c>".
+func validEmail(s string) bool {
+	if s == "" || len(s) > 255 || strings.ContainsAny(s, "<>") {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	addr, err := mail.ParseAddress(s)
+	return err == nil && addr.Address == s
+}
+
+// validStatus enforces the enums the User/VirtualKey struct comments (and the
+// DB CHECK constraints) already claim but the decode path never checked.
+func validStatus(s string, allowed ...string) bool {
+	for _, a := range allowed {
+		if s == a {
+			return true
+		}
+	}
+	return false
+}
 
 func (api *AdminAPI) jsonResponse(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")

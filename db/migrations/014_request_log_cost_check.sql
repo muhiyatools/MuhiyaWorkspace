@@ -1,0 +1,23 @@
+-- 014: reject negative request_logs.cost.
+--
+-- Every budget path sums this column (GetUserSpendingInWindow, GetUserSpendingToday,
+-- GetUserBudgetUsage), so a single negative row silently lowers a user's measured
+-- spend and hands them budget they never paid for. The Go guard in InsertRequestLog
+-- is the gate; this constraint is the backstop for any writer that bypasses it.
+--
+-- NOT VALID is deliberate, and the VALIDATE step is intentionally NOT in this file.
+-- The constraint takes effect for every INSERT and UPDATE immediately; Postgres only
+-- skips the scan of pre-existing rows. A validating ADD CONSTRAINT would hold ACCESS
+-- EXCLUSIVE on request_logs for the length of that scan (blocking every billing write
+-- on a large table), and because each migration file runs in one transaction
+-- (applyMigrationTx) and a migration failure aborts boot (db.Open -> RunMigrations ->
+-- log.Fatalf), one pre-existing negative row would leave the gateway unable to start.
+-- Reconcile any legacy violating rows first, then validate by hand once the table is
+-- confirmed clean:
+--     SELECT id, user_id, cost, created_at FROM request_logs WHERE cost < 0;
+--     ALTER TABLE request_logs VALIDATE CONSTRAINT request_logs_cost_nonneg;
+--
+-- DROP ... IF EXISTS precedes the ADD because Postgres has no ADD CONSTRAINT
+-- IF NOT EXISTS; 005 sets the drop-then-re-add precedent for re-runnability.
+ALTER TABLE request_logs DROP CONSTRAINT IF EXISTS request_logs_cost_nonneg;
+ALTER TABLE request_logs ADD CONSTRAINT request_logs_cost_nonneg CHECK (cost >= 0) NOT VALID;

@@ -27,6 +27,17 @@ func openTestDB(t *testing.T) *DB {
 	return d
 }
 
+// TestInsertRequestLogRejectsNegativeCost guards the budget aggregate: a negative
+// cost poisons every SUM(cost) path, so InsertRequestLog must reject it. The guard
+// returns before db.conn is dereferenced, so this runs with no live DB (a zero-value
+// DB), which is why it does NOT use openTestDB.
+func TestInsertRequestLogRejectsNegativeCost(t *testing.T) {
+	err := (&DB{}).InsertRequestLog(RequestLog{ID: "log-neg", Cost: -1})
+	if err == nil {
+		t.Fatal("InsertRequestLog must reject a negative cost")
+	}
+}
+
 // TestCacheMissTokensPersistence (feature 007 T035): a completed response with a
 // provider-reported cache-miss count persists cache_miss_tokens; an estimated
 // response (no provider figure - CacheMissTokens nil) leaves the column NULL so

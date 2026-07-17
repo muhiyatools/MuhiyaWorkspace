@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -60,6 +61,15 @@ func main() {
 	svcPass := os.Getenv("SERVICE_PASSWORD")
 	if svcUser != "" && svcPass != "" {
 		log.Printf("[AUTH] Scoped service credential enabled for /api/{users,keys,logs,stats,plans,settings,health}.")
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("ADMIN_ALLOWED_ORIGINS")); raw != "" {
+		for _, h := range strings.Split(raw, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				adminAllowedOrigins = append(adminAllowedOrigins, h)
+			}
+		}
+		log.Printf("[AUTH] Additional admin origins allowed for cross-site writes: %v", adminAllowedOrigins)
 	}
 
 	mux := http.NewServeMux()
@@ -517,6 +527,68 @@ func servicePathAllowed(p string) bool {
 	return false
 }
 
+// adminAllowedOrigins is an escape hatch for deployments whose reverse proxy
+// rewrites Host: set ADMIN_ALLOWED_ORIGINS to the browser-facing host(s).
+var adminAllowedOrigins []string
+
+// isStateChangingMethod reports whether a request can mutate state. Reads stay
+// unguarded: /api serves no CORS headers, so a cross-site GET's response is
+// already unreadable.
+func isStateChangingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+// isCrossSiteRequest reports whether a browser drove this request from another
+// origin. An ABSENT Origin means a non-browser caller (the platform's server-side
+// client, curl, the CLI) and is always allowed: browsers attach Origin to every
+// state-changing request, so its absence cannot be forged from a page. Only hosts
+// are compared — TLS terminates at the reverse proxy, so r.TLS cannot tell us the
+// scheme the browser actually used.
+func isCrossSiteRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return true
+	}
+	if strings.EqualFold(parsed.Host, r.Host) {
+		return false
+	}
+	for _, allowed := range adminAllowedOrigins {
+		if strings.EqualFold(parsed.Host, allowed) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasBrowserFormContentType reports whether the body carries one of the three
+// content types a browser can send cross-site WITHOUT a preflight. /api returns no
+// CORS headers, so a preflight always fails — rejecting exactly these removes the
+// last way a page can drive a write (the enctype=text/plain form), while every
+// non-browser caller (JSON, or no body at all) is untouched.
+func hasBrowserFormContentType(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	switch mediaType {
+	case "text/plain", "multipart/form-data", "application/x-www-form-urlencoded":
+		return true
+	}
+	return false
+}
+
 // serviceOrAdminAuth accepts the full ADMIN credential for any request, and —
 // when a SERVICE credential is configured — also accepts it, but only for the
 // allowlisted platform endpoints. Both comparisons are constant-time. When no
@@ -524,6 +596,16 @@ func servicePathAllowed(p string) bool {
 func serviceOrAdminAuth(adminUser, adminPass, svcUser, svcPass string, next http.Handler) http.Handler {
 	svcEnabled := svcUser != "" && svcPass != ""
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CSRF: the browser caches Basic-auth credentials per origin and attaches
+		// them to cross-site requests, so a page on any other origin could drive a
+		// write here (POST /api/logs with a negative cost was the live path). No CORS
+		// headers are served on /api, so a preflight always fails — which leaves
+		// exactly two ways in, and this closes both. 403 rather than 401: a
+		// WWW-Authenticate challenge here would pop a login prompt at the victim.
+		if isStateChangingMethod(r.Method) && (isCrossSiteRequest(r) || hasBrowserFormContentType(r)) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		u, p, ok := r.BasicAuth()
 		if ok {
 			adminOK := subtle.ConstantTimeCompare([]byte(u), []byte(adminUser)) == 1 &&
