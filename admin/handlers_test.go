@@ -372,3 +372,56 @@ func TestHandleModelsRejectsBadShapePreDB(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleModelsMergePatchVisibility proves the merge-patch PUT preserves the
+// muhiyacode_visible flag when a payload omits it and applies it when present —
+// so a stale admin client that never sends the field cannot silently clear it,
+// while an explicit toggle takes effect. Needs a live DB; skips otherwise.
+func TestHandleModelsMergePatchVisibility(t *testing.T) {
+	d := openSettingsTestDB(t)
+	api := &AdminAPI{db: d}
+
+	provID := "prov-vis-test"
+	_ = d.DeleteProvider(provID)
+	if err := d.CreateProvider(db.Provider{ID: provID, Name: provID, BaseURL: "https://example.com", APIKey: "x", Status: "active"}); err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	t.Cleanup(func() { _ = d.DeleteProvider(provID) })
+
+	id := "model-vis-test"
+	_ = d.DeleteModel(id)
+	create := `{"id":"` + id + `","name":"` + id + `","provider_id":"` + provID + `","target_model":"deepseek-chat","status":"active","muhiyacode_visible":true,"input_cost_per_million":1,"output_cost_per_million":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/models", strings.NewReader(create))
+	rec := httptest.NewRecorder()
+	api.handleModels(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create model status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	t.Cleanup(func() { _ = d.DeleteModel(id) })
+
+	// PUT that OMITS muhiyacode_visible must preserve the stored true.
+	put := `{"id":"` + id + `","display_name":"Renamed"}`
+	req = httptest.NewRequest(http.MethodPut, "/api/models", strings.NewReader(put))
+	rec = httptest.NewRecorder()
+	api.handleModels(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge-patch PUT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := d.GetModel(id)
+	if got == nil || !got.MuhiyaCodeVisible {
+		t.Fatal("omitted muhiyacode_visible must be preserved as true")
+	}
+
+	// PUT that SETS it false must apply.
+	put = `{"id":"` + id + `","muhiyacode_visible":false}`
+	req = httptest.NewRequest(http.MethodPut, "/api/models", strings.NewReader(put))
+	rec = httptest.NewRecorder()
+	api.handleModels(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle PUT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ = d.GetModel(id)
+	if got == nil || got.MuhiyaCodeVisible {
+		t.Fatal("explicit muhiyacode_visible=false must be applied")
+	}
+}

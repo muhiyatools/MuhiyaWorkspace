@@ -85,24 +85,24 @@ type Provider struct {
 }
 
 type Model struct {
-	ID                       string    `json:"id"`
-	Name                     string    `json:"name"` // virtual model name (e.g. gpt-4o)
-	ProviderID               string    `json:"provider_id"`
-	TargetModel              string    `json:"target_model"` // provider target name
-	InputCostPerMillion      float64   `json:"input_cost_per_million"`
-	OutputCostPerMillion     float64   `json:"output_cost_per_million"`
-	CacheReadCostPerMillion  float64   `json:"cache_read_cost_per_million"`
-	CacheWriteCostPerMillion float64   `json:"cache_write_cost_per_million"`
-	Status                   string    `json:"status"`       // active, inactive
-	RoutingTier              string    `json:"routing_tier"` // none, simple, medium, hard
-	ModelType                string    `json:"model_type"`   // llm, transcript
-	PricePerMinute           float64   `json:"price_per_minute"`
-	Transcribe               bool      `json:"transcribe"`
-	ContextWindow            int       `json:"context_window"`
-	MaxOutputTokens          int       `json:"max_output_tokens"`
-	DisplayName              string    `json:"display_name"`
-	Description              string    `json:"description"`
-	OwnedBy                  string    `json:"owned_by"`
+	ID                       string  `json:"id"`
+	Name                     string  `json:"name"` // virtual model name (e.g. gpt-4o)
+	ProviderID               string  `json:"provider_id"`
+	TargetModel              string  `json:"target_model"` // provider target name
+	InputCostPerMillion      float64 `json:"input_cost_per_million"`
+	OutputCostPerMillion     float64 `json:"output_cost_per_million"`
+	CacheReadCostPerMillion  float64 `json:"cache_read_cost_per_million"`
+	CacheWriteCostPerMillion float64 `json:"cache_write_cost_per_million"`
+	Status                   string  `json:"status"`       // active, inactive
+	RoutingTier              string  `json:"routing_tier"` // none, simple, medium, hard
+	ModelType                string  `json:"model_type"`   // llm, transcript
+	PricePerMinute           float64 `json:"price_per_minute"`
+	Transcribe               bool    `json:"transcribe"`
+	ContextWindow            int     `json:"context_window"`
+	MaxOutputTokens          int     `json:"max_output_tokens"`
+	DisplayName              string  `json:"display_name"`
+	Description              string  `json:"description"`
+	OwnedBy                  string  `json:"owned_by"`
 	// SupportsVision is the operator-set flag that a model accepts image input.
 	// It is the source of truth for vision routing (the name heuristic is only a
 	// fallback), so a vision model with any name is routed correctly.
@@ -127,7 +127,13 @@ type Model struct {
 	// explicit comma-separated MIME allowlist (e.g. "image/png,application/pdf").
 	// Empty = accept whatever the capability flags imply. Published on
 	// /v1/models (as an array) for client-side pre-checks.
-	AcceptedMimeTypes string    `json:"accepted_mime_types"`
+	AcceptedMimeTypes string `json:"accepted_mime_types"`
+	// MuhiyaCodeVisible marks a model as discoverable by the MuhiyaCode app
+	// (X-Client-App: MuhiyaCode) on /v1/models. Discovery-only: inference by
+	// exact name and router selection are NOT gated by this flag, so a hidden
+	// model stays fully usable — it just does not appear in the coding agent's
+	// model picker. Opt-in for new rows (see migration 021).
+	MuhiyaCodeVisible bool      `json:"muhiyacode_visible"`
 	CreatedAt         time.Time `json:"created_at"`
 }
 
@@ -169,11 +175,11 @@ type SystemSetting struct {
 }
 
 type UserTopup struct {
-	ID          string     `json:"id"`
-	UserID      string     `json:"user_id"`
-	Credits     float64    `json:"credits"`
-	UsedCredits float64    `json:"used_credits"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	Credits     float64   `json:"credits"`
+	UsedCredits float64   `json:"used_credits"`
+	CreatedAt   time.Time `json:"created_at"`
 	// ExpiresAt (migration 012) lapses a top-up on a date; DeletedAt is a soft
 	// delete. Either one hides the top-up from all user-facing balances and from
 	// consumption (INV-6); admins still see it, badged. Nil = never / not deleted.
@@ -916,7 +922,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, '')
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
 		FROM models
 		WHERE status = 'active' AND (name = $1 OR id = $1 OR lower(display_name) = lower($1))
 		ORDER BY (name = $1) DESC, (id = $1) DESC
@@ -925,7 +931,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -942,13 +948,13 @@ func (db *DB) GetModel(id string) (*Model, error) {
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, '')
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -964,7 +970,7 @@ func (db *DB) ListModels() ([]Model, error) {
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, '')
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -978,7 +984,7 @@ func (db *DB) ListModels() ([]Model, error) {
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
 		if err != nil {
 			return nil, err
 		}
@@ -999,13 +1005,15 @@ func (db *DB) CreateModel(m Model) error {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
 		routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
 		display_name, description, owned_by, supports_vision, supports_thinking,
-		supports_audio, supports_video, supports_documents, max_attachment_mb, accepted_mime_types
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)`,
+		supports_audio, supports_video, supports_documents, max_attachment_mb, accepted_mime_types,
+		muhiyacode_visible
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
 		m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
 		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision, m.SupportsThinking,
-		m.SupportsAudio, m.SupportsVideo, m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes)
+		m.SupportsAudio, m.SupportsVideo, m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes,
+		m.MuhiyaCodeVisible)
 	return err
 }
 
@@ -1022,12 +1030,12 @@ func (db *DB) UpdateModel(m Model) error {
 		model_type = $10, price_per_minute = $11, transcribe = $12, context_window = $13, max_output_tokens = $14,
 		display_name = $15, description = $16, owned_by = $17, supports_vision = $18,
 		supports_thinking = $19, supports_audio = $20, supports_video = $21, supports_documents = $22,
-		max_attachment_mb = $23, accepted_mime_types = $24 WHERE id = $25`,
+		max_attachment_mb = $23, accepted_mime_types = $24, muhiyacode_visible = $25 WHERE id = $26`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
 		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType,
 		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
 		m.OwnedBy, m.SupportsVision, m.SupportsThinking, m.SupportsAudio, m.SupportsVideo,
-		m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes, m.ID)
+		m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes, m.MuhiyaCodeVisible, m.ID)
 	return err
 }
 

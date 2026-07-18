@@ -184,3 +184,87 @@ func TestInjectAnthropicCacheControlSkipsThinkingBlocks(t *testing.T) {
 		t.Fatal("thinking blocks must never receive cache_control")
 	}
 }
+
+// B5: a message that ENDS in a thinking block must still get a breakpoint on the
+// preceding text block, rather than caching nothing for that turn. The old
+// last-block-only logic left such a message uncached.
+func TestInjectAnthropicCacheControlWalksBackPastThinking(t *testing.T) {
+	body := map[string]interface{}{
+		"messages": []interface{}{
+			map[string]interface{}{"role": "assistant", "content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "here is the answer"},
+				map[string]interface{}{"type": "thinking", "thinking": "trailing reasoning"},
+			}},
+		},
+	}
+	if !InjectAnthropicCacheControl(body, "claude-sonnet-4-5") {
+		t.Fatal("expected a breakpoint on the preceding text block")
+	}
+	content := body["messages"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})
+	textBlock := content[0].(map[string]interface{})
+	thinkingBlock := content[1].(map[string]interface{})
+	if textBlock["cache_control"] == nil {
+		t.Fatal("preceding text block must receive cache_control")
+	}
+	if thinkingBlock["cache_control"] != nil {
+		t.Fatal("trailing thinking block must never receive cache_control")
+	}
+}
+
+// B4: OpenRouter → Claude gets OpenAI-shape cache_control breakpoints on the last
+// system message and the last message; every other (auto-caching) target and
+// every non-OpenRouter caller is left byte-for-byte untouched.
+func TestInjectOpenRouterAnthropicCacheClaude(t *testing.T) {
+	body := map[string]interface{}{
+		"messages": []interface{}{
+			map[string]interface{}{"role": "system", "content": "you are a coding agent"},
+			map[string]interface{}{"role": "user", "content": "fix the bug"},
+		},
+	}
+	if !InjectOpenRouterAnthropicCache(body, true, "anthropic/claude-sonnet-4.5") {
+		t.Fatal("expected injection for OpenRouter Claude target")
+	}
+	sys := body["messages"].([]interface{})[0].(map[string]interface{})
+	sysParts, ok := sys["content"].([]interface{})
+	if !ok || sysParts[0].(map[string]interface{})["cache_control"] == nil {
+		t.Fatalf("system message not tagged: %#v", sys["content"])
+	}
+	user := body["messages"].([]interface{})[1].(map[string]interface{})
+	userParts, ok := user["content"].([]interface{})
+	if !ok || userParts[0].(map[string]interface{})["cache_control"] == nil {
+		t.Fatalf("last message not tagged: %#v", user["content"])
+	}
+}
+
+func TestInjectOpenRouterAnthropicCacheSkipsNonClaudeAndNonOpenRouter(t *testing.T) {
+	// Auto-caching OpenRouter target: must NOT be mutated (byte-stability).
+	body := map[string]interface{}{
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hi"},
+		},
+	}
+	if InjectOpenRouterAnthropicCache(body, true, "deepseek/deepseek-chat") {
+		t.Fatal("must not inject for a non-Claude OpenRouter target")
+	}
+	if _, isString := body["messages"].([]interface{})[0].(map[string]interface{})["content"].(string); !isString {
+		t.Fatal("content must stay a plain string when skipping")
+	}
+	// Claude target but NOT via OpenRouter (e.g. a direct Anthropic provider that
+	// the dedicated InjectAnthropicCacheControl path already handles): no-op here.
+	if InjectOpenRouterAnthropicCache(body, false, "anthropic/claude-sonnet-4.5") {
+		t.Fatal("must not inject when the provider is not OpenRouter")
+	}
+}
+
+func TestInjectOpenRouterAnthropicCacheRespectsClientBreakpoints(t *testing.T) {
+	body := map[string]interface{}{
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "hi", "cache_control": map[string]interface{}{"type": "ephemeral"}},
+			}},
+		},
+	}
+	if InjectOpenRouterAnthropicCache(body, true, "anthropic/claude-sonnet-4.5") {
+		t.Fatal("must not inject when the client already set cache_control")
+	}
+}

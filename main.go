@@ -99,7 +99,7 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok","version":%q,"migrations":%d}`, buildVersion, migrationCount.Load())
+		fmt.Fprintf(w, `{"status":"ok","version":%q,"migrations":%d,"billing_loss":%d}`, buildVersion, migrationCount.Load(), proxy.BillingLossCount.Load())
 	})
 
 	// Root redirect

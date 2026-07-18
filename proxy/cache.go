@@ -36,6 +36,20 @@ func blockAcceptsCacheControl(block map[string]interface{}) bool {
 	return false
 }
 
+// lastCacheableBlock returns the last block in a content array that accepts a
+// cache_control breakpoint, walking backwards past any trailing blocks that do
+// not (notably thinking blocks, which reject cache_control). Returns nil when no
+// block qualifies. Without this, a message or system array ending in a thinking
+// block would get no breakpoint at all and cache nothing for that turn.
+func lastCacheableBlock(blocks []interface{}) map[string]interface{} {
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if block, ok := blocks[i].(map[string]interface{}); ok && blockAcceptsCacheControl(block) {
+			return block
+		}
+	}
+	return nil
+}
+
 func containsCacheControl(value interface{}) bool {
 	switch v := value.(type) {
 	case map[string]interface{}:
@@ -55,6 +69,87 @@ func containsCacheControl(value interface{}) bool {
 		}
 	}
 	return false
+}
+
+// anthropicFamilyTarget reports whether an OpenRouter target id routes to an
+// Anthropic (Claude) upstream, which - unlike DeepSeek/Qwen/GLM et al. - caches
+// nothing without explicit cache_control breakpoints.
+func anthropicFamilyTarget(targetModel string) bool {
+	t := strings.ToLower(targetModel)
+	return strings.Contains(t, "claude") || strings.HasPrefix(t, "anthropic/")
+}
+
+// setOpenAIContentCacheControl tags the last text part of an OpenAI-format
+// message's content with cache_control, normalizing a plain string to the array
+// form first. Returns true when a breakpoint was placed.
+func setOpenAIContentCacheControl(msg map[string]interface{}, cc map[string]interface{}) bool {
+	switch content := msg["content"].(type) {
+	case string:
+		if content == "" {
+			return false
+		}
+		msg["content"] = []interface{}{map[string]interface{}{
+			"type": "text", "text": content, "cache_control": cc,
+		}}
+		return true
+	case []interface{}:
+		for i := len(content) - 1; i >= 0; i-- {
+			if part, ok := content[i].(map[string]interface{}); ok {
+				if t, _ := part["type"].(string); t == "text" {
+					part["cache_control"] = cc
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// InjectOpenRouterAnthropicCache adds ephemeral cache_control breakpoints to an
+// OpenAI-format body (map form) when the request routes to a Claude model
+// through OpenRouter, which honors Anthropic-style cache_control on OpenAI
+// content parts. Every auto-caching OpenRouter target (DeepSeek, Qwen, ...) is
+// left byte-for-byte untouched, so the prefix-cache stability those providers
+// rely on is preserved. Deterministic and no-op-safe: skipped unless the caller
+// is OpenRouter with a Claude target, and skipped when the client already set
+// its own breakpoints. Returns true when anything was injected.
+func InjectOpenRouterAnthropicCache(body map[string]interface{}, isOpenRouter bool, targetModel string) bool {
+	if body == nil || !isOpenRouter || !anthropicFamilyTarget(targetModel) {
+		return false
+	}
+	if containsCacheControl(body) {
+		return false
+	}
+	messages, ok := body["messages"].([]interface{})
+	if !ok || len(messages) == 0 {
+		return false
+	}
+	ephemeral := func() map[string]interface{} {
+		return map[string]interface{}{"type": "ephemeral"}
+	}
+	injected := false
+	// Breakpoint 1: the last system message (the stable tools+system prefix).
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "system" {
+			continue
+		}
+		if setOpenAIContentCacheControl(msg, ephemeral()) {
+			injected = true
+		}
+		break
+	}
+	// Breakpoint 2: the last message (caches the conversation prefix so the next
+	// agent turn reads this turn from cache).
+	if msg, ok := messages[len(messages)-1].(map[string]interface{}); ok {
+		if setOpenAIContentCacheControl(msg, ephemeral()) {
+			injected = true
+		}
+	}
+	return injected
 }
 
 // InjectAnthropicCacheControl adds ephemeral cache breakpoints to an
@@ -84,11 +179,9 @@ func InjectAnthropicCacheControl(body map[string]interface{}, targetModel string
 			injected = true
 		}
 	case []interface{}:
-		if len(system) > 0 {
-			if block, ok := system[len(system)-1].(map[string]interface{}); ok && blockAcceptsCacheControl(block) {
-				block["cache_control"] = ephemeral()
-				injected = true
-			}
+		if block := lastCacheableBlock(system); block != nil {
+			block["cache_control"] = ephemeral()
+			injected = true
 		}
 	}
 
@@ -105,11 +198,9 @@ func InjectAnthropicCacheControl(body map[string]interface{}, targetModel string
 					injected = true
 				}
 			case []interface{}:
-				if len(content) > 0 {
-					if block, ok := content[len(content)-1].(map[string]interface{}); ok && blockAcceptsCacheControl(block) {
-						block["cache_control"] = ephemeral()
-						injected = true
-					}
+				if block := lastCacheableBlock(content); block != nil {
+					block["cache_control"] = ephemeral()
+					injected = true
 				}
 			}
 		}

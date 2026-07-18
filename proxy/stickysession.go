@@ -110,5 +110,20 @@ func (s *modelSticky) set(key, modelID string) {
 				delete(s.entries, k)
 			}
 		}
+		// A burst of more than stickyMapCap *live* sessions would survive the
+		// expired-only sweep above and grow the map without bound for the 24h
+		// TTL. Evict arbitrary live entries down to the cap - dropping a pin only
+		// costs one cache-cold turn, never a wrong answer, so a bounded map is
+		// strictly better than an unbounded one. The just-inserted key is spared
+		// so the current conversation keeps its pin.
+		for k := range s.entries {
+			if len(s.entries) <= stickyMapCap {
+				break
+			}
+			if k == key {
+				continue
+			}
+			delete(s.entries, k)
+		}
 	}
 }

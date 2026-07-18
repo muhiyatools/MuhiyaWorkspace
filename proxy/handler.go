@@ -64,6 +64,13 @@ func armIdleWatchdog(body io.Closer, d time.Duration) (reset func(), stop func()
 // contexts fit comfortably; this only stops memory-exhaustion abuse.
 const maxChatRequestBytes = 24 << 20 // 24 MiB
 
+// maxAccumulatedTextBytes caps the per-stream fallback text buffer used only to
+// estimate completion tokens when the upstream omits usage. Bounding it keeps a
+// pathologically long stream from holding its entire response text in memory;
+// once the cap is hit the estimate is based on the first 2 MiB, which is more
+// than enough signal (and moot whenever real usage is reported).
+const maxAccumulatedTextBytes = 2 << 20 // 2 MiB
+
 type noopFlusher struct{}
 
 func (noopFlusher) Flush() {}
@@ -104,6 +111,17 @@ func NewProxyHandler(database *db.DB, limiter *RateLimiter, identitySecret strin
 func (h *ProxyHandler) internalErrorResponse(w http.ResponseWriter, context string, err error) {
 	log.Printf("[ERROR] %s: %v", context, err)
 	h.writeError(w, http.StatusInternalServerError, "Internal server error", "api_error")
+}
+
+// serviceUnavailableResponse signals a transient backend outage (typically the
+// database being briefly unreachable) with a retryable 503 + Retry-After rather
+// than a 500. A 500 reads as "your request is broken, do not retry"; a 503 tells
+// well-behaved clients (and the MuhiyaCode agent) to back off and try again, so a
+// momentary Postgres blip during auth no longer surfaces as a hard sign-in error.
+func (h *ProxyHandler) serviceUnavailableResponse(w http.ResponseWriter, context string, err error) {
+	log.Printf("[UNAVAILABLE] %s: %v", context, err)
+	w.Header().Set("Retry-After", "2")
+	h.writeError(w, http.StatusServiceUnavailable, "Gateway temporarily unavailable, please retry.", "api_error")
 }
 
 // saveRequestLog persists one request's billing/usage row. A failed insert is
@@ -408,7 +426,10 @@ func (h *ProxyHandler) authenticateVirtualKey(w http.ResponseWriter, r *http.Req
 
 	key, err := h.db.GetVirtualKey(keyID)
 	if err != nil {
-		h.internalErrorResponse(w, "database error", err)
+		// A transient DB error during auth is not a client fault: return a
+		// retryable 503 instead of a 500 so a momentary Postgres blip does not
+		// surface to the user as an unrecoverable sign-in failure.
+		h.serviceUnavailableResponse(w, "auth: database error resolving virtual key", err)
 		return nil, false
 	}
 	if key == nil || key.Status != "active" {
@@ -987,7 +1008,14 @@ func setOpenRouterHeaders(req *http.Request, provider *db.Provider, r *http.Requ
 
 func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Request, origBody []byte, model *db.Model, provider *db.Provider, log db.RequestLog, startTime time.Time) {
 	var bodyMap map[string]interface{}
-	_ = json.Unmarshal(origBody, &bodyMap)
+	// A body that decodes to a non-object (e.g. the literal `null`, which the
+	// typed request decode accepts as a zero value) leaves bodyMap nil; assigning
+	// to a nil map panics. Reject it as a 400 instead of turning it into an opaque
+	// recovered 500.
+	if err := json.Unmarshal(origBody, &bodyMap); err != nil || bodyMap == nil {
+		h.logAndWriteError(w, http.StatusBadRequest, "Request body must be a JSON object", "invalid_request_error", &log, startTime)
+		return
+	}
 	bodyMap["model"] = model.TargetModel
 	delete(bodyMap, "web_search")
 
@@ -1005,6 +1033,11 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	// (and strip the gateway-level fields regardless).
 	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
+
+	// OpenRouter → Claude only: add cache_control breakpoints. Auto-caching
+	// targets (DeepSeek, GLM, Kimi, ...) are left byte-for-byte untouched so
+	// their prefix caches keep hitting; this is a strict no-op for them.
+	InjectOpenRouterAnthropicCache(bodyMap, provider != nil && provider.ID == "openrouter", model.TargetModel)
 
 	stream, _ := bodyMap["stream"].(bool)
 	if stream {
@@ -1110,7 +1143,11 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 				} else if dataStr != "" {
 					var chunk OpenAIChunk
 					if err := json.Unmarshal([]byte(dataStr), &chunk); err == nil {
-						if len(chunk.Choices) > 0 {
+						// The accumulator only feeds the fallback token estimator used
+						// when the upstream reports no usage; cap it so a very long
+						// response cannot hold unbounded text in memory per stream. The
+						// forwarded bytes to the client below are unaffected.
+						if len(chunk.Choices) > 0 && textAccumulator.Len() < maxAccumulatedTextBytes {
 							textAccumulator.WriteString(chunk.Choices[0].Delta.Content)
 						}
 						if chunk.Usage != nil {
@@ -1439,7 +1476,12 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 
 func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.Request, origBody []byte, anthReq *AnthropicRequest, model *db.Model, provider *db.Provider, log db.RequestLog, startTime time.Time) {
 	var bodyMap map[string]interface{}
-	_ = json.Unmarshal(origBody, &bodyMap)
+	// Guard against a non-object body (e.g. `null`) that would leave bodyMap nil
+	// and panic on the assignment below; return a clean 400 instead.
+	if err := json.Unmarshal(origBody, &bodyMap); err != nil || bodyMap == nil {
+		h.logAndWriteError(w, http.StatusBadRequest, "Request body must be a JSON object", "invalid_request_error", &log, startTime)
+		return
+	}
 	bodyMap["model"] = model.TargetModel
 
 	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
@@ -1591,6 +1633,21 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 // ------------------------------------------
 // Model Discovery Endpoint (Anthropic Specification)
 // ------------------------------------------
+// discoverableModel reports whether a model should appear in /v1/models for the
+// current caller. Every caller: the model must be active and not transcribe-only.
+// The MuhiyaCode app additionally sees only models marked muhiyacode_visible.
+// This gates DISCOVERY only - inference by exact name and router selection never
+// consult this, so a hidden model stays fully usable.
+func discoverableModel(m *db.Model, onlyMuhiyaCodeVisible bool) bool {
+	if m == nil || m.Status != "active" || m.Transcribe {
+		return false
+	}
+	if onlyMuhiyaCodeVisible && !m.MuhiyaCodeVisible {
+		return false
+	}
+	return true
+}
+
 func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Request) {
 	// CORS Headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1604,14 +1661,25 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 
 	clientIsAnthropic := isAnthropicRequest(r)
 
+	// MuhiyaCode discoverability filter: when the caller identifies as the
+	// MuhiyaCode app, only models an operator has explicitly marked
+	// muhiyacode_visible are listed/resolvable here. Every other client app
+	// (MuhiyaChat, the platform, third-party SDKs) sees the full active catalog
+	// unchanged. Discovery-only: inference by exact name and router selection
+	// are never gated, so a hidden model stays fully usable.
+	onlyMuhiyaCodeVisible := getClientAppName(r) == "MuhiyaCode"
+
 	// If asking for a specific model details
 	pathParts := strings.Split(r.URL.Path, "/models/")
 	if len(pathParts) > 1 && pathParts[1] != "" {
 		modelID := strings.TrimSuffix(pathParts[1], "/")
 		var matchedModel *db.Model
-		for _, m := range models {
-			if m.Name == modelID && !m.Transcribe {
-				matchedModel = &m
+		for i := range models {
+			m := &models[i]
+			// The detail branch must apply the same visibility rule as the list
+			// branches so /v1/models/{id} cannot leak a disabled or hidden model.
+			if m.Name == modelID && discoverableModel(m, onlyMuhiyaCodeVisible) {
+				matchedModel = m
 				break
 			}
 		}
@@ -1686,7 +1754,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		var data []map[string]interface{}
 		for i := range models {
 			m := &models[i]
-			if m.Status == "active" && !m.Transcribe {
+			if discoverableModel(m, onlyMuhiyaCodeVisible) {
 				displayName := m.DisplayName
 				if displayName == "" {
 					displayName = m.Name + " (via MuhiyaLLM)"
@@ -1719,7 +1787,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		var data []map[string]interface{}
 		for i := range models {
 			m := &models[i]
-			if m.Status == "active" && !m.Transcribe {
+			if discoverableModel(m, onlyMuhiyaCodeVisible) {
 				displayName := m.DisplayName
 				if displayName == "" {
 					displayName = m.Name

@@ -39,6 +39,7 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"018_model_supports_thinking.sql",
 		"019_default_transcription_language.sql",
 		"020_model_media_capabilities.sql",
+		"021_model_muhiyacode_visible.sql",
 	} {
 		found := false
 		for _, n := range names {

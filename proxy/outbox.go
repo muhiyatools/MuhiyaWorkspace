@@ -2,10 +2,17 @@ package proxy
 
 import (
 	"log"
+	"sync/atomic"
 	"time"
 
 	"gateway/db"
 )
+
+// BillingLossCount counts request-log rows that could not be persisted — retries
+// exhausted, or the outbox buffer overflowed during a sustained outage. It is
+// exposed on /health so silent billing loss is observable with a single curl
+// instead of only by scraping logs for [BILLING-LOSS].
+var BillingLossCount atomic.Int64
 
 // logOutbox retries a failed request-log insert with backoff before giving
 // up, so a transient Postgres blip (failover, pool exhaustion, a brief
@@ -44,6 +51,7 @@ func (o *logOutbox) retry(entry db.RequestLog) {
 			return
 		}
 	}
+	BillingLossCount.Add(1)
 	log.Printf("[BILLING-LOSS] CRITICAL: request log %s (key=%s user=%s cost=%.6f) could not be persisted after retries - billing data lost", entry.ID, entry.VirtualKeyID, entry.UserID, entry.Cost)
 }
 
@@ -54,6 +62,7 @@ func (o *logOutbox) enqueue(entry db.RequestLog) {
 	select {
 	case o.queue <- entry:
 	default:
+		BillingLossCount.Add(1)
 		log.Printf("[BILLING-LOSS] CRITICAL: outbox full, dropping request log %s (key=%s user=%s cost=%.6f)", entry.ID, entry.VirtualKeyID, entry.UserID, entry.Cost)
 	}
 }
