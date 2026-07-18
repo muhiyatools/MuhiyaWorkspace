@@ -110,8 +110,25 @@ type Model struct {
 	// SupportsThinking is the operator-set flag that a model supports reasoning /
 	// thinking effort. Source of truth for thinking-tier routing (the target-name
 	// heuristic is only a fallback for unflagged rows).
-	SupportsThinking bool      `json:"supports_thinking"`
-	CreatedAt        time.Time `json:"created_at"`
+	SupportsThinking bool `json:"supports_thinking"`
+	// SupportsAudio / SupportsVideo / SupportsDocuments extend the capability
+	// system (migration 020) to every input modality: audio parts (input_audio),
+	// video parts (video_url) and document parts (file, e.g. PDF). Operator-set,
+	// flag-only (no name heuristics) — the router and /v1/models read them as the
+	// single source of truth for attachment routing.
+	SupportsAudio     bool `json:"supports_audio"`
+	SupportsVideo     bool `json:"supports_video"`
+	SupportsDocuments bool `json:"supports_documents"`
+	// MaxAttachmentMB caps a single attachment for THIS model; 0 means "no
+	// model-specific cap" (clients fall back to their own default). Informational
+	// for clients — the gateway does not reject on it.
+	MaxAttachmentMB int `json:"max_attachment_mb"`
+	// AcceptedMimeTypes optionally narrows the flag-derived accepted set to an
+	// explicit comma-separated MIME allowlist (e.g. "image/png,application/pdf").
+	// Empty = accept whatever the capability flags imply. Published on
+	// /v1/models (as an array) for client-side pre-checks.
+	AcceptedMimeTypes string    `json:"accepted_mime_types"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type RequestLog struct {
@@ -898,7 +915,8 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE)
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, '')
 		FROM models
 		WHERE status = 'active' AND (name = $1 OR id = $1 OR lower(display_name) = lower($1))
 		ORDER BY (name = $1) DESC, (id = $1) DESC
@@ -906,7 +924,8 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -918,16 +937,18 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 
 func (db *DB) GetModel(id string) (*Model, error) {
 	var m Model
-	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
+	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE) 
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, '')
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -938,11 +959,12 @@ func (db *DB) GetModel(id string) (*Model, error) {
 }
 
 func (db *DB) ListModels() ([]Model, error) {
-	rows, err := db.conn.Query(`SELECT id, name, provider_id, target_model, input_cost_per_million, 
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
+	rows, err := db.conn.Query(`SELECT id, name, provider_id, target_model, input_cost_per_million,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
+		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE) 
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, '')
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -955,7 +977,8 @@ func (db *DB) ListModels() ([]Model, error) {
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes)
 		if err != nil {
 			return nil, err
 		}
@@ -975,12 +998,14 @@ func (db *DB) CreateModel(m Model) error {
 		id, name, provider_id, target_model, input_cost_per_million,
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
 		routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
-		display_name, description, owned_by, supports_vision, supports_thinking
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+		display_name, description, owned_by, supports_vision, supports_thinking,
+		supports_audio, supports_video, supports_documents, max_attachment_mb, accepted_mime_types
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
 		m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
-		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision, m.SupportsThinking)
+		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision, m.SupportsThinking,
+		m.SupportsAudio, m.SupportsVideo, m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes)
 	return err
 }
 
@@ -996,11 +1021,13 @@ func (db *DB) UpdateModel(m Model) error {
 		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9,
 		model_type = $10, price_per_minute = $11, transcribe = $12, context_window = $13, max_output_tokens = $14,
 		display_name = $15, description = $16, owned_by = $17, supports_vision = $18,
-		supports_thinking = $19 WHERE id = $20`,
+		supports_thinking = $19, supports_audio = $20, supports_video = $21, supports_documents = $22,
+		max_attachment_mb = $23, accepted_mime_types = $24 WHERE id = $25`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
 		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType,
 		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
-		m.OwnedBy, m.SupportsVision, m.SupportsThinking, m.ID)
+		m.OwnedBy, m.SupportsVision, m.SupportsThinking, m.SupportsAudio, m.SupportsVideo,
+		m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes, m.ID)
 	return err
 }
 
