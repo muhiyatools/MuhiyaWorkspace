@@ -127,12 +127,12 @@ func modelIsFree(m *db.Model) bool {
 }
 
 // preferPaid drops free models from a candidate set when at least one paid model
-// remains and the request does not need a free-only capability. Vision requests
-// keep free models (that is how the $0 Gemma vision model is intended to be
-// reached). If every candidate is free, the set is returned unchanged so routing
-// never dead-ends.
-func preferPaid(candidates []*db.Model, needsVision bool) []*db.Model {
-	if needsVision {
+// remains and the request does not need a free-only capability. Media requests
+// (image/audio/video/document) keep free models (that is how the $0 Gemma
+// vision model is intended to be reached). If every candidate is free, the set
+// is returned unchanged so routing never dead-ends.
+func preferPaid(candidates []*db.Model, keepFree bool) []*db.Model {
+	if keepFree {
 		return candidates
 	}
 	paid := make([]*db.Model, 0, len(candidates))
@@ -147,7 +147,7 @@ func preferPaid(candidates []*db.Model, needsVision bool) []*db.Model {
 	return candidates
 }
 
-func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkingRequested bool) (*db.Model, error) {
+func (h *ProxyHandler) RouteToModel(complexity string, needs mediaNeeds, thinkingRequested bool) (*db.Model, error) {
 	models, err := h.db.ListModels()
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve models: %w", err)
@@ -156,7 +156,7 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 	if err != nil {
 		return nil, err
 	}
-	return selectRoute(models, providerActive, complexity, needsVision, thinkingRequested)
+	return selectRoute(models, providerActive, complexity, needs, thinkingRequested)
 }
 
 // activeProviderSet returns a map of provider ID -> whether that provider is
@@ -179,13 +179,15 @@ func (h *ProxyHandler) activeProviderSet() (map[string]bool, error) {
 // routingDiag captures why a route did or did not resolve, so a failure can be
 // reported with actionable numbers instead of the opaque "no active models".
 type routingDiag struct {
-	total, active, eligible, visionCapable int
+	total, active, eligible                                        int
+	visionCapable, audioCapable, videoCapable, documentCapable int
 }
 
 // computeRoutingDiag counts the model pool at each narrowing stage: total rows,
 // active rows, rows that are active AND on an active provider AND not a
 // transcription model (the genuinely routable pool), and how many of those can
-// accept images. eligible/visionCapable are what a routing failure hinges on.
+// accept each media kind. eligible + the per-capability counts are what a
+// routing failure hinges on.
 func computeRoutingDiag(models []db.Model, providerActive map[string]bool) routingDiag {
 	var d routingDiag
 	d.total = len(models)
@@ -201,17 +203,87 @@ func computeRoutingDiag(models []db.Model, providerActive map[string]bool) routi
 		if modelMatchesVision(m) {
 			d.visionCapable++
 		}
+		if m.SupportsAudio {
+			d.audioCapable++
+		}
+		if m.SupportsVideo {
+			d.videoCapable++
+		}
+		if m.SupportsDocuments {
+			d.documentCapable++
+		}
 	}
 	return d
 }
 
+// capabilityCount maps a media kind to how many eligible models support it.
+func (d routingDiag) capabilityCount(kind string) int {
+	switch kind {
+	case "image":
+		return d.visionCapable
+	case "audio":
+		return d.audioCapable
+	case "video":
+		return d.videoCapable
+	case "document":
+		return d.documentCapable
+	}
+	return 0
+}
+
+// capabilityFlagLabel names the admin flag that unblocks a media kind.
+func capabilityFlagLabel(kind string) string {
+	switch kind {
+	case "image":
+		return "Vision"
+	case "audio":
+		return "Audio"
+	case "video":
+		return "Video"
+	case "document":
+		return "Documents"
+	}
+	return kind
+}
+
 // routingError builds a human-actionable failure from the pool diagnostics. It
-// names the exact remediation (activate a model / flag Vision) so the operator
-// never has to guess which filter emptied the candidate set.
-func routingError(d routingDiag, needsVision bool) error {
-	if needsVision {
+// names the exact remediation (activate a model / flag the missing capability)
+// so the operator never has to guess which filter emptied the candidate set.
+// "vision required" is kept verbatim for image-only requests so existing log
+// scrapers and client error matching keep working.
+func routingError(d routingDiag, needs mediaNeeds) error {
+	if needs.Vision && !needs.Audio && !needs.Video && !needs.Documents {
 		return fmt.Errorf("no routable model (vision required): %d models, %d active, %d on active providers, %d vision-capable — activate a vision-capable model (or tick its Vision flag) in Admin → Models",
 			d.total, d.active, d.eligible, d.visionCapable)
+	}
+	if needs.Any() {
+		// Name each needed modality with its eligible-pool count; the sparsest
+		// one is what the operator needs to flag/activate.
+		var kinds, counts []string
+		for _, kind := range []string{"image", "audio", "video", "document"} {
+			var needed bool
+			switch kind {
+			case "image":
+				needed = needs.Vision
+			case "audio":
+				needed = needs.Audio
+			case "video":
+				needed = needs.Video
+			case "document":
+				needed = needs.Documents
+			}
+			if !needed {
+				continue
+			}
+			kinds = append(kinds, kind)
+			counts = append(counts, fmt.Sprintf("%d %s-capable", d.capabilityCount(kind), kind))
+		}
+		var flags []string
+		for _, k := range kinds {
+			flags = append(flags, capabilityFlagLabel(k))
+		}
+		return fmt.Errorf("no routable model (%s input required): %d models, %d active, %d on active providers, %s — activate a model with the %s flag(s) in Admin → Models",
+			strings.Join(kinds, "+"), d.total, d.active, d.eligible, strings.Join(counts, ", "), strings.Join(flags, "+"))
 	}
 	return fmt.Errorf("no routable model: %d models, %d active, %d on active providers — activate a model on an active provider in Admin → Models",
 		d.total, d.active, d.eligible)
@@ -221,8 +293,9 @@ func routingError(d routingDiag, needsVision bool) error {
 // map, and the request shape, it returns the cheapest eligible model. It has no
 // DB dependency so the routing ladder is unit-testable. The four fallback tiers
 // (exact tier+thinking, exact tier, thinking-only, anything) are expressed as
-// data; every tier additionally requires the model's provider to be active.
-func selectRoute(models []db.Model, providerActive map[string]bool, complexity string, needsVision, thinkingRequested bool) (*db.Model, error) {
+// data; every tier additionally requires the model's provider to be active and
+// the model to support every media modality the request carries.
+func selectRoute(models []db.Model, providerActive map[string]bool, complexity string, needs mediaNeeds, thinkingRequested bool) (*db.Model, error) {
 	matchFilter := func(m *db.Model, tierCheck, thinkingCheck bool) bool {
 		if m.Status != "active" || m.Transcribe {
 			return false
@@ -233,7 +306,7 @@ func selectRoute(models []db.Model, providerActive map[string]bool, complexity s
 		if tierCheck && m.RoutingTier != complexity {
 			return false
 		}
-		if needsVision && !modelMatchesVision(m) {
+		if !modelSupportsMedia(m, needs) {
 			return false
 		}
 		if thinkingCheck && modelSupportsThinking(m) != thinkingRequested {
@@ -266,14 +339,16 @@ func selectRoute(models []db.Model, providerActive map[string]bool, complexity s
 
 	if len(candidates) == 0 {
 		d := computeRoutingDiag(models, providerActive)
-		log.Printf("[ROUTING-FAIL] vision=%v thinking=%v complexity=%s :: total=%d active=%d eligible=%d vision-capable=%d",
-			needsVision, thinkingRequested, complexity, d.total, d.active, d.eligible, d.visionCapable)
-		return nil, routingError(d, needsVision)
+		log.Printf("[ROUTING-FAIL] media=%q thinking=%v complexity=%s :: total=%d active=%d eligible=%d vision=%d audio=%d video=%d document=%d",
+			needs.describe(), thinkingRequested, complexity, d.total, d.active, d.eligible, d.visionCapable, d.audioCapable, d.videoCapable, d.documentCapable)
+		return nil, routingError(d, needs)
 	}
 
-	// Keep free models out of general (non-vision) routing when a paid model is
+	// Keep free models out of general (text-only) routing when a paid model is
 	// available, so a $0 rate-limited model never becomes the default route.
-	candidates = preferPaid(candidates, needsVision)
+	// Media requests keep free candidates (the free vision model is reached
+	// exactly this way).
+	candidates = preferPaid(candidates, needs.Any())
 
 	sortByPrice(candidates)
 	return candidates[0], nil
@@ -281,7 +356,7 @@ func selectRoute(models []db.Model, providerActive map[string]bool, complexity s
 
 // GetFallbackModels returns a list of alternative active models for load-balancing / failover,
 // excluding the primary model already tried.
-func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool) ([]*db.Model, error) {
+func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needs mediaNeeds) ([]*db.Model, error) {
 	models, err := h.db.ListModels()
 	if err != nil {
 		return nil, err
@@ -290,18 +365,18 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 	if err != nil {
 		return nil, err
 	}
-	return filterFallbacks(models, providerActive, excludeModelID, needsVision), nil
+	return filterFallbacks(models, providerActive, excludeModelID, needs), nil
 }
 
 // filterFallbacks is the pure failover-candidate builder: active, non-excluded,
-// non-transcribe models on an active provider, vision-filtered when required,
-// free-safe, cheapest-first. DB-free for testability.
-func filterFallbacks(models []db.Model, providerActive map[string]bool, excludeModelID string, needsVision bool) []*db.Model {
+// non-transcribe models on an active provider, media-capability-filtered when
+// required, free-safe, cheapest-first. DB-free for testability.
+func filterFallbacks(models []db.Model, providerActive map[string]bool, excludeModelID string, needs mediaNeeds) []*db.Model {
 	var fallbacks []*db.Model
 	for i := range models {
 		m := &models[i]
 		if m.Status == "active" && m.ID != excludeModelID && !m.Transcribe && providerActive[m.ProviderID] {
-			if needsVision && !modelMatchesVision(m) {
+			if !modelSupportsMedia(m, needs) {
 				continue
 			}
 			fallbacks = append(fallbacks, m)
@@ -309,8 +384,8 @@ func filterFallbacks(models []db.Model, providerActive map[string]bool, excludeM
 	}
 
 	// A text request must never fail over INTO a free (rate-limited) model when a
-	// paid alternative exists; a vision request keeps free vision models.
-	fallbacks = preferPaid(fallbacks, needsVision)
+	// paid alternative exists; a media request keeps free capable models.
+	fallbacks = preferPaid(fallbacks, needs.Any())
 	sortByPrice(fallbacks)
 	return fallbacks
 }

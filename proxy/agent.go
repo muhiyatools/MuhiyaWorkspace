@@ -108,13 +108,13 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 	sourcesSkill := h.loadSearchSourcesSkill()
 	messages := injectToolGuidance(oaiReq.Messages, sourcesSkill)
-	// Text-only targets must never receive image parts: DeepSeek's API accepts
-	// text content only and 400s on image_url parts, so an image anywhere in a
-	// conversation's history would break every later turn on an explicit
-	// text model. Replaced with a stable text note. (Router-selected vision
-	// requests keep their images — requestNeedsVision routes them to a
-	// vision-capable model.)
-	messages = stripUnsupportedImageParts(messages, model)
+	// Targets must never receive media parts they cannot accept: DeepSeek's API
+	// accepts text content only and 400s on image_url parts, so an unsupported
+	// attachment anywhere in a conversation's history would break every later
+	// turn on that model. Each dropped part becomes a stable text note.
+	// (Router-selected requests keep their media — detectMediaNeedsOpenAI routes
+	// them to a model that supports every modality present.)
+	messages = stripUnsupportedMediaParts(messages, model)
 
 	// Set up the SSE stream once.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -299,15 +299,15 @@ func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel st
 
 	if oaiReq.Model == "muhiya-ai-router" {
 		complexity = AnalyzePromptComplexity(oaiReq.Messages)
-		needsVision := requestNeedsVision(oaiReq.Messages)
+		needs := detectMediaNeedsOpenAI(oaiReq.Messages)
 		// minimal/low means "think less" - never route onto a thinking tier.
 		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
-		model, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
+		model, err = h.RouteToModel(complexity, needs, thinkingRequested)
 		if err != nil {
 			return nil, nil, complexity, nil, err
 		}
 		// Failover candidates for the agent loop (free-safe per preferPaid).
-		fallbacks, _ = h.GetFallbackModels(model.ID, needsVision)
+		fallbacks, _ = h.GetFallbackModels(model.ID, needs)
 
 		// Pick the first candidate whose provider is live. RouteToModel already
 		// excludes inactive-provider models, so the primary normally wins; this
@@ -354,69 +354,6 @@ func (h *ProxyHandler) firstServableModel(candidates []*db.Model) (*db.Model, *d
 	return nil, nil, nil
 }
 
-// stripUnsupportedImageParts removes image_url content parts from every message
-// when the target model cannot read images, replacing them with a short text
-// note so the model knows something was omitted. Text-only providers (DeepSeek)
-// reject image parts outright with a 400, which would otherwise permanently
-// break any conversation that ever contained an image. Vision-capable targets
-// get the messages back untouched.
-func stripUnsupportedImageParts(messages []OpenAIMessage, model *db.Model) []OpenAIMessage {
-	if model == nil || modelMatchesVision(model) {
-		return messages
-	}
-	out := make([]OpenAIMessage, len(messages))
-	copy(out, messages)
-	for i := range out {
-		arr, ok := out[i].Content.([]interface{})
-		if !ok {
-			continue
-		}
-		dropped := 0
-		kept := make([]interface{}, 0, len(arr))
-		for _, item := range arr {
-			if m, isMap := item.(map[string]interface{}); isMap && m["type"] == "image_url" {
-				dropped++
-				continue
-			}
-			kept = append(kept, item)
-		}
-		if dropped == 0 {
-			continue
-		}
-		note := "[image omitted — this model reads text only]"
-		appended := false
-		for _, item := range kept {
-			if m, isMap := item.(map[string]interface{}); isMap && m["type"] == "text" {
-				if txt, isStr := m["text"].(string); isStr {
-					m["text"] = txt + "\n" + note
-					appended = true
-					break
-				}
-			}
-		}
-		if !appended {
-			kept = append(kept, map[string]interface{}{"type": "text", "text": note})
-		}
-		out[i].Content = kept
-	}
-	return out
-}
-
-func requestNeedsVision(messages []OpenAIMessage) bool {
-	for _, msg := range messages {
-		if arr, ok := msg.Content.([]interface{}); ok {
-			for _, item := range arr {
-				if m, ok := item.(map[string]interface{}); ok {
-					if m["type"] == "image_url" {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
-}
-
 // turnResult captures what a single upstream streaming turn produced.
 type turnResult struct {
 	assistantText string
@@ -451,6 +388,9 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(structBody, &bodyMap)
 	ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, thinkingLevel)
+	// Document parts to OpenRouter: pin the free PDF parsing engine so a file
+	// attachment never silently invokes the paid OCR engine.
+	maybeInjectOpenRouterPDFParser(bodyMap, provider, h.openRouterPDFEngine())
 	body, _ := json.Marshal(bodyMap)
 
 	url := strings.TrimSuffix(provider.BaseURL, "/")

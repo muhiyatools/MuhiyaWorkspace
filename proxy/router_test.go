@@ -43,7 +43,7 @@ func TestSelectRoute_PrefersPaidForText(t *testing.T) {
 		mdl("free-gemma", "openrouter", "google/gemma:free", "none", 0, 0, vision),
 		mdl("deepseek", "deepseek", "deepseek-chat", "simple", 0.14, 0.28),
 	}
-	got, err := selectRoute(models, allActive("openrouter", "deepseek"), "simple", false, false)
+	got, err := selectRoute(models, allActive("openrouter", "deepseek"), "simple", mediaNeeds{}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestSelectRoute_VisionKeepsFreeModel(t *testing.T) {
 		mdl("free-gemma", "openrouter", "google/gemma:free", "none", 0, 0, vision),
 		mdl("deepseek", "deepseek", "deepseek-chat", "simple", 0.14, 0.28),
 	}
-	got, err := selectRoute(models, allActive("openrouter", "deepseek"), "simple", true, false)
+	got, err := selectRoute(models, allActive("openrouter", "deepseek"), "simple", mediaNeeds{Vision: true}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestSelectRoute_VisionNoActiveVisionModel_Diagnostic(t *testing.T) {
 		mdl("deepseek", "deepseek", "deepseek-chat", "simple", 0.14, 0.28),
 		mdl("gemma", "openrouter", "google/gemma:free", "none", 0, 0, vision, inactive), // vision but inactive
 	}
-	_, err := selectRoute(models, allActive("deepseek", "openrouter"), "simple", true, false)
+	_, err := selectRoute(models, allActive("deepseek", "openrouter"), "simple", mediaNeeds{Vision: true}, false)
 	if err == nil {
 		t.Fatal("expected a routing error when no active vision model exists")
 	}
@@ -88,7 +88,7 @@ func TestSelectRoute_ExcludesInactiveProvider(t *testing.T) {
 		mdl("deepseek", "deepseek", "deepseek-chat", "simple", 0.14, 0.28),
 	}
 	// Model is active but its provider is not.
-	_, err := selectRoute(models, map[string]bool{"deepseek": false}, "simple", false, false)
+	_, err := selectRoute(models, map[string]bool{"deepseek": false}, "simple", mediaNeeds{}, false)
 	if err == nil {
 		t.Fatal("a model on an inactive provider must not be routable")
 	}
@@ -105,7 +105,7 @@ func TestSelectRoute_ThinkingFilterRelaxesAtTier2(t *testing.T) {
 		mdl("reasoner", "deepseek", "deepseek-reasoner", "hard", 0.55, 2.19),
 		mdl("chat", "deepseek", "deepseek-chat", "simple", 0.14, 0.28),
 	}
-	got, err := selectRoute(models, allActive("deepseek"), "hard", false, false)
+	got, err := selectRoute(models, allActive("deepseek"), "hard", mediaNeeds{}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestSelectRoute_CheapestWinsWithinTier(t *testing.T) {
 		mdl("pricey", "p", "big", "simple", 3.0, 6.0),
 		mdl("cheap", "p", "small", "simple", 0.1, 0.2),
 	}
-	got, err := selectRoute(models, allActive("p"), "simple", false, false)
+	got, err := selectRoute(models, allActive("p"), "simple", mediaNeeds{}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestFilterFallbacks_ExcludesPrimaryInactiveProviderAndTranscribe(t *testing
 		mdl("whisper", "openai", "whisper-1", "none", 0, 0, transcribe),
 	}
 	providerActive := map[string]bool{"deepseek": true, "deadprov": false, "openai": true}
-	fb := filterFallbacks(models, providerActive, "primary", false)
+	fb := filterFallbacks(models, providerActive, "primary", mediaNeeds{})
 
 	if len(fb) != 1 {
 		t.Fatalf("expected exactly 1 fallback (alt-cheap), got %d: %+v", len(fb), fb)

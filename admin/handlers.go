@@ -626,6 +626,32 @@ func validateModelShape(m *db.Model) (errCode int, errMsg string) {
 	if m.ContextWindow < 0 || m.MaxOutputTokens < 0 {
 		return http.StatusBadRequest, "Token limits cannot be negative."
 	}
+	if m.MaxAttachmentMB < 0 {
+		return http.StatusBadRequest, "Max attachment size cannot be negative (0 = client default)."
+	}
+	if code, msg := validateMimeList(m.AcceptedMimeTypes); code != 0 {
+		return code, msg
+	}
+	return 0, ""
+}
+
+// mimeTypeRe accepts type/subtype MIME entries, including vendor trees,
+// wildcards and suffixes (image/*, application/pdf, audio/x-m4a, text/*).
+var mimeTypeRe = regexp.MustCompile(`^[a-zA-Z0-9!#$&^_.+-]+/(\*|[a-zA-Z0-9!#$&^_.*+-]+)$`)
+
+// validateMimeList checks the optional comma-separated accepted_mime_types
+// allowlist: every non-empty entry must look like a MIME type. Empty is valid
+// (capability flags alone define the accepted set).
+func validateMimeList(list string) (errCode int, errMsg string) {
+	for _, part := range strings.Split(list, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		if !mimeTypeRe.MatchString(p) {
+			return http.StatusBadRequest, "Accepted MIME types must be comma-separated type/subtype entries (e.g. image/png, application/pdf); '" + p + "' is not one."
+		}
+	}
 	return 0, ""
 }
 
@@ -1013,6 +1039,9 @@ type coverageResult struct {
 	ActiveModels     int      `json:"active_models"`
 	ActiveVision     int      `json:"active_vision"`
 	ActiveThinking   int      `json:"active_thinking"`
+	ActiveAudio      int      `json:"active_audio"`
+	ActiveVideo      int      `json:"active_video"`
+	ActiveDocuments  int      `json:"active_documents"`
 	ActiveTranscribe int      `json:"active_transcribe"`
 	ActiveProviders  int      `json:"active_providers"`
 	Warnings         []string `json:"warnings"`
@@ -1062,6 +1091,15 @@ func computeCoverage(models []db.Model, providers []db.Provider) coverageResult 
 		}
 		if m.SupportsThinking {
 			res.ActiveThinking++
+		}
+		if m.SupportsAudio {
+			res.ActiveAudio++
+		}
+		if m.SupportsVideo {
+			res.ActiveVideo++
+		}
+		if m.SupportsDocuments {
+			res.ActiveDocuments++
 		}
 	}
 

@@ -279,6 +279,11 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('model-transcribe').checked = false;
         document.getElementById('model-supports-vision').checked = false;
         document.getElementById('model-supports-thinking').checked = false;
+        document.getElementById('model-supports-audio').checked = false;
+        document.getElementById('model-supports-video').checked = false;
+        document.getElementById('model-supports-documents').checked = false;
+        document.getElementById('model-max-attachment-mb').value = '';
+        document.getElementById('model-accepted-mime').value = '';
         toggleModelTypeFields();
         document.getElementById('model-test-btn').style.display = 'none';
         document.getElementById('model-test-result').style.display = 'none';
@@ -413,6 +418,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const transcribe = document.getElementById('model-transcribe').checked;
         const supports_vision = document.getElementById('model-supports-vision').checked;
         const supports_thinking = document.getElementById('model-supports-thinking').checked;
+        const supports_audio = document.getElementById('model-supports-audio').checked;
+        const supports_video = document.getElementById('model-supports-video').checked;
+        const supports_documents = document.getElementById('model-supports-documents').checked;
+        const max_attachment_mb = parseInt(document.getElementById('model-max-attachment-mb').value) || 0;
+        const accepted_mime_types = document.getElementById('model-accepted-mime').value.trim();
         const inCost = parseFloat(document.getElementById('model-cost-in').value) || 0;
         const outCost = parseFloat(document.getElementById('model-cost-out').value) || 0;
         const readCost = parseFloat(document.getElementById('model-cost-read').value) || 0;
@@ -440,7 +450,12 @@ document.addEventListener('DOMContentLoaded', () => {
             max_output_tokens,
             description,
             supports_vision,
-            supports_thinking
+            supports_thinking,
+            supports_audio,
+            supports_video,
+            supports_documents,
+            max_attachment_mb,
+            accepted_mime_types
         };
 
         const method = id ? 'PUT' : 'POST';
@@ -1016,7 +1031,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 banner.style.display = 'block';
                 if (warnings.length === 0) {
                     banner.innerHTML = `<div style="padding:0.6rem 0.9rem; border-radius:8px; background:rgba(22,163,74,0.12); border:1px solid rgba(22,163,74,0.4); color:#16a34a; font-size:0.82rem;">
-                        <i class="fa-solid fa-circle-check"></i> Capability coverage OK — ${cov.active_models} active models · ${cov.active_vision} vision · ${cov.active_thinking} thinking · ${cov.active_providers} providers.</div>`;
+                        <i class="fa-solid fa-circle-check"></i> Capability coverage OK — ${cov.active_models} active models · ${cov.active_vision} vision · ${cov.active_audio || 0} audio · ${cov.active_video || 0} video · ${cov.active_documents || 0} docs · ${cov.active_thinking} thinking · ${cov.active_providers} providers.</div>`;
                     return;
                 }
                 banner.innerHTML = `<div style="padding:0.7rem 0.9rem; border-radius:8px; background:rgba(217,119,6,0.12); border:1px solid rgba(217,119,6,0.45); color:#d97706; font-size:0.82rem;">
@@ -1094,6 +1109,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     const caps = [];
                     if (m.supports_vision) caps.push('<span class="badge" style="background:#6d28d9;">Vision</span>');
                     if (m.supports_thinking) caps.push('<span class="badge" style="background:#0369a1;">Thinking</span>');
+                    if (m.supports_audio) caps.push('<span class="badge" style="background:#be185d;">Audio</span>');
+                    if (m.supports_video) caps.push('<span class="badge" style="background:#9a3412;">Video</span>');
+                    if (m.supports_documents) caps.push('<span class="badge" style="background:#15803d;">Docs</span>');
+                    if (m.max_attachment_mb > 0) caps.push(`<span class="badge" style="background:#3f3f46;">≤${m.max_attachment_mb}MB</span>`);
                     if (!isTrans && m.input_cost_per_million === 0 && m.output_cost_per_million === 0) caps.push('<span class="badge" style="background:#3f3f46;">Free</span>');
                     if (provInactive) caps.push('<span class="badge" style="background:#b91c1c;">provider inactive</span>');
                     return `
@@ -1168,6 +1187,11 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-transcribe').checked = !!m.transcribe;
             document.getElementById('model-supports-vision').checked = !!m.supports_vision;
             document.getElementById('model-supports-thinking').checked = !!m.supports_thinking;
+            document.getElementById('model-supports-audio').checked = !!m.supports_audio;
+            document.getElementById('model-supports-video').checked = !!m.supports_video;
+            document.getElementById('model-supports-documents').checked = !!m.supports_documents;
+            document.getElementById('model-max-attachment-mb').value = m.max_attachment_mb || '';
+            document.getElementById('model-accepted-mime').value = m.accepted_mime_types || '';
             document.getElementById('model-test-btn').style.display = 'block';
             const mtr = document.getElementById('model-test-result');
             if (mtr) { mtr.style.display = 'none'; mtr.textContent = ''; }

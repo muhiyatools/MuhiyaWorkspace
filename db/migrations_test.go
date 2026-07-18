@@ -38,6 +38,7 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"017_activate_gemma_vision.sql",
 		"018_model_supports_thinking.sql",
 		"019_default_transcription_language.sql",
+		"020_model_media_capabilities.sql",
 	} {
 		found := false
 		for _, n := range names {

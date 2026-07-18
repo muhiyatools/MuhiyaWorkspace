@@ -566,25 +566,13 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 
 	if isRouterRequest {
 		complexity = AnalyzePromptComplexity(oaiReq.Messages)
-		needsVision := false
-		for _, msg := range oaiReq.Messages {
-			if arr, ok := msg.Content.([]interface{}); ok {
-				for _, item := range arr {
-					if m, ok := item.(map[string]interface{}); ok {
-						if m["type"] == "image_url" {
-							needsVision = true
-							break
-						}
-					}
-				}
-			}
-		}
+		needs := detectMediaNeedsOpenAI(oaiReq.Messages)
 
 		// minimal/low means "think less" - it must never route the request
 		// onto a pricier thinking tier. An explicit client thinking object
 		// still counts as a thinking request.
 		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
-		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
+		targetModel, err = h.RouteToModel(complexity, needs, thinkingRequested)
 		if err != nil {
 			h.internalErrorResponse(w, "routing error", err)
 			return
@@ -600,29 +588,29 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		if pinnedID, ok := h.sticky.get(stKey); ok {
 			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil {
 				// Reuse the pin only if it is still ELIGIBLE for this request:
-				// active, vision-capable when an image is present, and not a free
+				// active, capable of every media modality present, and not a free
 				// (rate-limited) model on a text turn. Otherwise keep the fresh
-				// route (preferPaid already made it paid/vision-correct) and let
-				// it repin after success — this self-heals sessions previously
+				// route (preferPaid already made it paid/capability-correct) and
+				// let it repin after success — this self-heals sessions previously
 				// pinned to a broken/free model, with no 24h TTL wait.
 				eligible := pinned.Status == "active" &&
-					(!needsVision || modelMatchesVision(pinned)) &&
-					(needsVision || !modelIsFree(pinned))
+					modelSupportsMedia(pinned, needs) &&
+					(needs.Any() || !modelIsFree(pinned))
 				if eligible {
 					if pinned.ID != targetModel.ID {
 						log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
 					}
 					targetModel = pinned
 				} else {
-					log.Printf("[ROUTER-STICKY] pinned model %s ineligible (vision=%v free=%v); re-routing to %s", pinned.Name, needsVision, modelIsFree(pinned), targetModel.Name)
+					log.Printf("[ROUTER-STICKY] pinned model %s ineligible (media=%q free=%v); re-routing to %s", pinned.Name, needs.describe(), modelIsFree(pinned), targetModel.Name)
 				}
 			}
 		}
 		// NOTE: the pin is set AFTER a candidate succeeds (see end of the
 		// candidates loop), not here — so a failed model is never pinned.
 
-		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needsVision)
-		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, vision: %v) with %d fallback(s)", targetModel.Name, complexity, needsVision, len(fallbackModels))
+		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needs)
+		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, media: %q) with %d fallback(s)", targetModel.Name, complexity, needs.describe(), len(fallbackModels))
 	} else {
 		targetModel, err = h.db.GetModelByName(oaiReq.Model)
 		if err != nil {
@@ -805,18 +793,10 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		}
 		complexity = AnalyzePromptComplexity(oaiMessages)
 
-		needsVision := false
-		for _, msg := range anthReq.Messages {
-			for _, contentBlock := range msg.Content {
-				if contentBlock.Type == "image" {
-					needsVision = true
-					break
-				}
-			}
-		}
+		needs := detectMediaNeedsAnthropic(anthReq.Messages)
 
 		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(anthReq.Thinking)
-		targetModel, err = h.RouteToModel(complexity, needsVision, thinkingRequested)
+		targetModel, err = h.RouteToModel(complexity, needs, thinkingRequested)
 		if err != nil {
 			h.internalErrorResponse(w, "routing error", err)
 			return
@@ -824,10 +804,11 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 
 		// Same session stickiness as the OpenAI-format path (see there for
 		// the full rationale): protects the provider prefix cache from a
-		// mid-session model re-route.
+		// mid-session model re-route. A pin is reused only while it can still
+		// serve every media modality this turn carries.
 		stKey := stickyKeyFor(key.ID, r.Header.Get(SessionHeader))
 		if pinnedID, ok := h.sticky.get(stKey); ok {
-			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil && pinned.Status == "active" {
+			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil && pinned.Status == "active" && modelSupportsMedia(pinned, needs) {
 				if pinned.ID != targetModel.ID {
 					log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
 				}
@@ -836,8 +817,8 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		}
 		h.sticky.set(stKey, targetModel.ID)
 
-		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needsVision)
-		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, vision: %v) with %d fallback(s)", targetModel.Name, complexity, needsVision, len(fallbackModels))
+		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needs)
+		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, media: %q) with %d fallback(s)", targetModel.Name, complexity, needs.describe(), len(fallbackModels))
 	} else {
 		targetModel, err = h.db.GetModelByName(anthReq.Model)
 		if err != nil {
@@ -1009,6 +990,16 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	_ = json.Unmarshal(origBody, &bodyMap)
 	bodyMap["model"] = model.TargetModel
 	delete(bodyMap, "web_search")
+
+	// Media parts the target cannot accept are dropped with an honest text note
+	// (providers 400 on unsupported parts, which would otherwise poison every
+	// later turn of the conversation). Router-selected models already support
+	// everything present, so this is a no-op on the router path. Any document
+	// part that SURVIVES the strip and heads to OpenRouter pins the free PDF
+	// parsing engine (strip first, then inject — never plug in a parser for a
+	// part that was just removed).
+	stripUnsupportedMediaInBodyMap(bodyMap, model)
+	maybeInjectOpenRouterPDFParser(bodyMap, provider, h.openRouterPDFEngine())
 
 	// Translate the canonical thinking level into this provider's dialect
 	// (and strip the gateway-level fields regardless).
@@ -1652,13 +1643,22 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 				"description":       matchedModel.Description,
 				"context_window":    matchedModel.ContextWindow,
 				"max_output_tokens": matchedModel.MaxOutputTokens,
-				"supports_vision":   matchedModel.SupportsVision,
-				"supports_thinking": matchedModel.SupportsThinking,
 				"created_at":        matchedModel.CreatedAt.Format(time.RFC3339),
+			}
+			for k, v := range modelCapabilityFields(matchedModel) {
+				response[k] = v
 			}
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
 		} else {
+			info := map[string]interface{}{
+				"context_window":    matchedModel.ContextWindow,
+				"max_output_tokens": matchedModel.MaxOutputTokens,
+				"max_tokens":        matchedModel.MaxOutputTokens,
+				"display_name":      displayName,
+				"description":       matchedModel.Description,
+				"owned_by":          ownedBy,
+			}
 			response := map[string]interface{}{
 				"id":                matchedModel.Name,
 				"object":            "model",
@@ -1669,19 +1669,12 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 				"context_window":    matchedModel.ContextWindow,
 				"max_output_tokens": matchedModel.MaxOutputTokens,
 				"max_tokens":        matchedModel.MaxOutputTokens,
-				"supports_vision":   matchedModel.SupportsVision,
-				"supports_thinking": matchedModel.SupportsThinking,
-				"info": map[string]interface{}{
-					"context_window":    matchedModel.ContextWindow,
-					"max_output_tokens": matchedModel.MaxOutputTokens,
-					"max_tokens":        matchedModel.MaxOutputTokens,
-					"display_name":      displayName,
-					"description":       matchedModel.Description,
-					"owned_by":          ownedBy,
-					"supports_vision":   matchedModel.SupportsVision,
-					"supports_thinking": matchedModel.SupportsThinking,
-				},
 			}
+			for k, v := range modelCapabilityFields(matchedModel) {
+				response[k] = v
+				info[k] = v
+			}
+			response["info"] = info
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(response)
 		}
@@ -1691,23 +1684,26 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 	// List all models
 	if clientIsAnthropic {
 		var data []map[string]interface{}
-		for _, m := range models {
+		for i := range models {
+			m := &models[i]
 			if m.Status == "active" && !m.Transcribe {
 				displayName := m.DisplayName
 				if displayName == "" {
 					displayName = m.Name + " (via MuhiyaLLM)"
 				}
-				data = append(data, map[string]interface{}{
+				entry := map[string]interface{}{
 					"type":              "model",
 					"id":                m.Name,
 					"display_name":      displayName,
 					"description":       m.Description,
 					"context_window":    m.ContextWindow,
 					"max_output_tokens": m.MaxOutputTokens,
-					"supports_vision":   m.SupportsVision,
-					"supports_thinking": m.SupportsThinking,
 					"created_at":        m.CreatedAt.Format(time.RFC3339),
-				})
+				}
+				for k, v := range modelCapabilityFields(m) {
+					entry[k] = v
+				}
+				data = append(data, entry)
 			}
 		}
 
@@ -1721,7 +1717,8 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		json.NewEncoder(w).Encode(response)
 	} else {
 		var data []map[string]interface{}
-		for _, m := range models {
+		for i := range models {
+			m := &models[i]
 			if m.Status == "active" && !m.Transcribe {
 				displayName := m.DisplayName
 				if displayName == "" {
@@ -1731,7 +1728,15 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 				if ownedBy == "" {
 					ownedBy = "MuhiyaLLM"
 				}
-				data = append(data, map[string]interface{}{
+				info := map[string]interface{}{
+					"context_window":    m.ContextWindow,
+					"max_output_tokens": m.MaxOutputTokens,
+					"max_tokens":        m.MaxOutputTokens,
+					"display_name":      displayName,
+					"description":       m.Description,
+					"owned_by":          ownedBy,
+				}
+				entry := map[string]interface{}{
 					"id":                m.Name,
 					"object":            "model",
 					"created":           m.CreatedAt.Unix(),
@@ -1741,19 +1746,13 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 					"context_window":    m.ContextWindow,
 					"max_output_tokens": m.MaxOutputTokens,
 					"max_tokens":        m.MaxOutputTokens,
-					"supports_vision":   m.SupportsVision,
-					"supports_thinking": m.SupportsThinking,
-					"info": map[string]interface{}{
-						"context_window":    m.ContextWindow,
-						"max_output_tokens": m.MaxOutputTokens,
-						"max_tokens":        m.MaxOutputTokens,
-						"display_name":      displayName,
-						"description":       m.Description,
-						"owned_by":          ownedBy,
-						"supports_vision":   m.SupportsVision,
-						"supports_thinking": m.SupportsThinking,
-					},
-				})
+				}
+				for k, v := range modelCapabilityFields(m) {
+					entry[k] = v
+					info[k] = v
+				}
+				entry["info"] = info
+				data = append(data, entry)
 			}
 		}
 

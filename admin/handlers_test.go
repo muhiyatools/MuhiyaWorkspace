@@ -252,6 +252,12 @@ func TestValidateModelShape(t *testing.T) {
 		{"negative input price", func(m *db.Model) { m.InputCostPerMillion = -1 }, http.StatusBadRequest},
 		{"negative per-minute", func(m *db.Model) { m.PricePerMinute = -0.01 }, http.StatusBadRequest},
 		{"negative context", func(m *db.Model) { m.ContextWindow = -5 }, http.StatusBadRequest},
+		{"negative attachment cap", func(m *db.Model) { m.MaxAttachmentMB = -1 }, http.StatusBadRequest},
+		{"attachment cap ok", func(m *db.Model) { m.MaxAttachmentMB = 25 }, 0},
+		{"mime list ok", func(m *db.Model) { m.AcceptedMimeTypes = "image/png, application/pdf, audio/*" }, 0},
+		{"mime list trailing comma ok", func(m *db.Model) { m.AcceptedMimeTypes = "image/png," }, 0},
+		{"mime list garbage", func(m *db.Model) { m.AcceptedMimeTypes = "not a mime" }, http.StatusBadRequest},
+		{"mime list missing subtype", func(m *db.Model) { m.AcceptedMimeTypes = "image" }, http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
@@ -319,6 +325,24 @@ func TestComputeCoverage(t *testing.T) {
 		if strings.Contains(wn, "No active vision-capable model") {
 			t.Error("no-vision warning must be gone when a vision model is active")
 		}
+	}
+}
+
+// TestComputeCoverage_MediaCounts pins the audio/video/documents capability
+// counters: flagged + active + on an active provider counts; anything else not.
+func TestComputeCoverage_MediaCounts(t *testing.T) {
+	providers := []db.Provider{
+		{ID: "deepseek", Status: "active"},
+		{ID: "openrouter", Status: "inactive"},
+	}
+	got := computeCoverage([]db.Model{
+		{Name: "a", ProviderID: "deepseek", Status: "active", SupportsAudio: true, SupportsDocuments: true, InputCostPerMillion: 1, OutputCostPerMillion: 1},
+		{Name: "b", ProviderID: "deepseek", Status: "active", SupportsVideo: true, InputCostPerMillion: 1, OutputCostPerMillion: 1},
+		{Name: "c", ProviderID: "openrouter", Status: "active", SupportsDocuments: true}, // stranded provider → not counted
+		{Name: "d", ProviderID: "deepseek", Status: "inactive", SupportsAudio: true},     // inactive model → not counted
+	}, providers)
+	if got.ActiveAudio != 1 || got.ActiveVideo != 1 || got.ActiveDocuments != 1 {
+		t.Fatalf("media coverage counts wrong: audio=%d video=%d documents=%d", got.ActiveAudio, got.ActiveVideo, got.ActiveDocuments)
 	}
 }
 

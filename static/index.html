@@ -664,6 +664,28 @@
                     <input type="checkbox" id="model-supports-thinking" style="width: auto; margin-bottom: 0;">
                     <label for="model-supports-thinking" style="margin-bottom: 0; cursor: pointer;">Thinking — supports reasoning effort (eligible for the thinking tier)</label>
                 </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                    <input type="checkbox" id="model-supports-audio" style="width: auto; margin-bottom: 0;">
+                    <label for="model-supports-audio" style="margin-bottom: 0; cursor: pointer;">Audio — accepts audio input (routes audio attachments here)</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                    <input type="checkbox" id="model-supports-video" style="width: auto; margin-bottom: 0;">
+                    <label for="model-supports-video" style="margin-bottom: 0; cursor: pointer;">Video — accepts video input (routes video attachments here)</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                    <input type="checkbox" id="model-supports-documents" style="width: auto; margin-bottom: 0;">
+                    <label for="model-supports-documents" style="margin-bottom: 0; cursor: pointer;">Documents — accepts document input like PDF (routes document attachments here)</label>
+                </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="model-max-attachment-mb">Max Attachment (MB, 0 = client default)</label>
+                        <input type="number" id="model-max-attachment-mb" placeholder="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="model-accepted-mime">Accepted MIME Types (optional, comma-separated)</label>
+                        <input type="text" id="model-accepted-mime" placeholder="e.g. image/png, application/pdf">
+                    </div>
+                </div>
                 <div class="form-group-row">
                     <div class="form-group">
                         <label for="model-cost-in">Input Cost ($/1M tokens)</label>
