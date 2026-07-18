@@ -1652,6 +1652,8 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 				"description":       matchedModel.Description,
 				"context_window":    matchedModel.ContextWindow,
 				"max_output_tokens": matchedModel.MaxOutputTokens,
+				"supports_vision":   matchedModel.SupportsVision,
+				"supports_thinking": matchedModel.SupportsThinking,
 				"created_at":        matchedModel.CreatedAt.Format(time.RFC3339),
 			}
 			w.WriteHeader(http.StatusOK)
@@ -1667,6 +1669,8 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 				"context_window":    matchedModel.ContextWindow,
 				"max_output_tokens": matchedModel.MaxOutputTokens,
 				"max_tokens":        matchedModel.MaxOutputTokens,
+				"supports_vision":   matchedModel.SupportsVision,
+				"supports_thinking": matchedModel.SupportsThinking,
 				"info": map[string]interface{}{
 					"context_window":    matchedModel.ContextWindow,
 					"max_output_tokens": matchedModel.MaxOutputTokens,
@@ -1674,6 +1678,8 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 					"display_name":      displayName,
 					"description":       matchedModel.Description,
 					"owned_by":          ownedBy,
+					"supports_vision":   matchedModel.SupportsVision,
+					"supports_thinking": matchedModel.SupportsThinking,
 				},
 			}
 			w.WriteHeader(http.StatusOK)
@@ -1698,6 +1704,8 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 					"description":       m.Description,
 					"context_window":    m.ContextWindow,
 					"max_output_tokens": m.MaxOutputTokens,
+					"supports_vision":   m.SupportsVision,
+					"supports_thinking": m.SupportsThinking,
 					"created_at":        m.CreatedAt.Format(time.RFC3339),
 				})
 			}
@@ -1733,6 +1741,8 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 					"context_window":    m.ContextWindow,
 					"max_output_tokens": m.MaxOutputTokens,
 					"max_tokens":        m.MaxOutputTokens,
+					"supports_vision":   m.SupportsVision,
+					"supports_thinking": m.SupportsThinking,
 					"info": map[string]interface{}{
 						"context_window":    m.ContextWindow,
 						"max_output_tokens": m.MaxOutputTokens,
@@ -1740,6 +1750,8 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 						"display_name":      displayName,
 						"description":       m.Description,
 						"owned_by":          ownedBy,
+						"supports_vision":   m.SupportsVision,
+						"supports_thinking": m.SupportsThinking,
 					},
 				})
 			}
@@ -1918,6 +1930,28 @@ func isMiniMaxM3(model *db.Model) bool {
 	return false
 }
 
+// normalizeLangCode reduces a language value to a clean ISO-639-1 primary
+// subtag (e.g. "ar-EG" → "ar", "EN" → "en"). Returns "" for anything that is
+// not a 2-letter code, so callers can fall back to a default.
+func normalizeLangCode(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, '-'); i > 0 {
+		s = s[:i]
+	}
+	if len(s) != 2 {
+		return ""
+	}
+	for _, c := range s {
+		if c < 'a' || c > 'z' {
+			return ""
+		}
+	}
+	return s
+}
+
 func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.Request, bodyBytes []byte, key *db.VirtualKey) {
 	// Restore body to parse multipart form
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -2008,14 +2042,30 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Copy other form fields
+	// Copy other form fields (language is handled explicitly below so exactly
+	// one normalized value is sent).
 	for k, vals := range r.MultipartForm.Value {
-		if k != "model" && k != "file" && k != "durationSec" {
+		if k != "model" && k != "file" && k != "durationSec" && k != "language" {
 			for _, v := range vals {
 				_ = writer.WriteField(k, v)
 			}
 		}
 	}
+
+	// Always send exactly one transcription language. Precedence: the client's
+	// field → the system-setting default (default_transcription_language) → "ar".
+	// Some providers behind OpenRouter 400 without a language, and Whisper
+	// otherwise auto-detects and often mis-labels short/accented Arabic as
+	// English — an explicit hint fixes both.
+	lang := normalizeLangCode(r.FormValue("language"))
+	if lang == "" {
+		def, _ := h.db.GetSetting("default_transcription_language")
+		lang = normalizeLangCode(def)
+	}
+	if lang == "" {
+		lang = "ar"
+	}
+	_ = writer.WriteField("language", lang)
 
 	if err := writer.Close(); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "Failed to close multipart writer: "+err.Error(), "api_error")
@@ -2036,6 +2086,9 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	// Attribution + sticky-session parity with the chat path when the
+	// transcription provider is OpenRouter (no-op for any other provider).
+	setOpenRouterHeaders(req, provider, r)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -2100,7 +2153,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		OutputTokens:   len(strings.Fields(textResult)),
 		Cost:           cost,
 		LatencyMS:      latencyMs,
-		ClientApp:      "MuhiyaChat",
+		ClientApp:      getClientAppName(r),
 		RequestedModel: targetModel.Name,
 		Complexity:     "direct",
 		CreatedAt:      time.Now(),

@@ -278,7 +278,10 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('model-price-minute').value = '';
         document.getElementById('model-transcribe').checked = false;
         document.getElementById('model-supports-vision').checked = false;
+        document.getElementById('model-supports-thinking').checked = false;
         toggleModelTypeFields();
+        document.getElementById('model-test-btn').style.display = 'none';
+        document.getElementById('model-test-result').style.display = 'none';
         document.getElementById('model-status-group').style.display = 'none';
         document.getElementById('model-modal-title').innerText = "Define Model Mapping";
         document.getElementById('model-submit-btn').innerText = "Save Model";
@@ -409,6 +412,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const price_per_minute = parseFloat(document.getElementById('model-price-minute').value) || 0.0;
         const transcribe = document.getElementById('model-transcribe').checked;
         const supports_vision = document.getElementById('model-supports-vision').checked;
+        const supports_thinking = document.getElementById('model-supports-thinking').checked;
         const inCost = parseFloat(document.getElementById('model-cost-in').value) || 0;
         const outCost = parseFloat(document.getElementById('model-cost-out').value) || 0;
         const readCost = parseFloat(document.getElementById('model-cost-read').value) || 0;
@@ -435,14 +439,30 @@ document.addEventListener('DOMContentLoaded', () => {
             context_window,
             max_output_tokens,
             description,
-            supports_vision
+            supports_vision,
+            supports_thinking
         };
 
         const method = id ? 'PUT' : 'POST';
 
         mutateJSON('/api/models', method, body)
-            .then(() => { modalModel.classList.remove('show'); loadProvidersAndModels(); showToast('Model saved', 'success'); })
+            .then((res) => {
+                modalModel.classList.remove('show');
+                loadProvidersAndModels();
+                showToast('Model saved', 'success');
+                // The server returns non-blocking warnings (e.g. "$0 and active",
+                // "provider inactive") — surface each so the operator sees why a
+                // model might not route as expected.
+                const warnings = (res && res.warnings) || [];
+                warnings.forEach((wmsg, i) => setTimeout(() => showToast(wmsg, 'warning'), 400 * (i + 1)));
+            })
             .catch(err => showToast(err.message, 'error'));
+    });
+
+    // One-time: probe the currently-edited model against its provider.
+    document.getElementById('model-test-btn').addEventListener('click', (ev) => {
+        const mid = document.getElementById('model-id').value;
+        if (mid) window.testModel(mid, ev.currentTarget);
     });
 
     // --- Inline Plan Budget Window Editor Builder ---
@@ -953,6 +973,68 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // --- Providers & Models CRUD ---
+    // --- Provider / model connectivity tests + capability coverage ---
+    window.testProvider = (id, btn) => {
+        const card = btn.closest('.provider-card');
+        const out = card ? card.querySelector('.provider-test-result') : null;
+        if (out) { out.style.display = 'block'; out.style.color = 'var(--text-muted)'; out.textContent = 'Testing…'; }
+        btn.disabled = true;
+        mutateJSON('/api/providers/test', 'POST', { id })
+            .then(res => {
+                if (!out) return;
+                out.style.color = res.ok ? '#16a34a' : '#dc2626';
+                out.textContent = res.ok
+                    ? `✓ Reachable (HTTP ${res.status}${res.model_count ? `, ${res.model_count} models` : ''})`
+                    : `✗ ${res.status || ''} ${res.message || 'failed'}`.trim();
+            })
+            .catch(err => { if (out) { out.style.color = '#dc2626'; out.textContent = '✗ ' + err.message; } })
+            .finally(() => { btn.disabled = false; });
+    };
+
+    window.testModel = (id, btn) => {
+        const out = document.getElementById('model-test-result');
+        if (out) { out.style.display = 'block'; out.style.color = 'var(--text-muted)'; out.textContent = 'Testing…'; }
+        if (btn) btn.disabled = true;
+        mutateJSON('/api/models/test', 'POST', { id })
+            .then(res => {
+                if (!out) return;
+                out.style.color = res.ok ? '#16a34a' : '#dc2626';
+                out.textContent = res.ok
+                    ? `✓ Model responded (HTTP ${res.status}, ${res.latency_ms}ms)`
+                    : `✗ ${res.status || ''} ${res.upstream_message || 'failed'}`.trim();
+            })
+            .catch(err => { if (out) { out.style.color = '#dc2626'; out.textContent = '✗ ' + err.message; } })
+            .finally(() => { if (btn) btn.disabled = false; });
+    };
+
+    function loadCoverageBanner() {
+        const banner = document.getElementById('coverage-banner');
+        if (!banner) return;
+        fetchJSON('/api/coverage')
+            .then(cov => {
+                const warnings = (cov && cov.warnings) || [];
+                banner.style.display = 'block';
+                if (warnings.length === 0) {
+                    banner.innerHTML = `<div style="padding:0.6rem 0.9rem; border-radius:8px; background:rgba(22,163,74,0.12); border:1px solid rgba(22,163,74,0.4); color:#16a34a; font-size:0.82rem;">
+                        <i class="fa-solid fa-circle-check"></i> Capability coverage OK — ${cov.active_models} active models · ${cov.active_vision} vision · ${cov.active_thinking} thinking · ${cov.active_providers} providers.</div>`;
+                    return;
+                }
+                banner.innerHTML = `<div style="padding:0.7rem 0.9rem; border-radius:8px; background:rgba(217,119,6,0.12); border:1px solid rgba(217,119,6,0.45); color:#d97706; font-size:0.82rem;">
+                    <div style="font-weight:600; margin-bottom:0.3rem;"><i class="fa-solid fa-triangle-exclamation"></i> Coverage warnings</div>
+                    <ul style="margin:0; padding-inline-start:1.1rem;">${warnings.map(wn => `<li>${escapeHtml(wn)}</li>`).join('')}</ul></div>`;
+            })
+            .catch(() => { banner.style.display = 'none'; });
+    }
+
+    function loadGatewayVersion() {
+        const el = document.getElementById('gateway-version');
+        if (!el) return;
+        fetch('/health').then(r => r.json()).then(h => {
+            if (h && h.version) el.textContent = `MuhiyaLLM ${h.version} · ${h.migrations || 0} migrations`;
+        }).catch(() => {});
+    }
+    loadGatewayVersion();
+
     function loadProvidersAndModels() {
         const list = document.getElementById('providers-list');
         fetchJSON('/api/providers')
@@ -978,9 +1060,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             <span><strong>Key:</strong> ••••••••••••••••</span>
                         </div>
                         <div class="provider-actions">
+                            <button class="btn btn-secondary btn-sm" onclick="testProvider('${p.id}', this)"><i class="fa-solid fa-plug-circle-check"></i> Test</button>
                             <button class="btn btn-secondary btn-sm" onclick="editProvider('${p.id}')"><i class="fa-solid fa-pen"></i> Edit</button>
                             <button class="btn btn-danger btn-sm" onclick="deleteProvider('${p.id}')"><i class="fa-solid fa-trash"></i> Delete</button>
                         </div>
+                        <div class="provider-test-result" style="margin-top: 0.5rem; font-size: 0.78rem; display:none;"></div>
                     </div>
                 `).join('');
             })
@@ -988,6 +1072,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.error('Error loading providers:', err);
                 renderContainerError(list, err.message);
             });
+
+        loadCoverageBanner();
 
         const tbody = document.querySelector('#models-table tbody');
         fetchJSON('/api/models')
@@ -1000,12 +1086,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 tbody.innerHTML = models.map(m => {
                     const isTrans = (m.model_type || 'llm') === 'transcription' || (m.model_type || 'llm') === 'transcript';
+                    // Capability badges: the operator sees at a glance whether a model
+                    // is vision/thinking-capable, is a $0 (rate-limited) model, or sits
+                    // on an inactive provider (so it silently cannot serve traffic).
+                    const provider = (state.providers || []).find(p => p.id === m.provider_id);
+                    const provInactive = provider && provider.status !== 'active';
+                    const caps = [];
+                    if (m.supports_vision) caps.push('<span class="badge" style="background:#6d28d9;">Vision</span>');
+                    if (m.supports_thinking) caps.push('<span class="badge" style="background:#0369a1;">Thinking</span>');
+                    if (!isTrans && m.input_cost_per_million === 0 && m.output_cost_per_million === 0) caps.push('<span class="badge" style="background:#3f3f46;">Free</span>');
+                    if (provInactive) caps.push('<span class="badge" style="background:#b91c1c;">provider inactive</span>');
                     return `
                     <tr>
                         <td>
                             <div style="font-weight: 600;">${escapeHtml(m.name)}</div>
                             ${m.display_name ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 1px;">${escapeHtml(m.display_name)}</div>` : ''}
                             ${!isTrans ? `<div style="font-size: 0.68rem; color: var(--text-muted-dark); margin-top: 3px;">Ctx: ${m.context_window ? m.context_window.toLocaleString() : 'N/A'} | Out: ${m.max_output_tokens ? m.max_output_tokens.toLocaleString() : 'N/A'}</div>` : ''}
+                            ${caps.length ? `<div style="margin-top:4px; display:flex; gap:3px; flex-wrap:wrap;">${caps.join('')}</div>` : ''}
                         </td>
                         <td><span class="badge" style="background:#27272a;">${escapeHtml(m.provider_id)}</span></td>
                         <td><code>${escapeHtml(m.target_model)}</code></td>
@@ -1070,6 +1167,10 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-price-minute').value = m.price_per_minute || 0.0;
             document.getElementById('model-transcribe').checked = !!m.transcribe;
             document.getElementById('model-supports-vision').checked = !!m.supports_vision;
+            document.getElementById('model-supports-thinking').checked = !!m.supports_thinking;
+            document.getElementById('model-test-btn').style.display = 'block';
+            const mtr = document.getElementById('model-test-result');
+            if (mtr) { mtr.style.display = 'none'; mtr.textContent = ''; }
             toggleModelTypeFields();
             document.getElementById('model-cost-in').value = m.input_cost_per_million;
             document.getElementById('model-cost-out').value = m.output_cost_per_million;

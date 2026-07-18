@@ -28,6 +28,15 @@ var staticFS embed.FS
 
 var dbReady atomic.Bool
 
+// buildVersion identifies the running binary. It is "dev" unless injected at
+// build time with -ldflags "-X main.buildVersion=009-<yyyymmdd-HHmm>". Exposed
+// on /health so a deploy can be verified without guessing which build is live.
+var buildVersion = "dev"
+
+// migrationCount is the number of applied DB migrations, loaded once the DB is
+// ready and reported on /health alongside the version.
+var migrationCount atomic.Int64
+
 func main() {
 	dsn := withPostgresConnectTimeout("host=127.0.0.1 port=5432 user=postgres password=postgres dbname=gateway sslmode=disable")
 	if envDSN := os.Getenv("DATABASE_URL"); envDSN != "" {
@@ -79,17 +88,18 @@ func main() {
 	var adminMuxHandler http.Handler
 	var proxyMuxHandler http.Handler
 
-	// Health endpoint — responds immediately so elest.io proxy never 502s
+	// Health endpoint — responds immediately so elest.io proxy never 502s. Also
+	// reports the build version + applied-migration count so a deploy is
+	// verifiable with a single curl (no more guessing whether a fix is live).
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if !dbReady.Load() {
-			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"connecting"}`))
+			fmt.Fprintf(w, `{"status":"connecting","version":%q}`, buildVersion)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		fmt.Fprintf(w, `{"status":"ok","version":%q,"migrations":%d}`, buildVersion, migrationCount.Load())
 	})
 
 	// Root redirect
@@ -279,6 +289,14 @@ func main() {
 	// handler assignments above are guaranteed visible and there is no window
 	// where dbReady is true but a handler is still nil.
 	dbReady.Store(true)
+
+	// Load the applied-migration count for /health (best-effort; a failure just
+	// leaves the reported count at 0).
+	if n, err := database.CountMigrations(); err == nil {
+		migrationCount.Store(int64(n))
+	} else {
+		log.Printf("[HEALTH] could not count migrations: %v", err)
+	}
 
 	// Optional request_logs retention: unset by default (keeps full audit
 	// history), opt in with REQUEST_LOG_RETENTION_DAYS to bound table growth

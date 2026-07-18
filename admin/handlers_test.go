@@ -222,3 +222,129 @@ func TestHandleSettingsBlankMeansKeepRoundTrip(t *testing.T) {
 		t.Fatalf("non-secret blank must write empty, got %q", got)
 	}
 }
+
+// TestValidateModelShape pins the DB-free model invariants.
+func TestValidateModelShape(t *testing.T) {
+	base := func() db.Model {
+		return db.Model{
+			Name:                 "deepseek-v4-flash",
+			TargetModel:          "deepseek/deepseek-chat",
+			RoutingTier:          "simple",
+			InputCostPerMillion:  0.14,
+			OutputCostPerMillion: 0.28,
+		}
+	}
+
+	cases := []struct {
+		name     string
+		mutate   func(*db.Model)
+		wantCode int
+	}{
+		{"valid", func(m *db.Model) {}, 0},
+		{"empty name", func(m *db.Model) { m.Name = "" }, http.StatusBadRequest},
+		{"uppercase name", func(m *db.Model) { m.Name = "DeepSeek" }, http.StatusBadRequest},
+		{"space in name", func(m *db.Model) { m.Name = "deep seek" }, http.StatusBadRequest},
+		{"leading dash", func(m *db.Model) { m.Name = "-x" }, http.StatusBadRequest},
+		{"slug ok", func(m *db.Model) { m.Name = "qwen3.5-9b:free" }, 0},
+		{"missing target", func(m *db.Model) { m.TargetModel = "" }, http.StatusBadRequest},
+		{"bad tier", func(m *db.Model) { m.RoutingTier = "extreme" }, http.StatusBadRequest},
+		{"empty tier ok", func(m *db.Model) { m.RoutingTier = "" }, 0},
+		{"negative input price", func(m *db.Model) { m.InputCostPerMillion = -1 }, http.StatusBadRequest},
+		{"negative per-minute", func(m *db.Model) { m.PricePerMinute = -0.01 }, http.StatusBadRequest},
+		{"negative context", func(m *db.Model) { m.ContextWindow = -5 }, http.StatusBadRequest},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base()
+			tc.mutate(&m)
+			code, msg := validateModelShape(&m)
+			if code != tc.wantCode {
+				t.Errorf("code = %d (%q), want %d", code, msg, tc.wantCode)
+			}
+			if tc.wantCode != 0 && msg == "" {
+				t.Error("rejection must carry a message")
+			}
+		})
+	}
+}
+
+func TestAdminModelVisionCapable(t *testing.T) {
+	if !adminModelVisionCapable(&db.Model{Name: "x", SupportsThinking: false, SupportsVision: true}) {
+		t.Error("flag must make a model vision-capable")
+	}
+	if !adminModelVisionCapable(&db.Model{Name: "qwen3-vl-8b"}) {
+		t.Error("-vl heuristic should match")
+	}
+	if adminModelVisionCapable(&db.Model{Name: "deepseek-chat", TargetModel: "deepseek/deepseek-chat"}) {
+		t.Error("plain text model must not be vision-capable")
+	}
+}
+
+func TestComputeCoverage(t *testing.T) {
+	providers := []db.Provider{
+		{ID: "deepseek", Status: "active"},
+		{ID: "openrouter", Status: "inactive"},
+	}
+
+	// No active vision model on an active provider → top warning present.
+	got := computeCoverage([]db.Model{
+		{Name: "deepseek-chat", ProviderID: "deepseek", Status: "active", TargetModel: "deepseek-chat"},
+		{Name: "gemma-4-vision", ProviderID: "openrouter", Status: "active", SupportsVision: true}, // provider inactive
+	}, providers)
+	if got.ActiveVision != 0 {
+		t.Errorf("ActiveVision = %d, want 0 (vision model is on an inactive provider)", got.ActiveVision)
+	}
+	if len(got.Warnings) == 0 || !strings.Contains(got.Warnings[0], "No active vision-capable model") {
+		t.Errorf("expected the no-vision warning first, got %v", got.Warnings)
+	}
+	foundStranded := false
+	for _, wn := range got.Warnings {
+		if strings.Contains(wn, "gemma-4-vision") && strings.Contains(wn, "inactive") {
+			foundStranded = true
+		}
+	}
+	if !foundStranded {
+		t.Errorf("expected a stranded-model warning for gemma-4-vision, got %v", got.Warnings)
+	}
+
+	// A flagged vision model on an active provider clears the top warning.
+	ok := computeCoverage([]db.Model{
+		{Name: "vis", ProviderID: "deepseek", Status: "active", SupportsVision: true, InputCostPerMillion: 1, OutputCostPerMillion: 1},
+	}, providers)
+	if ok.ActiveVision != 1 {
+		t.Errorf("ActiveVision = %d, want 1", ok.ActiveVision)
+	}
+	for _, wn := range ok.Warnings {
+		if strings.Contains(wn, "No active vision-capable model") {
+			t.Error("no-vision warning must be gone when a vision model is active")
+		}
+	}
+}
+
+// TestHandleModelsRejectsBadShapePreDB proves the POST handler refuses a
+// malformed model at 400 before any DB call (nil db would panic on a write), so
+// shape validation short-circuits first — same guarantee as the user/key tests.
+func TestHandleModelsRejectsBadShapePreDB(t *testing.T) {
+	api := &AdminAPI{db: nil}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty name", `{"target_model":"x","routing_tier":"simple"}`},
+		{"uppercase name", `{"name":"BadName","target_model":"x"}`},
+		{"missing target", `{"name":"good-name"}`},
+		{"bad tier", `{"name":"good-name","target_model":"x","routing_tier":"extreme"}`},
+		{"negative price", `{"name":"good-name","target_model":"x","input_cost_per_million":-1}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/models", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			api.handleModels(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 pre-DB, got %d", rec.Code)
+			}
+		})
+	}
+}

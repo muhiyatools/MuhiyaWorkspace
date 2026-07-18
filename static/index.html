@@ -60,6 +60,7 @@
                     <span class="value select-all" id="api-openai-url">http://localhost:8090/v1</span>
                     <span class="label" style="margin-top: 0.5rem;">Anthropic Endpoint:</span>
                     <span class="value select-all" id="api-anthropic-url">http://localhost:8090/v1/messages</span>
+                    <span class="value" id="gateway-version" style="margin-top: 0.5rem; opacity: 0.6; font-size: 0.7rem;"></span>
                 </div>
             </div>
         </aside>
@@ -294,6 +295,7 @@
                         <h2>Virtual Model Mappings</h2>
                         <button class="btn btn-primary" id="btn-add-model"><i class="fa-solid fa-circle-nodes"></i> Add Model Mapping</button>
                     </div>
+                    <div id="coverage-banner" style="display:none; margin-bottom: 1rem;"></div>
                     <div class="table-container">
                         <table id="models-table">
                             <thead>
@@ -658,6 +660,10 @@
                     <input type="checkbox" id="model-supports-vision" style="width: auto; margin-bottom: 0;">
                     <label for="model-supports-vision" style="margin-bottom: 0; cursor: pointer;">Vision — accepts image input (routes image requests here)</label>
                 </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                    <input type="checkbox" id="model-supports-thinking" style="width: auto; margin-bottom: 0;">
+                    <label for="model-supports-thinking" style="margin-bottom: 0; cursor: pointer;">Thinking — supports reasoning effort (eligible for the thinking tier)</label>
+                </div>
                 <div class="form-group-row">
                     <div class="form-group">
                         <label for="model-cost-in">Input Cost ($/1M tokens)</label>
@@ -719,6 +725,8 @@
                     </select>
                 </div>
                 <button type="submit" class="btn btn-primary btn-block" id="model-submit-btn">Save Model</button>
+                <button type="button" class="btn btn-secondary btn-block" id="model-test-btn" style="display:none; margin-top:0.5rem;"><i class="fa-solid fa-vial"></i> Test connection (1-token probe)</button>
+                <div id="model-test-result" style="margin-top:0.6rem; font-size:0.8rem; display:none;"></div>
             </form>
         </div>
     </div>

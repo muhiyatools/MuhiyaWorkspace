@@ -106,8 +106,12 @@ type Model struct {
 	// SupportsVision is the operator-set flag that a model accepts image input.
 	// It is the source of truth for vision routing (the name heuristic is only a
 	// fallback), so a vision model with any name is routed correctly.
-	SupportsVision bool      `json:"supports_vision"`
-	CreatedAt      time.Time `json:"created_at"`
+	SupportsVision bool `json:"supports_vision"`
+	// SupportsThinking is the operator-set flag that a model supports reasoning /
+	// thinking effort. Source of truth for thinking-tier routing (the target-name
+	// heuristic is only a fallback for unflagged rows).
+	SupportsThinking bool      `json:"supports_thinking"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type RequestLog struct {
@@ -875,12 +879,12 @@ func (db *DB) DeleteProvider(id string) error {
 // --- Models CRUD ---
 
 func (db *DB) GetModelByName(name string) (*Model, error) {
+	// Legacy convenience alias: a bare "deepseek" resolves to the default chat
+	// model. The old "claude"/"openai" aliases were removed — this platform ships
+	// real gateway virtual ids (DeepSeek family), never fake Claude/GPT rows, so
+	// those aliases only ever 404'd.
 	normalizedName := name
-	if name == "claude" {
-		normalizedName = "claude-3-5-sonnet"
-	} else if name == "openai" {
-		normalizedName = "gpt-4o"
-	} else if name == "deepseek" {
+	if name == "deepseek" {
 		normalizedName = "deepseek-chat"
 	}
 
@@ -894,7 +898,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE)
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE)
 		FROM models
 		WHERE status = 'active' AND (name = $1 OR id = $1 OR lower(display_name) = lower($1))
 		ORDER BY (name = $1) DESC, (id = $1) DESC
@@ -902,7 +906,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -918,12 +922,12 @@ func (db *DB) GetModel(id string) (*Model, error) {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE) 
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE) 
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -938,7 +942,7 @@ func (db *DB) ListModels() ([]Model, error) {
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0), 
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
-		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE) 
+		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE) 
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -951,7 +955,7 @@ func (db *DB) ListModels() ([]Model, error) {
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
 			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
-			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision)
+			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking)
 		if err != nil {
 			return nil, err
 		}
@@ -971,12 +975,12 @@ func (db *DB) CreateModel(m Model) error {
 		id, name, provider_id, target_model, input_cost_per_million,
 		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
 		routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
-		display_name, description, owned_by, supports_vision
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+		display_name, description, owned_by, supports_vision, supports_thinking
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
 		m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
-		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision)
+		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision, m.SupportsThinking)
 	return err
 }
 
@@ -991,11 +995,12 @@ func (db *DB) UpdateModel(m Model) error {
 		input_cost_per_million = $4, output_cost_per_million = $5,
 		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9,
 		model_type = $10, price_per_minute = $11, transcribe = $12, context_window = $13, max_output_tokens = $14,
-		display_name = $15, description = $16, owned_by = $17, supports_vision = $18 WHERE id = $19`,
+		display_name = $15, description = $16, owned_by = $17, supports_vision = $18,
+		supports_thinking = $19 WHERE id = $20`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
 		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType,
 		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
-		m.OwnedBy, m.SupportsVision, m.ID)
+		m.OwnedBy, m.SupportsVision, m.SupportsThinking, m.ID)
 	return err
 }
 
@@ -1036,6 +1041,15 @@ func (db *DB) ListSettings() ([]SystemSetting, error) {
 func (db *DB) SetSetting(key, value string) error {
 	_, err := db.conn.Exec("INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", key, value)
 	return err
+}
+
+// CountMigrations returns how many migrations have been applied (the row count
+// of the _migrations tracking table). Surfaced on /health so a deploy can be
+// verified — "is the new binary live?" becomes a single curl instead of a guess.
+func (db *DB) CountMigrations() (int, error) {
+	var n int
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM _migrations").Scan(&n)
+	return n, err
 }
 
 // --- Logging & Budget Queries ---

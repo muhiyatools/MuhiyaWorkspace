@@ -59,7 +59,11 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	thinkingLevel := ResolveThinkingLevel(r, oaiReq.ReasoningEffort)
 	model, provider, complexity, fallbacks, err := h.resolveAgentModel(oaiReq, thinkingLevel)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Routing error: "+err.Error(), "api_error")
+		// A routing/availability failure is a 503 (the service momentarily has no
+		// model that can serve this request), not a 500. The error string carries
+		// pool diagnostics + remediation (see selectRoute), and the client maps
+		// routing_unavailable to a friendly, actionable bubble.
+		h.writeError(w, http.StatusServiceUnavailable, "Routing error: "+err.Error(), "routing_unavailable")
 		return true
 	}
 	// The loop only supports OpenAI-format upstreams. Let Anthropic-format
@@ -304,14 +308,25 @@ func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel st
 		}
 		// Failover candidates for the agent loop (free-safe per preferPaid).
 		fallbacks, _ = h.GetFallbackModels(model.ID, needsVision)
-	} else {
-		model, err = h.db.GetModelByName(oaiReq.Model)
-		if err != nil {
-			return nil, nil, complexity, nil, err
+
+		// Pick the first candidate whose provider is live. RouteToModel already
+		// excludes inactive-provider models, so the primary normally wins; this
+		// also rescues a provider that flipped inactive between the route query
+		// and now, and drops any dead-provider fallbacks from the retry list.
+		chosen, provider, rest := h.firstServableModel(append([]*db.Model{model}, fallbacks...))
+		if chosen == nil {
+			return nil, nil, complexity, nil, fmt.Errorf("no routable model: every candidate is on an inactive provider — activate a provider in Admin → Providers")
 		}
-		if model == nil {
-			return nil, nil, complexity, nil, fmt.Errorf("model '%s' not found or inactive", oaiReq.Model)
-		}
+		return chosen, provider, complexity, rest, nil
+	}
+
+	// Explicit model selection: no router fallbacks.
+	model, err = h.db.GetModelByName(oaiReq.Model)
+	if err != nil {
+		return nil, nil, complexity, nil, err
+	}
+	if model == nil {
+		return nil, nil, complexity, nil, fmt.Errorf("model '%s' not found or inactive", oaiReq.Model)
 	}
 
 	provider, err := h.db.GetProvider(model.ProviderID)
@@ -322,6 +337,21 @@ func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel st
 		return nil, nil, complexity, nil, fmt.Errorf("provider for model '%s' is unavailable", model.Name)
 	}
 	return model, provider, complexity, fallbacks, nil
+}
+
+// firstServableModel returns the first model whose provider loads and is active,
+// that provider, and the remaining candidates (as failover fallbacks, with the
+// chosen model and any skipped dead-provider models removed).
+func (h *ProxyHandler) firstServableModel(candidates []*db.Model) (*db.Model, *db.Provider, []*db.Model) {
+	for idx, m := range candidates {
+		p, err := h.db.GetProvider(m.ProviderID)
+		if err != nil || p == nil || p.Status != "active" {
+			continue
+		}
+		rest := append([]*db.Model{}, candidates[idx+1:]...)
+		return m, p, rest
+	}
+	return nil, nil, nil
 }
 
 // stripUnsupportedImageParts removes image_url content parts from every message

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"gateway/db"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -74,12 +75,18 @@ func AnalyzePromptComplexity(messages []OpenAIMessage) string {
 	return "simple"
 }
 
-// NOTE: deliberately unchanged by the thinking-level feature. This heuristic
-// steers muhiya-ai-router MODEL SELECTION with strict equality matching, so
-// widening it would silently re-route existing non-thinking traffic away from
-// newly-matched models. Thinking-level MAPPING is independent (proxy/thinking.go).
-func modelSupportsThinking(targetModel string) bool {
-	target := strings.ToLower(targetModel)
+// modelSupportsThinking reports whether a model supports reasoning/thinking
+// effort. The operator-set SupportsThinking flag is authoritative; the target-
+// name heuristic is only a fallback for unflagged rows. This steers
+// muhiya-ai-router MODEL SELECTION with strict equality matching, so the flag
+// lets an operator include/exclude a model from the thinking tier explicitly
+// rather than relying on a substring guess. Thinking-level MAPPING is
+// independent (proxy/thinking.go).
+func modelSupportsThinking(m *db.Model) bool {
+	if m.SupportsThinking {
+		return true
+	}
+	target := strings.ToLower(m.TargetModel)
 	return strings.Contains(target, "reasoner") ||
 		strings.Contains(target, "r1") ||
 		strings.Contains(target, "o1") ||
@@ -145,10 +152,82 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve models: %w", err)
 	}
+	providerActive, err := h.activeProviderSet()
+	if err != nil {
+		return nil, err
+	}
+	return selectRoute(models, providerActive, complexity, needsVision, thinkingRequested)
+}
 
-	// Helper to check if model meets all criteria
-	matchFilter := func(m *db.Model, tierCheck bool) bool {
+// activeProviderSet returns a map of provider ID -> whether that provider is
+// active. Routing must never select a model whose provider is inactive/unkeyed:
+// such a model would pass every model-level filter and then hard-fail at the
+// upstream call. Loading providers once per route is cheap relative to the
+// upstream request that follows.
+func (h *ProxyHandler) activeProviderSet() (map[string]bool, error) {
+	providers, err := h.db.ListProviders()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve providers: %w", err)
+	}
+	set := make(map[string]bool, len(providers))
+	for i := range providers {
+		set[providers[i].ID] = providers[i].Status == "active"
+	}
+	return set, nil
+}
+
+// routingDiag captures why a route did or did not resolve, so a failure can be
+// reported with actionable numbers instead of the opaque "no active models".
+type routingDiag struct {
+	total, active, eligible, visionCapable int
+}
+
+// computeRoutingDiag counts the model pool at each narrowing stage: total rows,
+// active rows, rows that are active AND on an active provider AND not a
+// transcription model (the genuinely routable pool), and how many of those can
+// accept images. eligible/visionCapable are what a routing failure hinges on.
+func computeRoutingDiag(models []db.Model, providerActive map[string]bool) routingDiag {
+	var d routingDiag
+	d.total = len(models)
+	for i := range models {
+		m := &models[i]
+		if m.Status == "active" {
+			d.active++
+		}
+		if m.Status != "active" || m.Transcribe || !providerActive[m.ProviderID] {
+			continue
+		}
+		d.eligible++
+		if modelMatchesVision(m) {
+			d.visionCapable++
+		}
+	}
+	return d
+}
+
+// routingError builds a human-actionable failure from the pool diagnostics. It
+// names the exact remediation (activate a model / flag Vision) so the operator
+// never has to guess which filter emptied the candidate set.
+func routingError(d routingDiag, needsVision bool) error {
+	if needsVision {
+		return fmt.Errorf("no routable model (vision required): %d models, %d active, %d on active providers, %d vision-capable — activate a vision-capable model (or tick its Vision flag) in Admin → Models",
+			d.total, d.active, d.eligible, d.visionCapable)
+	}
+	return fmt.Errorf("no routable model: %d models, %d active, %d on active providers — activate a model on an active provider in Admin → Models",
+		d.total, d.active, d.eligible)
+}
+
+// selectRoute is the pure routing core: given the model list, a provider-active
+// map, and the request shape, it returns the cheapest eligible model. It has no
+// DB dependency so the routing ladder is unit-testable. The four fallback tiers
+// (exact tier+thinking, exact tier, thinking-only, anything) are expressed as
+// data; every tier additionally requires the model's provider to be active.
+func selectRoute(models []db.Model, providerActive map[string]bool, complexity string, needsVision, thinkingRequested bool) (*db.Model, error) {
+	matchFilter := func(m *db.Model, tierCheck, thinkingCheck bool) bool {
 		if m.Status != "active" || m.Transcribe {
+			return false
+		}
+		if !providerActive[m.ProviderID] {
 			return false
 		}
 		if tierCheck && m.RoutingTier != complexity {
@@ -157,73 +236,46 @@ func (h *ProxyHandler) RouteToModel(complexity string, needsVision bool, thinkin
 		if needsVision && !modelMatchesVision(m) {
 			return false
 		}
-		return modelSupportsThinking(m.TargetModel) == thinkingRequested
+		if thinkingCheck && modelSupportsThinking(m) != thinkingRequested {
+			return false
+		}
+		return true
 	}
 
-	// 1. Try exact tier + thinking criteria
+	// The ladder, loosest-last. Byte-equivalent to the previous four inlined
+	// blocks, now with the provider gate folded into matchFilter.
+	tiers := []struct{ tierCheck, thinkingCheck bool }{
+		{true, true},
+		{true, false},
+		{false, true},
+		{false, false},
+	}
+
 	var candidates []*db.Model
-	for i := range models {
-		m := &models[i]
-		if matchFilter(m, true) {
-			candidates = append(candidates, m)
-		}
-	}
-
-	// 2. Fallback: Exact tier but ignore thinking filter
-	if len(candidates) == 0 {
+	for _, t := range tiers {
 		for i := range models {
 			m := &models[i]
-			if m.Status == "active" && m.RoutingTier == complexity && !m.Transcribe {
-				if needsVision && !modelMatchesVision(m) {
-					continue
-				}
+			if matchFilter(m, t.tierCheck, t.thinkingCheck) {
 				candidates = append(candidates, m)
 			}
 		}
-	}
-
-	// 3. Fallback: Ignore tier check but keep thinking criteria
-	if len(candidates) == 0 {
-		for i := range models {
-			m := &models[i]
-			if matchFilter(m, false) {
-				candidates = append(candidates, m)
-			}
-		}
-	}
-
-	// 4. Ultimate fallback: ignore all except active status and vision
-	if len(candidates) == 0 {
-		for i := range models {
-			m := &models[i]
-			if m.Status == "active" && !m.Transcribe {
-				if needsVision && !modelMatchesVision(m) {
-					continue
-				}
-				candidates = append(candidates, m)
-			}
+		if len(candidates) > 0 {
+			break
 		}
 	}
 
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no active models available for routing")
+		d := computeRoutingDiag(models, providerActive)
+		log.Printf("[ROUTING-FAIL] vision=%v thinking=%v complexity=%s :: total=%d active=%d eligible=%d vision-capable=%d",
+			needsVision, thinkingRequested, complexity, d.total, d.active, d.eligible, d.visionCapable)
+		return nil, routingError(d, needsVision)
 	}
 
 	// Keep free models out of general (non-vision) routing when a paid model is
 	// available, so a $0 rate-limited model never becomes the default route.
 	candidates = preferPaid(candidates, needsVision)
 
-	// Sort candidates by price (cheapest first) to guarantee credit optimization!
-	for i := 0; i < len(candidates); i++ {
-		for j := i + 1; j < len(candidates); j++ {
-			costI := candidates[i].InputCostPerMillion + candidates[i].OutputCostPerMillion
-			costJ := candidates[j].InputCostPerMillion + candidates[j].OutputCostPerMillion
-			if costJ < costI {
-				candidates[i], candidates[j] = candidates[j], candidates[i]
-			}
-		}
-	}
-
+	sortByPrice(candidates)
 	return candidates[0], nil
 }
 
@@ -234,11 +286,21 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 	if err != nil {
 		return nil, err
 	}
+	providerActive, err := h.activeProviderSet()
+	if err != nil {
+		return nil, err
+	}
+	return filterFallbacks(models, providerActive, excludeModelID, needsVision), nil
+}
 
+// filterFallbacks is the pure failover-candidate builder: active, non-excluded,
+// non-transcribe models on an active provider, vision-filtered when required,
+// free-safe, cheapest-first. DB-free for testability.
+func filterFallbacks(models []db.Model, providerActive map[string]bool, excludeModelID string, needsVision bool) []*db.Model {
 	var fallbacks []*db.Model
 	for i := range models {
 		m := &models[i]
-		if m.Status == "active" && m.ID != excludeModelID && !m.Transcribe {
+		if m.Status == "active" && m.ID != excludeModelID && !m.Transcribe && providerActive[m.ProviderID] {
 			if needsVision && !modelMatchesVision(m) {
 				continue
 			}
@@ -249,19 +311,23 @@ func (h *ProxyHandler) GetFallbackModels(excludeModelID string, needsVision bool
 	// A text request must never fail over INTO a free (rate-limited) model when a
 	// paid alternative exists; a vision request keeps free vision models.
 	fallbacks = preferPaid(fallbacks, needsVision)
+	sortByPrice(fallbacks)
+	return fallbacks
+}
 
-	// Sort fallbacks so that cheaper ones are tried first (smart credit usage!)
-	for i := 0; i < len(fallbacks); i++ {
-		for j := i + 1; j < len(fallbacks); j++ {
-			costI := fallbacks[i].InputCostPerMillion + fallbacks[i].OutputCostPerMillion
-			costJ := fallbacks[j].InputCostPerMillion + fallbacks[j].OutputCostPerMillion
+// sortByPrice orders models cheapest-first by summed input+output per-million
+// cost (insertion-stable bubble, tiny N). Shared by routing and fallback so
+// credit optimization is identical on both paths.
+func sortByPrice(models []*db.Model) {
+	for i := 0; i < len(models); i++ {
+		for j := i + 1; j < len(models); j++ {
+			costI := models[i].InputCostPerMillion + models[i].OutputCostPerMillion
+			costJ := models[j].InputCostPerMillion + models[j].OutputCostPerMillion
 			if costJ < costI {
-				fallbacks[i], fallbacks[j] = fallbacks[j], fallbacks[i]
+				models[i], models[j] = models[j], models[i]
 			}
 		}
 	}
-
-	return fallbacks, nil
 }
 
 // ====================================================================

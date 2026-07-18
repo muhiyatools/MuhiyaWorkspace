@@ -33,6 +33,11 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"004_add_thinking_level.sql",
 		"005_preserve_request_logs.sql",
 		"009_minimax_models.sql",
+		"015_openrouter_provider.sql",
+		"016_model_supports_vision.sql",
+		"017_activate_gemma_vision.sql",
+		"018_model_supports_thinking.sql",
+		"019_default_transcription_language.sql",
 	} {
 		found := false
 		for _, n := range names {

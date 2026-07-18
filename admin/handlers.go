@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/mail"
@@ -28,7 +30,10 @@ func RegisterRoutes(mux *http.ServeMux, database *db.DB) {
 	mux.HandleFunc("/api/budgets", api.handleBudgets)
 	mux.HandleFunc("/api/keys", api.handleKeys)
 	mux.HandleFunc("/api/providers", api.handleProviders)
+	mux.HandleFunc("/api/providers/test", api.handleProviderTest)
 	mux.HandleFunc("/api/models", api.handleModels)
+	mux.HandleFunc("/api/models/test", api.handleModelTest)
+	mux.HandleFunc("/api/coverage", api.handleCoverage)
 	mux.HandleFunc("/api/settings", api.handleSettings)
 	mux.HandleFunc("/api/logs", api.handleLogs)
 	mux.HandleFunc("/api/users/topups", api.handleUserTopups)
@@ -583,6 +588,91 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Models Handler ---
+
+var modelNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]*$`)
+var validRoutingTiers = map[string]bool{"simple": true, "medium": true, "hard": true, "none": true}
+
+// validateModel enforces the invariants an operator can otherwise violate by
+// hand: a routable slug name, no duplicate names, a real provider, a target
+// model, a known tier, and non-negative numbers. It returns a non-zero errCode
+// (with message) to reject, or a list of non-blocking warnings that the admin
+// UI surfaces as a toast (e.g. "$0 and active", "provider inactive"). selfID is
+// the row being updated (excluded from the duplicate check); "" on create.
+// validateModelShape holds the DB-free invariants (name format, target, tier,
+// non-negative numbers) so they are unit-testable without a database. Returns a
+// non-zero errCode with message on rejection.
+func validateModelShape(m *db.Model) (errCode int, errMsg string) {
+	name := strings.TrimSpace(m.Name)
+	if name == "" {
+		return http.StatusBadRequest, "Model name is required."
+	}
+	if !modelNameRe.MatchString(name) {
+		return http.StatusBadRequest, "Model name must be lowercase letters/digits and . _ : - only, starting with a letter or digit."
+	}
+	if strings.TrimSpace(m.TargetModel) == "" {
+		return http.StatusBadRequest, "Target model (the upstream provider model id) is required."
+	}
+	tier := m.RoutingTier
+	if tier == "" {
+		tier = "none"
+	}
+	if !validRoutingTiers[tier] {
+		return http.StatusBadRequest, "Routing tier must be one of: simple, medium, hard, none."
+	}
+	if m.InputCostPerMillion < 0 || m.OutputCostPerMillion < 0 ||
+		m.CacheReadCostPerMillion < 0 || m.CacheWriteCostPerMillion < 0 || m.PricePerMinute < 0 {
+		return http.StatusBadRequest, "Prices cannot be negative."
+	}
+	if m.ContextWindow < 0 || m.MaxOutputTokens < 0 {
+		return http.StatusBadRequest, "Token limits cannot be negative."
+	}
+	return 0, ""
+}
+
+func (api *AdminAPI) validateModel(m *db.Model, selfID string) (warnings []string, errCode int, errMsg string) {
+	if code, msg := validateModelShape(m); code != 0 {
+		return nil, code, msg
+	}
+	name := strings.TrimSpace(m.Name)
+	tier := m.RoutingTier
+	if tier == "" {
+		tier = "none"
+	}
+
+	// Duplicate name (case-insensitive), excluding the row being updated.
+	all, err := api.db.ListModels()
+	if err != nil {
+		return nil, http.StatusInternalServerError, "Failed to check for duplicate model names."
+	}
+	for i := range all {
+		if all[i].ID != selfID && strings.EqualFold(strings.TrimSpace(all[i].Name), name) {
+			return nil, http.StatusConflict, "A model named '" + name + "' already exists."
+		}
+	}
+
+	// Provider must exist.
+	prov, err := api.db.GetProvider(m.ProviderID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, "Failed to look up the model's provider."
+	}
+	if prov == nil {
+		return nil, http.StatusBadRequest, "Provider '" + m.ProviderID + "' does not exist. Create the provider first."
+	}
+
+	// Non-blocking warnings — the model saves, but the operator is told why it
+	// might not behave as expected.
+	if m.Status == "active" && !m.Transcribe && m.InputCostPerMillion == 0 && m.OutputCostPerMillion == 0 {
+		warnings = append(warnings, "This model is $0 and active — free-tier rate limits may apply. It is kept out of default text routing (used only for vision/fallback).")
+	}
+	if tier == "none" && !m.Transcribe {
+		warnings = append(warnings, "Routing tier is 'none' — this model is reachable only via capability/fallback routing, not a primary tier match.")
+	}
+	if prov.Status != "active" {
+		warnings = append(warnings, "Provider '"+m.ProviderID+"' is inactive — this model cannot serve traffic until the provider is activated.")
+	}
+	return warnings, 0, ""
+}
+
 func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -602,26 +692,47 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 		if m.ID == "" {
 			m.ID = "model-" + generateRandomString(8)
 		}
-		m.Status = "active"
+		if m.RoutingTier == "" {
+			m.RoutingTier = "none"
+		}
+		// Honor an explicit status if the form sent one; default to active so the
+		// common "add and use immediately" flow stays frictionless.
+		if m.Status == "" {
+			m.Status = "active"
+		}
 		m.CreatedAt = time.Now()
 
+		warnings, code, msg := api.validateModel(&m, "")
+		if code != 0 {
+			api.errorResponse(w, code, msg)
+			return
+		}
 		if err := api.db.CreateModel(m); err != nil {
 			api.dbErrorResponse(w, err)
 			return
 		}
-		api.jsonResponse(w, http.StatusCreated, m)
+		api.jsonResponse(w, http.StatusCreated, map[string]interface{}{"model": m, "warnings": warnings})
 
 	case http.MethodPut:
-		var m db.Model
-		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		// Merge-patch: read the body once, load the existing row, then overlay
+		// only the fields the body actually contains. This prevents a partial
+		// payload from zeroing unspecified columns (the old blind full-overwrite
+		// hazard — a form that omitted supports_vision would silently clear it).
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			api.errorResponse(w, http.StatusBadRequest, "Failed to read request body")
+			return
+		}
+		var incoming db.Model
+		if err := json.Unmarshal(bodyBytes, &incoming); err != nil {
 			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
 			return
 		}
-		if m.ID == "" {
+		if incoming.ID == "" {
 			api.errorResponse(w, http.StatusBadRequest, "Model ID is required")
 			return
 		}
-		existing, err := api.db.GetModel(m.ID)
+		existing, err := api.db.GetModel(incoming.ID)
 		if err != nil {
 			api.dbErrorResponse(w, err)
 			return
@@ -630,17 +741,31 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusNotFound, "Model not found")
 			return
 		}
-		if m.Status == "" {
-			m.Status = existing.Status
+		merged := *existing
+		if err := json.Unmarshal(bodyBytes, &merged); err != nil {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
+			return
 		}
-		if m.CreatedAt.IsZero() {
-			m.CreatedAt = existing.CreatedAt
+		// Identity/creation are immutable via update.
+		merged.ID = existing.ID
+		merged.CreatedAt = existing.CreatedAt
+		if merged.RoutingTier == "" {
+			merged.RoutingTier = "none"
 		}
-		if err := api.db.UpdateModel(m); err != nil {
+		if merged.Status == "" {
+			merged.Status = existing.Status
+		}
+
+		warnings, code, msg := api.validateModel(&merged, existing.ID)
+		if code != 0 {
+			api.errorResponse(w, code, msg)
+			return
+		}
+		if err := api.db.UpdateModel(merged); err != nil {
 			api.dbErrorResponse(w, err)
 			return
 		}
-		api.jsonResponse(w, http.StatusOK, m)
+		api.jsonResponse(w, http.StatusOK, map[string]interface{}{"model": merged, "warnings": warnings})
 
 	case http.MethodDelete:
 		id := r.URL.Query().Get("id")
@@ -657,6 +782,318 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 	default:
 		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
+}
+
+// --- Health-check & coverage endpoints ---
+
+var healthHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+// adminModelVisionCapable mirrors proxy.modelMatchesVision (flag-first, then the
+// name heuristic) so the coverage banner counts vision exactly as the router
+// would route it. Kept as a small local copy to avoid an admin→proxy import; if
+// the router predicate changes, update both (there is a test pinning the list).
+func adminModelVisionCapable(m *db.Model) bool {
+	if m.SupportsVision {
+		return true
+	}
+	hay := strings.ToLower(m.Name + " " + m.TargetModel)
+	for _, kw := range []string{"gpt-4o", "claude-3-5-sonnet", "vision", "-vl", "gemini", "gemma", "pixtral", "llava"} {
+		if strings.Contains(hay, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// testProvider probes a provider's upstream model-list endpoint to confirm the
+// base URL + key work. OpenAI dialect: GET {base}/models with a bearer token.
+// Anthropic dialect: GET {anthropic_base}/v1/models with x-api-key. Returns a
+// truncated upstream message on failure.
+func testProvider(baseURL, anthropicBaseURL, apiKey string) (ok bool, status int, message string, modelCount int) {
+	var req *http.Request
+	var err error
+	switch {
+	case strings.TrimSpace(baseURL) != "":
+		req, err = http.NewRequest(http.MethodGet, strings.TrimSuffix(baseURL, "/")+"/models", nil)
+		if err != nil {
+			return false, 0, "bad base_url: " + err.Error(), 0
+		}
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	case strings.TrimSpace(anthropicBaseURL) != "":
+		req, err = http.NewRequest(http.MethodGet, strings.TrimSuffix(anthropicBaseURL, "/")+"/v1/models", nil)
+		if err != nil {
+			return false, 0, "bad anthropic_base_url: " + err.Error(), 0
+		}
+		if apiKey != "" {
+			req.Header.Set("x-api-key", apiKey)
+		}
+		req.Header.Set("anthropic-version", "2023-06-01")
+	default:
+		return false, 0, "provider has no base URL configured", 0
+	}
+
+	resp, err := healthHTTPClient.Do(req)
+	if err != nil {
+		return false, http.StatusBadGateway, "connection failed: " + err.Error(), 0
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if resp.StatusCode >= 400 {
+		return false, resp.StatusCode, truncateMsg(string(body)), 0
+	}
+	var parsed struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	return true, resp.StatusCode, "ok", len(parsed.Data)
+}
+
+// postJSONProbe sends a tiny POST and returns whether the upstream accepted it.
+func postJSONProbe(url string, headers map[string]string, payload interface{}) (bool, int, string) {
+	buf, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return false, 0, "bad url: " + err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := healthHTTPClient.Do(req)
+	if err != nil {
+		return false, http.StatusBadGateway, "connection failed: " + err.Error()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if resp.StatusCode >= 400 {
+		return false, resp.StatusCode, truncateMsg(string(body))
+	}
+	return true, resp.StatusCode, "ok"
+}
+
+// testModelCompletion sends a 1-token completion so "will this model work?" is a
+// one-click answer, in whichever dialect the provider speaks.
+func testModelCompletion(p *db.Provider, targetModel string) (bool, int, string) {
+	if strings.TrimSpace(p.BaseURL) != "" {
+		return postJSONProbe(
+			strings.TrimSuffix(p.BaseURL, "/")+"/chat/completions",
+			map[string]string{"Authorization": "Bearer " + p.APIKey},
+			map[string]interface{}{
+				"model":      targetModel,
+				"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+				"max_tokens": 1,
+				"stream":     false,
+			})
+	}
+	if strings.TrimSpace(p.AnthropicBaseURL) != "" {
+		return postJSONProbe(
+			strings.TrimSuffix(p.AnthropicBaseURL, "/")+"/v1/messages",
+			map[string]string{"x-api-key": p.APIKey, "anthropic-version": "2023-06-01"},
+			map[string]interface{}{
+				"model":      targetModel,
+				"max_tokens": 1,
+				"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+			})
+	}
+	return false, 0, "provider has no base URL configured"
+}
+
+func truncateMsg(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 500 {
+		return s[:500]
+	}
+	return s
+}
+
+type providerTestRequest struct {
+	ID               string `json:"id"`
+	BaseURL          string `json:"base_url"`
+	AnthropicBaseURL string `json:"anthropic_base_url"`
+	APIKey           string `json:"api_key"`
+}
+
+// handleProviderTest probes a provider (stored by id, or a draft from the form)
+// and reports whether its upstream is reachable + authenticated.
+func (api *AdminAPI) handleProviderTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	var body providerTestRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+	baseURL, anthURL, apiKey := body.BaseURL, body.AnthropicBaseURL, body.APIKey
+	if strings.TrimSpace(body.ID) != "" {
+		p, err := api.db.GetProvider(body.ID)
+		if err != nil {
+			api.dbErrorResponse(w, err)
+			return
+		}
+		if p == nil {
+			api.errorResponse(w, http.StatusNotFound, "Provider not found")
+			return
+		}
+		if baseURL == "" {
+			baseURL = p.BaseURL
+		}
+		if anthURL == "" {
+			anthURL = p.AnthropicBaseURL
+		}
+		// A blank key on the form means "use the stored one" (GET redacts it).
+		if strings.TrimSpace(apiKey) == "" {
+			apiKey = p.APIKey
+		}
+	}
+	ok, status, message, count := testProvider(baseURL, anthURL, apiKey)
+	api.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"ok": ok, "status": status, "message": message, "model_count": count,
+	})
+}
+
+// handleModelTest sends a 1-token probe to a model's provider (transcription
+// models fall back to a provider reachability check).
+func (api *AdminAPI) handleModelTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(body.ID) == "" {
+		api.errorResponse(w, http.StatusBadRequest, "Model id is required")
+		return
+	}
+	m, err := api.db.GetModel(body.ID)
+	if err != nil {
+		api.dbErrorResponse(w, err)
+		return
+	}
+	if m == nil {
+		api.errorResponse(w, http.StatusNotFound, "Model not found")
+		return
+	}
+	p, err := api.db.GetProvider(m.ProviderID)
+	if err != nil {
+		api.dbErrorResponse(w, err)
+		return
+	}
+	if p == nil {
+		api.errorResponse(w, http.StatusBadRequest, "Model's provider '"+m.ProviderID+"' does not exist")
+		return
+	}
+
+	start := time.Now()
+	if m.Transcribe {
+		ok, status, message, _ := testProvider(p.BaseURL, p.AnthropicBaseURL, p.APIKey)
+		api.jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"ok": ok, "status": status,
+			"upstream_message": "transcription target validated by provider reachability: " + message,
+			"latency_ms":       time.Since(start).Milliseconds(),
+		})
+		return
+	}
+	ok, status, message := testModelCompletion(p, m.TargetModel)
+	api.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"ok": ok, "status": status, "upstream_message": message,
+		"latency_ms": time.Since(start).Milliseconds(),
+	})
+}
+
+type coverageResult struct {
+	ActiveModels     int      `json:"active_models"`
+	ActiveVision     int      `json:"active_vision"`
+	ActiveThinking   int      `json:"active_thinking"`
+	ActiveTranscribe int      `json:"active_transcribe"`
+	ActiveProviders  int      `json:"active_providers"`
+	Warnings         []string `json:"warnings"`
+}
+
+// computeCoverage is the pure capability-coverage analysis (DB-free, testable).
+// It counts active capabilities and composes actionable warnings: no active
+// vision model (image routing will fail), a transcription/other model stranded
+// on an inactive provider, and free-only vision (free-tier limits).
+func computeCoverage(models []db.Model, providers []db.Provider) coverageResult {
+	provActive := map[string]bool{}
+	res := coverageResult{Warnings: []string{}}
+	for i := range providers {
+		if providers[i].Status == "active" {
+			provActive[providers[i].ID] = true
+			res.ActiveProviders++
+		}
+	}
+
+	freeVisionOnly := 0
+	paidVisionExists := false
+	var stranded []string
+	for i := range models {
+		m := &models[i]
+		if m.Status != "active" {
+			continue
+		}
+		res.ActiveModels++
+		if m.Transcribe {
+			res.ActiveTranscribe++
+			if !provActive[m.ProviderID] {
+				stranded = append(stranded, "Transcription model '"+m.Name+"' is active but its provider '"+m.ProviderID+"' is inactive — transcription is down.")
+			}
+			continue
+		}
+		if !provActive[m.ProviderID] {
+			stranded = append(stranded, "Model '"+m.Name+"' is active but its provider '"+m.ProviderID+"' is inactive — it cannot serve traffic.")
+			continue
+		}
+		if adminModelVisionCapable(m) {
+			res.ActiveVision++
+			if m.InputCostPerMillion == 0 && m.OutputCostPerMillion == 0 {
+				freeVisionOnly++
+			} else {
+				paidVisionExists = true
+			}
+		}
+		if m.SupportsThinking {
+			res.ActiveThinking++
+		}
+	}
+
+	// Highest-priority warning first, then per-model stranding, then advisories.
+	if res.ActiveVision == 0 {
+		res.Warnings = append(res.Warnings, "No active vision-capable model on an active provider — image requests will fail routing. Activate a vision model (or tick its Vision flag) in Admin → Models.")
+	}
+	res.Warnings = append(res.Warnings, stranded...)
+	if res.ActiveVision > 0 && !paidVisionExists && freeVisionOnly > 0 {
+		res.Warnings = append(res.Warnings, "Only free ($0) models provide vision — daily free-tier limits apply. Consider adding a paid vision model as a fallback.")
+	}
+	return res
+}
+
+// handleCoverage reports capability coverage across active models + providers,
+// with actionable warnings. Drives the admin Models banner.
+func (api *AdminAPI) handleCoverage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	models, err := api.db.ListModels()
+	if err != nil {
+		api.dbErrorResponse(w, err)
+		return
+	}
+	providers, err := api.db.ListProviders()
+	if err != nil {
+		api.dbErrorResponse(w, err)
+		return
+	}
+	api.jsonResponse(w, http.StatusOK, computeCoverage(models, providers))
 }
 
 // --- System Settings Handler ---
