@@ -1361,8 +1361,15 @@ func (api *AdminAPI) handleUserTopups(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "user_id and credits are required")
 			return
 		}
+		// A caller-supplied ID must satisfy the same charset every other
+		// identifier does. This was the one CRUD handler that accepted one
+		// verbatim, and the top-up ID is rendered into the admin panel — the
+		// exact hazard the validID comment above describes.
 		if t.ID == "" {
 			t.ID = "topup_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		} else if !validID(t.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "invalid id")
+			return
 		}
 		t.UsedCredits = 0
 		t.CreatedAt = time.Now()
@@ -1384,8 +1391,8 @@ func (api *AdminAPI) handleUserTopups(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
 			return
 		}
-		if body.ID == "" {
-			api.errorResponse(w, http.StatusBadRequest, "id is required")
+		if body.ID == "" || !validID(body.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "a valid id is required")
 			return
 		}
 		if err := api.db.SetUserTopupExpiry(body.ID, body.ExpiresAt); err != nil {
@@ -1396,8 +1403,8 @@ func (api *AdminAPI) handleUserTopups(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		id := r.URL.Query().Get("id")
-		if id == "" {
-			api.errorResponse(w, http.StatusBadRequest, "id is required")
+		if id == "" || !validID(id) {
+			api.errorResponse(w, http.StatusBadRequest, "a valid id is required")
 			return
 		}
 		if err := api.db.DeleteUserTopup(id); err != nil {

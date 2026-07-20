@@ -191,21 +191,39 @@ func TestServiceOrAdminAuthStillRejectsBadCredentials(t *testing.T) {
 }
 
 func TestWithPostgresConnectTimeout(t *testing.T) {
+	// All three safety params must be applied: connect_timeout bounds dialing,
+	// while statement_timeout and lock_timeout are what stop one slow query or
+	// one contended advisory lock from holding a pool connection indefinitely
+	// and stalling every other tenant.
 	keyValue := withPostgresConnectTimeout("host=localhost port=5432 user=postgres")
-	if !strings.Contains(keyValue, "connect_timeout=5") {
-		t.Fatalf("expected key/value DSN to include connect_timeout, got %q", keyValue)
+	for _, want := range []string{"connect_timeout=5", "statement_timeout=30000", "lock_timeout=5000"} {
+		if !strings.Contains(keyValue, want) {
+			t.Fatalf("expected key/value DSN to include %s, got %q", want, keyValue)
+		}
 	}
 
 	parsed, err := url.Parse(withPostgresConnectTimeout("postgres://user:pass@example.com:5432/gateway?sslmode=disable"))
 	if err != nil {
 		t.Fatalf("expected postgres URL to parse: %v", err)
 	}
-	if parsed.Query().Get("connect_timeout") != "5" {
-		t.Fatalf("expected postgres URL connect_timeout=5, got %q", parsed.RawQuery)
+	for name, want := range map[string]string{"connect_timeout": "5", "statement_timeout": "30000", "lock_timeout": "5000"} {
+		if parsed.Query().Get(name) != want {
+			t.Fatalf("expected postgres URL %s=%s, got %q", name, want, parsed.RawQuery)
+		}
+	}
+	if parsed.Query().Get("sslmode") != "disable" {
+		t.Fatalf("existing DSN params must survive, got %q", parsed.RawQuery)
 	}
 
-	existing := "postgres://user:pass@example.com:5432/gateway?connect_timeout=12"
-	if got := withPostgresConnectTimeout(existing); got != existing {
-		t.Fatalf("existing timeout should be preserved, got %q", got)
+	// An operator's explicit value always wins over the default.
+	existing, err := url.Parse(withPostgresConnectTimeout("postgres://user:pass@example.com:5432/gateway?connect_timeout=12&statement_timeout=90000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existing.Query().Get("connect_timeout") != "12" || existing.Query().Get("statement_timeout") != "90000" {
+		t.Fatalf("operator-set timeouts must be preserved, got %q", existing.RawQuery)
+	}
+	if existing.Query().Get("lock_timeout") != "5000" {
+		t.Fatalf("unset params must still be defaulted, got %q", existing.RawQuery)
 	}
 }

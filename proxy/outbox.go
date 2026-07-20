@@ -36,15 +36,31 @@ func newLogOutbox(database *db.DB) *logOutbox {
 	return o
 }
 
+// outboxWorkers drain the queue concurrently. A single worker processed entries
+// serially at up to 81 seconds each (the full backoff ladder), so a 30-second
+// outage at even modest request rates filled the 4096-entry buffer faster than
+// it could drain and turned a transient blip into permanent revenue loss.
+const outboxWorkers = 8
+
 func (o *logOutbox) run() {
-	for entry := range o.queue {
-		o.retry(entry)
+	for i := 0; i < outboxWorkers; i++ {
+		go func() {
+			for entry := range o.queue {
+				o.retry(entry)
+			}
+		}()
 	}
 }
 
 func (o *logOutbox) retry(entry db.RequestLog) {
-	backoff := []time.Duration{1 * time.Second, 5 * time.Second, 15 * time.Second, 60 * time.Second}
-	for _, d := range backoff {
+	// Attempt IMMEDIATELY before any backoff. The first insert failed at request
+	// time, but by the moment this runs the blip is often already over — and
+	// sleeping first spent a second of the buffer's drain budget to learn
+	// nothing. Only genuine repeat failures pay the ladder.
+	if err := o.db.InsertRequestLog(entry); err == nil {
+		return
+	}
+	for _, d := range []time.Duration{1 * time.Second, 5 * time.Second, 15 * time.Second, 60 * time.Second} {
 		time.Sleep(d)
 		if err := o.db.InsertRequestLog(entry); err == nil {
 			log.Printf("[BILLING-RECOVERED] request log %s persisted after retry", entry.ID)

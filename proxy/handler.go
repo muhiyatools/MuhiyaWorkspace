@@ -85,6 +85,11 @@ func armIdleWatchdog(body io.Closer, d time.Duration) (reset func(), stop func()
 // contexts fit comfortably; this only stops memory-exhaustion abuse.
 const maxChatRequestBytes = 24 << 20 // 24 MiB
 
+// maxTranscriptionRequestBytes bounds multipart audio uploads. Generous enough
+// for long recordings (roughly 3 hours at a typical speech bitrate) while still
+// bounding what a single request can pull into memory.
+const maxTranscriptionRequestBytes = 100 << 20 // 100 MiB
+
 // maxAccumulatedTextBytes caps the per-stream fallback text buffer used only to
 // estimate completion tokens when the upstream omits usage. Bounding it keeps a
 // pathologically long stream from holding its entire response text in memory;
@@ -403,10 +408,18 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Read Request Body (bounded to prevent memory-exhaustion DoS).
-	// Transcription (multipart audio) is capped separately in its handler.
-	if !strings.Contains(r.URL.Path, "/audio/transcriptions") {
-		r.Body = http.MaxBytesReader(w, r.Body, maxChatRequestBytes)
+	//
+	// Transcription gets a LARGER cap, not no cap. The previous comment claimed
+	// it was "capped separately in its handler", but the only limit there is
+	// ParseMultipartForm's 10 MiB, which is the in-memory spill threshold — not
+	// a total size bound — and it runs AFTER this ReadAll has already pulled the
+	// whole body into memory. A single multi-gigabyte upload could exhaust the
+	// process before any handler code ran.
+	bodyLimit := int64(maxChatRequestBytes)
+	if strings.Contains(r.URL.Path, "/audio/transcriptions") {
+		bodyLimit = maxTranscriptionRequestBytes
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		if strings.Contains(err.Error(), "http: request body too large") {
@@ -460,6 +473,16 @@ func (h *ProxyHandler) authenticateVirtualKey(w http.ResponseWriter, r *http.Req
 
 	if key.ExpiresAt != nil && key.ExpiresAt.Before(time.Now()) {
 		h.writeError(w, http.StatusUnauthorized, "Virtual key has expired.", "invalid_request_error")
+		return nil, false
+	}
+
+	// A suspended owner cannot transact on ANY route. This lives here rather
+	// than in the rate limiter because the limiter is called per handler, and a
+	// handler that forgot to call it (transcription did) honored the suspension
+	// for nobody — an operator's explicit revocation silently did nothing.
+	// Authentication is the one place every route passes through.
+	if key.OwnerStatus != "" && key.OwnerStatus != "active" {
+		h.writeError(w, http.StatusForbidden, "This account is suspended.", "permission_error")
 		return nil, false
 	}
 	return key, true
@@ -1864,6 +1887,22 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 // Common Error Logging Helpers
 // ------------------------------------------
 
+// durationFromBytes estimates audio seconds from the uploaded byte count, as a
+// billing FLOOR for providers that report no duration of their own.
+//
+// It assumes a high bitrate on purpose. A high assumed bitrate yields a SHORT
+// duration, so this can only ever under-bill relative to reality — the estimate
+// is a floor that stops a request from being billed at zero, never a ceiling
+// that could over-charge a caller for audio they did not send. 320 kbit/s is
+// above essentially all speech encoding.
+func durationFromBytes(uploaded int64) float64 {
+	if uploaded <= 0 {
+		return 0
+	}
+	const maxBitsPerSecond = 320_000.0
+	return (float64(uploaded) * 8) / maxBitsPerSecond
+}
+
 // writeLimitError renders a CheckLimit failure according to WHY it happened.
 // One shape for all three causes forced clients to guess, and a client that
 // guesses "retry" against a spent budget hammers the gateway until the user
@@ -2095,6 +2134,17 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Entitlement is checked HERE, like every other billable route. This handler
+	// used to skip CheckLimit entirely, so a tenant who had exhausted their plan
+	// budget and every extra credit kept transcribing indefinitely at the
+	// operator's expense — the budget was enforced on chat and nowhere else.
+	// (Account suspension is enforced earlier, in authenticateVirtualKey, so it
+	// cannot be missed by a handler again.)
+	if err := h.limiter.CheckLimit(key, estimateTokens(modelName)); err != nil {
+		h.writeLimitError(w, err)
+		return
+	}
+
 	// Retrieve provider
 	provider, err := h.db.GetProvider(targetModel.ProviderID)
 	if err != nil {
@@ -2147,7 +2197,11 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		h.writeError(w, http.StatusInternalServerError, "Failed to create upstream multipart file: "+err.Error(), "api_error")
 		return
 	}
-	if _, err := io.Copy(part, file); err != nil {
+	// The byte count is captured here because it is the one measure of the audio
+	// the server observes directly. It backstops the billed duration when the
+	// provider reports none (see durationFromBytes).
+	uploadedBytes, err := io.Copy(part, file)
+	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "Failed to copy file data: "+err.Error(), "api_error")
 		return
 	}
@@ -2158,14 +2212,23 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Copy other form fields (language is handled explicitly below so exactly
-	// one normalized value is sent).
+	// Copy other form fields (language and response_format are handled
+	// explicitly below so exactly one normalized value is sent).
 	for k, vals := range r.MultipartForm.Value {
-		if k != "model" && k != "file" && k != "durationSec" && k != "language" {
+		if k != "model" && k != "file" && k != "durationSec" && k != "language" && k != "response_format" {
 			for _, v := range vals {
 				_ = writer.WriteField(k, v)
 			}
 		}
+	}
+
+	// response_format is pinned server-side: verbose_json is the only shape that
+	// carries the provider's own `duration`, which is what this route bills on.
+	// Letting the client choose the response shape let it choose whether the
+	// server could see the duration at all.
+	if err := writer.WriteField("response_format", "verbose_json"); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "Failed to write response_format field: "+err.Error(), "api_error")
+		return
 	}
 
 	// Always send exactly one transcription language. Precedence: the client's
@@ -2245,12 +2308,28 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	// Calculate cost using price_per_minute from targetModel
-	durationSecStr := r.FormValue("durationSec")
+	// Duration is what this route BILLS ON, so it must not come from the client.
+	// It used to be read straight out of the multipart form: omit the field and
+	// the persisted cost was $0, which meant free transcription at the
+	// operator's expense AND — because transcription spend shares the per-user
+	// budget window that gates chat — usage that never accrued against any
+	// limit. Every other billable path derives cost from upstream-reported
+	// usage; this one now does too.
+	//
+	// Preference order: the provider's own reported duration, then a floor
+	// derived from the uploaded bytes, and only then the client's hint (kept as
+	// a last resort for providers that report nothing, and never trusted below
+	// the byte-derived floor).
 	durationSec := 0.0
-	if durationSecStr != "" {
-		if d, err := strconv.ParseFloat(durationSecStr, 64); err == nil {
-			durationSec = d
+	if reported, ok := jsonMap["duration"].(float64); ok && reported > 0 {
+		durationSec = reported
+	}
+	if durationSec <= 0 {
+		durationSec = durationFromBytes(uploadedBytes)
+	}
+	if hint := r.FormValue("durationSec"); hint != "" {
+		if d, err := strconv.ParseFloat(hint, 64); err == nil && d > durationSec {
+			durationSec = d // a client may only ever revise the bill UPWARD
 		}
 	}
 

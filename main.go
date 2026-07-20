@@ -199,7 +199,14 @@ func main() {
 		Addr:              ":" + port,
 		Handler:           recoveryMiddleware(pathNormalizationMiddleware(loggerMiddleware(mux))),
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// ReadTimeout bounds how long a client may take to send its BODY.
+		// MaxBytesReader bounds the size but not the rate, so without this a
+		// client dribbling one byte per second held a goroutine, a connection,
+		// and (after auth) a database pool slot indefinitely — classic
+		// Slowloris. This is unrelated to WriteTimeout: request bodies here are
+		// bounded POSTs even when the response streams for minutes.
+		ReadTimeout: 5 * time.Minute,
+		IdleTimeout: 120 * time.Second,
 		// No WriteTimeout: SSE responses legitimately stream for many minutes.
 		// Per-stream stall detection lives in proxy's upstream client instead.
 	}
@@ -303,7 +310,7 @@ func main() {
 	// and the cost of every dashboard/budget aggregate query.
 	if daysStr := os.Getenv("REQUEST_LOG_RETENTION_DAYS"); daysStr != "" {
 		if days, err := strconv.Atoi(daysStr); err == nil && days > 0 {
-			go runRetentionSweeper(database, time.Duration(days)*24*time.Hour)
+			superviseLoop("retention-sweeper", func() { runRetentionSweeper(database, time.Duration(days)*24*time.Hour) })
 		} else {
 			log.Printf("[RETENTION] REQUEST_LOG_RETENTION_DAYS=%q is not a positive integer; retention pruning disabled", daysStr)
 		}
@@ -317,7 +324,7 @@ func main() {
 	// "Database is connecting" degraded state, keep probing (each ping dials
 	// fresh, so the pool heals itself), and flip back the moment the database
 	// answers. The gateway now survives any database outage unattended.
-	go watchDatabase(database)
+	superviseLoop("db-watchdog", func() { watchDatabase(database) })
 
 	fmt.Println(`
     __  ___      __    _               __    __    __  ___
@@ -386,6 +393,34 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// superviseLoop runs a long-lived background loop under panic recovery and
+// restarts it if it dies.
+//
+// recoveryMiddleware covers HANDLER goroutines only. The process-lifetime loops
+// (retention sweeper, DB watchdog, limiter sweeper, billing outbox) run outside
+// it, so a panic in one killed it silently for the rest of the process's life.
+// The billing outbox is the dangerous case: its death is self-concealing,
+// because BillingLossCount stops incrementing too — /health would look HEALTHIER
+// while billing quietly stopped being retried.
+func superviseLoop(name string, loop func()) {
+	go func() {
+		for {
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						log.Printf("[PANIC] background loop %s: %v\n%s", name, rec, debug.Stack())
+					}
+				}()
+				loop()
+			}()
+			// A clean return means the loop finished on purpose (context
+			// cancelled at shutdown); only a panic should restart it.
+			log.Printf("[BACKGROUND] loop %s exited; restarting in 5s", name)
+			time.Sleep(5 * time.Second)
+		}
+	}()
+}
+
 // Degrade after this many consecutive failed pings (one flaky ping must not
 // bounce the whole gateway), and recover on the first successful one.
 const dbWatchFailureThreshold = 2
@@ -447,22 +482,44 @@ func connectWithRetry(dsn string, maxAttempts int) (*db.DB, error) {
 	return nil, fmt.Errorf("failed to connect to database after %d attempts: %w", maxAttempts, lastErr)
 }
 
+// postgresSafetyParams bound how long the SERVER will spend on one statement or
+// waiting for one lock. Without them a single slow or blocked query holds its
+// pool connection forever: the pool is capped at 25, the billing transaction
+// takes a per-user advisory lock, and a handler blocked in the pool queue has no
+// deadline of its own (there is deliberately no WriteTimeout, for SSE). One
+// user's concurrent streams could therefore stall every other tenant's
+// authentication. These make the database refuse rather than hang.
+var postgresSafetyParams = map[string]string{
+	"connect_timeout":   "5",
+	"statement_timeout": "30000", // ms — far above any healthy query here
+	"lock_timeout":      "5000",  // ms — the advisory lock is held only briefly
+}
+
 func withPostgresConnectTimeout(dsn string) string {
-	if strings.TrimSpace(dsn) == "" || strings.Contains(dsn, "connect_timeout") {
+	if strings.TrimSpace(dsn) == "" {
 		return dsn
 	}
 
 	parsed, err := url.Parse(dsn)
 	if err == nil && (parsed.Scheme == "postgres" || parsed.Scheme == "postgresql") {
 		query := parsed.Query()
-		if query.Get("connect_timeout") == "" {
-			query.Set("connect_timeout", "5")
-			parsed.RawQuery = query.Encode()
+		for name, value := range postgresSafetyParams {
+			if query.Get(name) == "" {
+				query.Set(name, value)
+			}
 		}
+		parsed.RawQuery = query.Encode()
 		return parsed.String()
 	}
 
-	return strings.TrimSpace(dsn) + " connect_timeout=5"
+	// Key/value DSN form.
+	trimmed := strings.TrimSpace(dsn)
+	for name, value := range postgresSafetyParams {
+		if !strings.Contains(trimmed, name) {
+			trimmed += " " + name + "=" + value
+		}
+	}
+	return trimmed
 }
 
 func registerProxyRoutes(mux *http.ServeMux, proxyWrapper http.Handler) {

@@ -1458,7 +1458,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     const dateStr = new Date(t.created_at).toLocaleString();
                     const expiresStr = t.expires_at ? new Date(t.expires_at).toLocaleDateString() : '—';
-                    const actions = isDeleted ? '' : `<button class="btn btn-danger btn-sm" onclick="deleteTopup('${t.id}','${userId}')" title="Delete top-up"><i class="fa-solid fa-trash"></i></button>`;
+                    // Data attributes + a delegated listener, NOT an inline
+                    // onclick built by interpolation. An inline handler is a
+                    // script context nested inside an attribute, so the browser
+                    // entity-decodes it before the JS is compiled and escapeHtml
+                    // cannot secure it. In a plain attribute, escaping is enough.
+                    const actions = isDeleted ? '' : `<button class="btn btn-danger btn-sm js-delete-topup" data-topup-id="${escapeHtml(t.id)}" data-user-id="${escapeHtml(userId)}" title="Delete top-up"><i class="fa-solid fa-trash"></i></button>`;
                     return `
                         <tr${(isDeleted || isExpired) ? ' style="opacity:0.55;"' : ''}>
                             <td>${dateStr}</td>
@@ -1491,10 +1496,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // (soft delete; the row is retained for the admin audit trail).
     window.deleteTopup = (id, userId) => {
         if (!confirm('Delete this top-up? Its remaining credits disappear from the user at once. The row is kept for audit.')) return;
-        mutateJSON(`/api/users/topups?id=${id}`, 'DELETE')
+        mutateJSON(`/api/users/topups?id=${encodeURIComponent(id)}`, 'DELETE')
             .then(() => { loadUserTopups(userId); loadUsers(); showToast('Top-up deleted', 'success'); })
             .catch(err => showToast(err.message, 'error'));
     };
+
+    // Delegated handler for the top-up delete buttons. Registered once on the
+    // document rather than rebuilt per row, so the markup carries only data.
+    document.addEventListener('click', (event) => {
+        const button = event.target.closest('.js-delete-topup');
+        if (button) window.deleteTopup(button.dataset.topupId, button.dataset.userId);
+    });
 
     // Setup submit listener for top-up form once
     document.getElementById('topup-form').addEventListener('submit', (e) => {

@@ -71,6 +71,11 @@ type VirtualKey struct {
 	// plaintext outside the caller's memory - and is never scanned from the
 	// database (only its hash, key_hash, is stored).
 	Token string `json:"key,omitempty"`
+	// OwnerStatus is the status of the user this key belongs to, populated only
+	// by GetVirtualKey (the authentication path). A key can be active while its
+	// owner is suspended — there is no cascade — so authentication has to check
+	// both. Not serialized: it is a join artifact, not a property of the key.
+	OwnerStatus string `json:"-"`
 }
 
 type Provider struct {
@@ -756,10 +761,20 @@ func (db *DB) DeleteBudgetWindow(id string) error {
 // GetVirtualKey resolves a presented bearer token by its hash. Only the hash
 // ever touches the database or a comparison - the raw token exists only in
 // the caller's memory and, once, in CreateVirtualKey's return value.
+// It also returns the OWNING USER'S status, joined here rather than fetched
+// separately. Suspending a user sets users.status but leaves their
+// virtual_keys.status active, and there is no cascade — so until this join
+// existed, the only place any request path consulted the owner's status was
+// inside the rate limiter. That made suspension opt-in per handler, and the
+// transcription endpoint (which never calls the limiter) honored it for nobody.
+// Joining here puts it in the one place every authenticated route passes
+// through, and costs no extra round trip.
 func (db *DB) GetVirtualKey(presentedToken string) (*VirtualKey, error) {
 	var vk VirtualKey
-	err := db.conn.QueryRow("SELECT id, name, user_id, status, expires_at, created_at FROM virtual_keys WHERE key_hash = $1", hashToken(presentedToken)).
-		Scan(&vk.ID, &vk.Name, &vk.UserID, &vk.Status, &vk.ExpiresAt, &vk.CreatedAt)
+	err := db.conn.QueryRow(`SELECT k.id, k.name, k.user_id, k.status, k.expires_at, k.created_at, u.status
+		FROM virtual_keys k JOIN users u ON u.id = k.user_id
+		WHERE k.key_hash = $1`, hashToken(presentedToken)).
+		Scan(&vk.ID, &vk.Name, &vk.UserID, &vk.Status, &vk.ExpiresAt, &vk.CreatedAt, &vk.OwnerStatus)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
