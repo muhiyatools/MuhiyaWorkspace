@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -18,8 +19,28 @@ import (
 	"github.com/google/uuid"
 )
 
+// upstreamTotalTimeout bounds an ENTIRE upstream call including streaming. It
+// was 15 minutes, which a long agentic turn (deep reasoning plus a large diff)
+// can genuinely reach — and hitting it kills the stream mid-answer with no
+// report, which for a coding agent means losing the work. 30 minutes leaves
+// real headroom; the 120s idle watchdog below is what actually catches stalls,
+// and it does so in seconds rather than minutes.
+//
+// Overridable so an operator can tune it without a rebuild.
+var upstreamTotalTimeout = envDuration("UPSTREAM_TOTAL_TIMEOUT", 30*time.Minute)
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	if raw := strings.TrimSpace(os.Getenv(name)); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+		log.Printf("[CONFIG] %s=%q is not a valid duration; using %s", name, raw, fallback)
+	}
+	return fallback
+}
+
 var httpClient = &http.Client{
-	Timeout: 15 * time.Minute, // Allow very long responses / reasoning models
+	Timeout: upstreamTotalTimeout,
 	Transport: &http.Transport{
 		MaxIdleConns:        500,
 		MaxIdleConnsPerHost: 50,
@@ -659,10 +680,7 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
-		// The RPM/TPM windows are one minute wide; advise clients to back off
-		// for that long rather than hammering into a still-full window.
-		w.Header().Set("Retry-After", "60")
-		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+		h.writeLimitError(w, err)
 		return
 	}
 
@@ -870,10 +888,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
-		// The RPM/TPM windows are one minute wide; advise clients to back off
-		// for that long rather than hammering into a still-full window.
-		w.Header().Set("Retry-After", "60")
-		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+		h.writeLimitError(w, err)
 		return
 	}
 
@@ -1047,6 +1062,18 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	}
 
 	sanitizeUpstreamIdentity(bodyMap, classifyUpstream(provider.BaseURL, model.TargetModel), h.identitySecret, log.UserID)
+	// OpenRouter reads the standard `user` field as the stable end-user
+	// identifier — its documented purpose, and the field sanitizeUpstreamIdentity
+	// strips for every upstream because most of them do not want it. Restoring it
+	// here gives OpenRouter correct per-user attribution, and it is also the
+	// field OpenRouter's own routing affinity is documented against, so it
+	// complements the X-Session-Id header set below. Deterministic per caller, so
+	// the request body stays byte-stable across a conversation's turns.
+	if provider.ID == "openrouter" {
+		if derived := DeriveUserID(h.identitySecret, log.UserID); derived != "" {
+			bodyMap["user"] = derived
+		}
+	}
 
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
@@ -1836,6 +1863,28 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 // ------------------------------------------
 // Common Error Logging Helpers
 // ------------------------------------------
+
+// writeLimitError renders a CheckLimit failure according to WHY it happened.
+// One shape for all three causes forced clients to guess, and a client that
+// guesses "retry" against a spent budget hammers the gateway until the user
+// gives up. MuhiyaCode reads these to decide whether to wait or to stop.
+func (h *ProxyHandler) writeLimitError(w http.ResponseWriter, err error) {
+	switch KindOf(err) {
+	case LimitSuspended:
+		// Not a rate limit at all: no amount of waiting changes it.
+		h.writeError(w, http.StatusForbidden, err.Error(), "permission_error")
+	case LimitBudget:
+		// 429 for wire compatibility with OpenAI clients, but the type says
+		// quota so a client can tell this from throttling. No Retry-After: the
+		// window roll, not a backoff, is what releases this.
+		h.writeError(w, http.StatusTooManyRequests, "Budget exhausted: "+err.Error(), "insufficient_quota")
+	default:
+		// The RPM/TPM windows are one minute wide; advise clients to back off
+		// for that long rather than hammering into a still-full window.
+		w.Header().Set("Retry-After", "60")
+		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+	}
+}
 
 func (h *ProxyHandler) writeError(w http.ResponseWriter, code int, msg string, errType string) {
 	w.Header().Set("Content-Type", "application/json")

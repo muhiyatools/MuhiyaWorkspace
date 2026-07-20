@@ -345,9 +345,14 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
-	log.Printf("Shutdown signal received, draining in-flight requests (up to 60s)...")
+	// 120s, not 60s: a redeploy that severs a mid-answer stream costs an agent
+	// session its in-flight work, and a long reasoning turn can easily still be
+	// streaming a minute in. Draining twice as long makes that much rarer at the
+	// cost of a slower deploy.
+	const drainWindow = 120 * time.Second
+	log.Printf("Shutdown signal received, draining in-flight requests (up to %s)...", drainWindow)
 	dbReady.Store(false)
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), drainWindow)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("Graceful shutdown did not complete cleanly: %v", err)
@@ -650,7 +655,11 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version, X-Muhiya-Effort")
+		// X-Muhiya-Session and X-Client-App are load-bearing, not decorative: the
+		// first pins a conversation's model so provider prefix caches stay warm,
+		// the second gates model visibility and the cost chunk. A browser client
+		// that cannot send them silently loses both.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version, X-Muhiya-Effort, X-Muhiya-Session, X-Client-App")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)

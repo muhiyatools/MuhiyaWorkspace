@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,44 @@ import (
 	"gateway/db"
 	"github.com/redis/go-redis/v9"
 )
+
+// LimitKind classifies WHY a request was refused. All three used to leave
+// CheckLimit as an undifferentiated error and reach the client as the same
+// 429 rate_limit_error — but they need opposite client behavior. A throughput
+// limit clears in about a minute and a retry is correct; an exhausted budget
+// never clears on its own, so a client retrying it hammers the gateway until
+// the user gives up; a suspended account needs an operator, not a wait.
+type LimitKind int
+
+const (
+	// LimitThroughput is the RPM/TPM sliding window: transient, retry after ~60s.
+	LimitThroughput LimitKind = iota
+	// LimitBudget is a spent plan window with no extra credits: needs a top-up
+	// or a window roll, never a retry.
+	LimitBudget
+	// LimitSuspended is an inactive account: an operator has to act.
+	LimitSuspended
+)
+
+// LimitError carries the classification alongside the human-readable cause.
+type LimitError struct {
+	Kind LimitKind
+	Err  error
+}
+
+func (e *LimitError) Error() string { return e.Err.Error() }
+func (e *LimitError) Unwrap() error { return e.Err }
+
+// KindOf reports how a CheckLimit failure should be surfaced. Anything
+// unclassified is treated as throughput — the conservative default, since it is
+// the one that tells the client to try again rather than to stop.
+func KindOf(err error) LimitKind {
+	var limitErr *LimitError
+	if errors.As(err, &limitErr) {
+		return limitErr.Kind
+	}
+	return LimitThroughput
+}
 
 type reqRecord struct {
 	timestamp time.Time
@@ -224,7 +263,7 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 	}
 
 	if user.Status != "active" {
-		return fmt.Errorf("user account is suspended")
+		return &LimitError{Kind: LimitSuspended, Err: fmt.Errorf("user account is suspended")}
 	}
 
 	// Enforce sliding budget windows - spending is queried fresh every time.
@@ -250,7 +289,7 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 			return fmt.Errorf("failed to check extra credits: %w", err)
 		}
 		if remainingCredits <= 0 {
-			return limitErr
+			return &LimitError{Kind: LimitBudget, Err: limitErr}
 		}
 	}
 
@@ -381,10 +420,10 @@ func (rl *RateLimiter) checkRedisLimits(keyID string, rpmLimit, tpmLimit, prompt
 	case 1:
 		rpmCount, _ := vals[1].(int64)
 		_ = rpmCount
-		return fmt.Errorf("requests per minute (RPM) limit of %d exceeded", rpmLimit)
+		return &LimitError{Kind: LimitThroughput, Err: fmt.Errorf("requests per minute (RPM) limit of %d exceeded", rpmLimit)}
 	case 2:
 		curTPM, _ := vals[2].(int64)
-		return fmt.Errorf("tokens per minute (TPM) limit of %d exceeded (current sliding TPM: %d, requested: %d)", tpmLimit, curTPM, promptTokens)
+		return &LimitError{Kind: LimitThroughput, Err: fmt.Errorf("tokens per minute (TPM) limit of %d exceeded (current sliding TPM: %d, requested: %d)", tpmLimit, curTPM, promptTokens)}
 	}
 	return nil
 }
@@ -425,7 +464,7 @@ func (rl *RateLimiter) checkInMemoryLimits(keyID string, rpmLimit, tpmLimit, pro
 
 	// RPM check
 	if rpmLimit > 0 && len(kl.requests) >= rpmLimit {
-		return fmt.Errorf("requests per minute (RPM) limit of %d exceeded", rpmLimit)
+		return &LimitError{Kind: LimitThroughput, Err: fmt.Errorf("requests per minute (RPM) limit of %d exceeded", rpmLimit)}
 	}
 
 	// TPM check
@@ -434,7 +473,7 @@ func (rl *RateLimiter) checkInMemoryLimits(keyID string, rpmLimit, tpmLimit, pro
 		currentTPM += t.tokens
 	}
 	if tpmLimit > 0 && currentTPM+promptTokens > tpmLimit {
-		return fmt.Errorf("tokens per minute (TPM) limit of %d exceeded (current sliding TPM: %d, requested: %d)", tpmLimit, currentTPM, promptTokens)
+		return &LimitError{Kind: LimitThroughput, Err: fmt.Errorf("tokens per minute (TPM) limit of %d exceeded (current sliding TPM: %d, requested: %d)", tpmLimit, currentTPM, promptTokens)}
 	}
 
 	// Record request and tokens

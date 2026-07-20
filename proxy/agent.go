@@ -79,7 +79,9 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
-		h.writeError(w, http.StatusTooManyRequests, "Limit exceeded: "+err.Error(), "rate_limit_error")
+		// Parity with the proxy path: this used to answer a bare 429 with no
+		// Retry-After, so a client here could not even back off correctly.
+		h.writeLimitError(w, err)
 		return true
 	}
 
