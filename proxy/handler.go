@@ -1030,9 +1030,21 @@ func sanitizeUpstreamIdentity(bodyMap map[string]interface{}, family upstreamFam
 }
 
 // setOpenRouterHeaders adds OpenRouter-specific request headers when the
-// upstream provider is OpenRouter: attribution (rankings) and X-Session-Id,
-// which pins the same underlying provider across a conversation so OpenRouter's
-// prompt cache stays warm. No-op for every other provider.
+// upstream provider is OpenRouter: attribution (rankings) and X-Session-Id.
+// No-op for every other provider.
+//
+// X-Session-Id is a TRACE header, nothing more. This comment used to claim it
+// "pins the same underlying provider across a conversation so the prompt cache
+// stays warm" — that guarantee does not exist. OpenRouter documents no
+// session-based or sticky routing feature; upstream selection is controlled
+// only by the request body's `provider` object (order / only / allow_fallbacks).
+// The false claim mattered: it sent an investigation into a real, expensive
+// per-upstream cache-miss bug looking anywhere but here.
+//
+// Upstream affinity is expressed by the CLIENT, which learns which upstream
+// served it from the response and sends `provider.order` on later requests.
+// That body field reaches OpenRouter untouched because this handler forwards
+// unknown fields verbatim (see proxyOpenAIToOpenAI's origBody note).
 func setOpenRouterHeaders(req *http.Request, provider *db.Provider, r *http.Request) {
 	if provider == nil || provider.ID != "openrouter" {
 		return
@@ -1138,6 +1150,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		defer stopIdle()
 		var textAccumulator strings.Builder
 		var finalUsage *OpenAIUsage
+		var upstreamProvider string
 		normalClose := false
 		logged := false
 
@@ -1168,6 +1181,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.OutputTokens = completionTokens
 			log.CacheReadTokens = cacheRead
 			log.CacheWriteTokens = cacheWrite
+			log.UpstreamProvider = upstreamProvider
 			log.Cost = calculateCost(model, inputTokens, completionTokens, cacheRead, cacheWrite)
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
@@ -1202,6 +1216,12 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 						}
 						if chunk.Usage != nil {
 							finalUsage = chunk.Usage
+						}
+						// Which upstream OpenRouter picked. Repeated on every
+						// chunk; last writer wins, and they agree within a
+						// stream. Empty for a direct connection.
+						if chunk.Provider != "" {
+							upstreamProvider = chunk.Provider
 						}
 					}
 				}
@@ -1244,6 +1264,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		log.OutputTokens = completionTokens
 		log.CacheReadTokens = cacheRead
 		log.CacheWriteTokens = cacheWrite
+		log.UpstreamProvider = oaiResp.Provider
 		log.Cost = calculateCost(model, log.InputTokens, completionTokens, cacheRead, cacheWrite)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)

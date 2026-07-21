@@ -170,6 +170,8 @@ type OpenAIResponse struct {
 	Model   string         `json:"model"`
 	Choices []OpenAIChoice `json:"choices"`
 	Usage   OpenAIUsage    `json:"usage"`
+	// Provider is the upstream OpenRouter routed to; see OpenAIChunk.Provider.
+	Provider string `json:"provider,omitempty"`
 }
 
 type OpenAIDelta struct {
@@ -192,6 +194,11 @@ type OpenAIChunk struct {
 	Model   string              `json:"model"`
 	Choices []OpenAIChunkChoice `json:"choices"`
 	Usage   *OpenAIUsage        `json:"usage,omitempty"`
+	// Provider is the upstream OpenRouter routed this request to. It was being
+	// discarded by this struct — Go silently drops undeclared fields — which is
+	// why a per-upstream cache miss had no trace in the logs. Absent for direct
+	// (non-routed) upstreams; see RequestLog.UpstreamProvider.
+	Provider string `json:"provider,omitempty"`
 }
 
 // ==========================================

@@ -1305,7 +1305,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const ownerName = ownerUser ? ownerUser.name : 'Unknown User';
 
             const costFormatted = '$' + l.cost.toFixed(6);
-            const tokensText = `${l.input_tokens} / ${l.output_tokens} <small style="color:var(--text-muted-dark)">(R:${l.cache_read_tokens} W:${l.cache_write_tokens})</small>`;
+            // Prompt caches are per-upstream, so a re-route re-reads the whole
+            // conversation at full price. Showing the upstream beside the cache
+            // numbers is what makes that correlation readable at a glance:
+            // a low R: on a row whose upstream differs from the row above it is
+            // a placement miss, not a mystery. Absent on direct connections.
+            const upstreamText = l.upstream_provider
+                ? ` <small style="color:var(--text-muted-dark)">via ${escapeHtml(l.upstream_provider)}</small>`
+                : '';
+            const tokensText = `${l.input_tokens} / ${l.output_tokens} <small style="color:var(--text-muted-dark)">(R:${l.cache_read_tokens} W:${l.cache_write_tokens})</small>${upstreamText}`;
 
             const app = escapeHtml(l.client_app || 'API Client');
             const appLower = (l.client_app || 'API Client').toLowerCase();

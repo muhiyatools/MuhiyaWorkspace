@@ -170,8 +170,17 @@ type RequestLog struct {
 	// UsageEstimated is true when the upstream disconnected before sending
 	// its usage payload and InputTokens/OutputTokens/Cost were computed from
 	// the local word-count heuristic instead of provider-reported numbers.
-	UsageEstimated bool      `json:"usage_estimated"`
-	CreatedAt      time.Time `json:"created_at"`
+	UsageEstimated bool `json:"usage_estimated"`
+	// UpstreamProvider is the provider a routing layer actually served this
+	// request from, as reported by OpenRouter. Distinct from ProviderID, which
+	// is our own catalog row and is known before the request is sent. Empty for
+	// direct connections and for rows logged before migration 022.
+	//
+	// It exists for one question: prompt caches are per-upstream, so a request
+	// re-routed to a peer re-reads the whole conversation uncached. Without this
+	// column that failure is indistinguishable from a mysterious cache miss.
+	UpstreamProvider string    `json:"upstream_provider,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type SystemSetting struct {
@@ -1122,14 +1131,21 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 		providerID = log.ProviderID
 	}
 
+	// upstream_provider is written as NULL rather than "" when absent, so a
+	// direct connection stays distinguishable from a routed one whose upstream
+	// we failed to parse.
+	var upstream any
+	if log.UpstreamProvider != "" {
+		upstream = log.UpstreamProvider
+	}
 	_, err := db.conn.Exec(`INSERT INTO request_logs (
 		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
 		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_miss_tokens, cost, latency_ms, error_message, created_at, client_app,
-		requested_model, complexity, failover_attempts, thinking_level, usage_estimated
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
+		requested_model, complexity, failover_attempts, thinking_level, usage_estimated, upstream_provider
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
 		log.ID, log.VirtualKeyID, log.UserID, modelID, providerID, log.RequestPath, log.StatusCode,
 		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.CacheMissTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp,
-		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel, log.UsageEstimated)
+		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel, log.UsageEstimated, upstream)
 
 	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
 		if derr := db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost); derr != nil {
@@ -1156,7 +1172,8 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	query := `
 		SELECT request_logs.id, COALESCE(request_logs.virtual_key_id, ''), COALESCE(request_logs.user_id, ''), COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code,
 		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
-		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, ''), COALESCE(request_logs.usage_estimated, FALSE)
+		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, ''), COALESCE(request_logs.usage_estimated, FALSE),
+		       COALESCE(request_logs.upstream_provider, '')
 		FROM request_logs
 		LEFT JOIN models ON request_logs.model_id = models.id
 		WHERE 1=1`
@@ -1190,7 +1207,7 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 		var r RequestLog
 		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
-			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated)
+			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider)
 		if err != nil {
 			return nil, err
 		}
