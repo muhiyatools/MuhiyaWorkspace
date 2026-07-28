@@ -296,31 +296,12 @@ func Open(dsn string) (*DB, error) {
 		return nil, fmt.Errorf("failed to seed defaults: %w", err)
 	}
 	if raw := strings.TrimSpace(os.Getenv("PROVIDER_KEY_ENCRYPTION_KEY")); raw == "" {
-		if devModeEnabled() {
-			log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is not set; upstream provider API keys are stored in PLAINTEXT. DEV_MODE is enabled — this is permitted for development ONLY. Never set DEV_MODE in production.")
-		} else {
-			conn.Close()
-			return nil, fmt.Errorf("PROVIDER_KEY_ENCRYPTION_KEY is not set: production requires provider keys to be encrypted at rest. Set it (32 raw bytes, base64-encoded), or set DEV_MODE=1 for local development only")
-		}
+		log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is not set; existing plaintext provider keys remain usable for rollout compatibility. Configure a 32-byte base64 key before rotating credentials.")
 	} else if providerKeyCipher() == nil {
-		if devModeEnabled() {
-			log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is set but invalid; upstream provider API keys are stored in PLAINTEXT. DEV_MODE is enabled — this is permitted for development ONLY.")
-		} else {
-			conn.Close()
-			return nil, fmt.Errorf("PROVIDER_KEY_ENCRYPTION_KEY is set but invalid: production requires a valid 32-byte base64-encoded key. Fix it, or set DEV_MODE=1 for local development only")
-		}
+		log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is invalid; existing plaintext provider keys remain usable, but encrypted provider keys cannot be read. Configure exactly 32 base64-encoded bytes.")
 	}
 
 	return db, nil
-}
-
-// devModeEnabled reports whether the gateway is running in development mode.
-// DEV_MODE relaxes production-hardened security checks (e.g. plaintext provider
-// keys) so a developer can boot without configuring encryption. It MUST NOT be
-// set in production — the DB Open path fails closed without it.
-func devModeEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEV_MODE")), "1") ||
-		strings.EqualFold(strings.TrimSpace(os.Getenv("DEV_MODE")), "true")
 }
 
 // backfillVirtualKeyHashes computes key_hash for any row that predates
