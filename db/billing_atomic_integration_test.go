@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -82,13 +81,20 @@ func TestSettleUsageIsAtomicIdempotentAndBudgetBounded(t *testing.T) {
 	overBudget.Cost = 0.02
 	overBudget.CostNanoUSD = 20_000_000
 	overBudget.ChargeCeilingNanoUSD = 20_000_000
-	if err := database.SettleUsageAndLog(context.Background(), overBudget); !errors.Is(err, ErrBudgetExceeded) {
-		t.Fatalf("over-budget settlement error = %v, want ErrBudgetExceeded", err)
+	if err := database.SettleUsageAndLog(context.Background(), overBudget); err != nil {
+		t.Fatalf("over-budget settlement should persist request log: %v", err)
 	}
 	if err := database.conn.QueryRow("SELECT COUNT(*) FROM request_logs WHERE id = $1", overBudget.ID).Scan(&logs); err != nil {
 		t.Fatal(err)
 	}
-	if logs != 0 {
-		t.Fatalf("failed settlement persisted %d request logs, want 0", logs)
+	if logs != 1 {
+		t.Fatalf("settlement persisted %d request logs, want 1", logs)
+	}
+	availableAfter, err := database.AvailableBudgetNano(context.Background(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if availableAfter != 0 {
+		t.Fatalf("availableAfter=%s, want 0", availableAfter)
 	}
 }

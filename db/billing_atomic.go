@@ -261,5 +261,8 @@ func deductNanoFromTopupsTx(ctx context.Context, tx *sql.Tx, userID string, amou
 			return nil
 		}
 	}
-	return &BudgetExceededError{Requested: amount, Available: amount - remaining}
+	// Consume all available top-ups. Even if remaining > 0 (overage beyond topups),
+	// return nil so SettleUsageAndLog proceeds to insert and commit the request log,
+	// updating budget window spending in real-time.
+	return nil
 }
