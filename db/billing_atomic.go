@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"gateway/money"
-	"github.com/google/uuid"
 )
 
 var ErrBudgetExceeded = errors.New("insufficient remaining budget")
+var ErrNoBudgetWindow = errors.New("no valid budget window is configured")
 
 type BudgetExceededError struct {
 	Requested money.NanoUSD
@@ -26,70 +26,93 @@ func (e *BudgetExceededError) Error() string {
 func (e *BudgetExceededError) Unwrap() error { return ErrBudgetExceeded }
 
 type budgetWindowLimit struct {
+	id              string
+	name            string
 	durationSeconds int
 	budget          money.NanoUSD
 }
 
-// AvailableBudgetNano returns the amount one generation may consume from the
-// user's ordinary budget windows and top-ups. There are no monetary holds:
-// settled request logs are the only plan-window usage source.
-func (db *DB) AvailableBudgetNano(ctx context.Context, userID string) (money.NanoUSD, error) {
-	tx, err := db.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	available, err := availableBudgetNanoTx(ctx, tx, userID, time.Now().UTC())
-	if err != nil {
-		return 0, err
-	}
-	return available, tx.Commit()
+type BudgetAvailability struct {
+	Available       money.NanoUSD
+	WindowID        string
+	WindowName      string
+	WindowStartedAt time.Time
+	WindowResetAt   time.Time
 }
 
-func availableBudgetNanoTx(ctx context.Context, tx *sql.Tx, userID string, now time.Time) (money.NanoUSD, error) {
+// GetBudgetAvailability returns the exact amount one generation may consume
+// and the currently limiting budget-window snapshot. There are no monetary
+// holds: settled request logs are the only plan-window usage source.
+func (db *DB) GetBudgetAvailability(ctx context.Context, userID string) (BudgetAvailability, error) {
+	tx, err := db.conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return BudgetAvailability{}, err
+	}
+	defer tx.Rollback()
+	availability, err := budgetAvailabilityTx(ctx, tx, userID, time.Now().UTC())
+	if err != nil {
+		return BudgetAvailability{}, err
+	}
+	return availability, tx.Commit()
+}
+
+func (db *DB) AvailableBudgetNano(ctx context.Context, userID string) (money.NanoUSD, error) {
+	availability, err := db.GetBudgetAvailability(ctx, userID)
+	return availability.Available, err
+}
+
+func budgetAvailabilityTx(ctx context.Context, tx *sql.Tx, userID string, now time.Time) (BudgetAvailability, error) {
 	var planID string
 	var assigned time.Time
 	var reset sql.NullTime
 	if err := tx.QueryRowContext(ctx,
 		"SELECT plan_id, plan_assigned_at, usage_reset_at FROM users WHERE id = $1 AND status = 'active'",
 		userID).Scan(&planID, &assigned, &reset); err != nil {
-		return 0, err
+		return BudgetAvailability{}, err
 	}
 
 	var topups money.NanoUSD
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(amount_nano_usd - used_nano_usd), 0)
 		FROM user_topups WHERE user_id = $1`+activeTopupFilter, userID).Scan(&topups); err != nil {
-		return 0, err
+		return BudgetAvailability{}, err
 	}
 	windows, err := budgetWindowLimitsTx(ctx, tx, planID)
 	if err != nil {
-		return 0, err
+		return BudgetAvailability{}, err
 	}
 	if len(windows) == 0 {
-		return money.NanoUSD(math.MaxInt64), nil
+		return BudgetAvailability{}, ErrNoBudgetWindow
 	}
 
-	available := money.NanoUSD(math.MaxInt64)
+	result := BudgetAvailability{Available: money.NanoUSD(math.MaxInt64)}
 	for _, window := range windows {
-		floor := effectiveFloor(windowPeriodStart(assigned, window.durationSeconds, now), reset)
-		spent, err := successfulSpendSinceTx(ctx, tx, userID, floor)
+		periodStart := windowPeriodStart(assigned, window.durationSeconds, now)
+		startedAt := effectiveFloor(periodStart, reset)
+		spent, err := successfulSpendSinceTx(ctx, tx, userID, startedAt)
 		if err != nil {
-			return 0, err
+			return BudgetAvailability{}, err
 		}
 		candidate := window.budget - spent + topups
 		if candidate < 0 {
 			candidate = 0
 		}
-		if candidate < available {
-			available = candidate
+		if candidate < result.Available {
+			result = BudgetAvailability{
+				Available:       candidate,
+				WindowID:        window.id,
+				WindowName:      window.name,
+				WindowStartedAt: startedAt,
+				WindowResetAt:   periodStart.Add(time.Duration(window.durationSeconds) * time.Second),
+			}
 		}
 	}
-	return available, nil
+	return result, nil
 }
 
 func budgetWindowLimitsTx(ctx context.Context, tx *sql.Tx, planID string) ([]budgetWindowLimit, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT duration_seconds, budget_nano_usd
-		FROM budget_windows WHERE plan_id = $1 AND budget_nano_usd > 0`, planID)
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, duration_seconds, budget_nano_usd
+		FROM budget_windows WHERE plan_id = $1 AND duration_seconds > 0 AND budget_nano_usd > 0
+		ORDER BY duration_seconds ASC, id ASC`, planID)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +120,7 @@ func budgetWindowLimitsTx(ctx context.Context, tx *sql.Tx, planID string) ([]bud
 	var windows []budgetWindowLimit
 	for rows.Next() {
 		var window budgetWindowLimit
-		if err := rows.Scan(&window.durationSeconds, &window.budget); err != nil {
+		if err := rows.Scan(&window.id, &window.name, &window.durationSeconds, &window.budget); err != nil {
 			return nil, err
 		}
 		windows = append(windows, window)
@@ -113,10 +136,10 @@ func successfulSpendSinceTx(ctx context.Context, tx *sql.Tx, userID string, floo
 	return spent, err
 }
 
-// SettleUsageAndLog atomically records actual usage, charges any plan overage
-// to top-ups, and appends the account ledger debit. The caller-supplied ceiling
-// is the pre-upstream affordable quote; a provider can never charge the user
-// above it even if it ignores max_tokens.
+// SettleUsageAndLog atomically records actual usage and charges any plan
+// overage to top-ups. request_logs is the sole customer-charge authority. The
+// caller-supplied ceiling is the pre-upstream affordable quote; a provider can
+// never charge the user above it even if it ignores max_tokens.
 func (db *DB) SettleUsageAndLog(ctx context.Context, entry RequestLog) error {
 	if err := normalizeSettledEntry(&entry); err != nil {
 		return err
@@ -148,9 +171,6 @@ func (db *DB) SettleUsageAndLog(ctx context.Context, entry RequestLog) error {
 	if err := insertRequestLog(tx, entry); err != nil {
 		return err
 	}
-	if err := appendUsageDebitTx(ctx, tx, entry); err != nil {
-		return err
-	}
 	return tx.Commit()
 }
 
@@ -161,6 +181,9 @@ func normalizeSettledEntry(entry *RequestLog) error {
 	if entry.StatusCode < 200 || entry.StatusCode >= 300 {
 		entry.Cost = 0
 		entry.CostNanoUSD = 0
+	}
+	if entry.RequestStatus == "" {
+		entry.RequestStatus = RequestStatusForHTTP(entry.StatusCode)
 	}
 	if entry.ChargeCeilingNanoUSD > 0 && entry.CostNanoUSD > entry.ChargeCeilingNanoUSD {
 		entry.CostNanoUSD = entry.ChargeCeilingNanoUSD
@@ -178,22 +201,6 @@ func requestLogExistsTx(ctx context.Context, tx *sql.Tx, requestID string) (bool
 	var exists bool
 	err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM request_logs WHERE id = $1)", requestID).Scan(&exists)
 	return exists, err
-}
-
-func appendUsageDebitTx(ctx context.Context, tx *sql.Tx, entry RequestLog) error {
-	if entry.CostNanoUSD <= 0 {
-		return nil
-	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO account_ledger
-		(id, user_id, request_id, kind, amount_nano_usd, idempotency_key, metadata)
-		VALUES ($1,$2,$3,'debit',$4,$5,jsonb_build_object('charge_ceiling_nano_usd',$6))`,
-		uuid.NewString(), entry.UserID, entry.ID, entry.CostNanoUSD,
-		"settlement:"+entry.ID, entry.ChargeCeilingNanoUSD)
-	if err != nil {
-		// Log warning but do not abort request_log settlement transaction
-		return nil
-	}
-	return nil
 }
 
 func marginalTopupChargeTx(ctx context.Context, tx *sql.Tx, entry RequestLog) (money.NanoUSD, error) {

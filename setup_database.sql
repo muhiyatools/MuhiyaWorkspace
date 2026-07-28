@@ -111,19 +111,6 @@ CREATE TABLE IF NOT EXISTS system_settings (
     value TEXT NOT NULL
 );
 
--- 8b. Account Ledger
-CREATE TABLE IF NOT EXISTS account_ledger (
-    id VARCHAR(100) PRIMARY KEY,
-    user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    request_id VARCHAR(100),
-    reservation_id VARCHAR(100),
-    kind VARCHAR(32) NOT NULL CHECK (kind IN ('debit', 'credit', 'refund', 'adjustment')),
-    amount_nano_usd BIGINT NOT NULL DEFAULT 0,
-    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 -- 9. User Topups
 CREATE TABLE IF NOT EXISTS user_topups (
     id VARCHAR(100) PRIMARY KEY,

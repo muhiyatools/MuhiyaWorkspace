@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -38,7 +39,6 @@ func TestSettleUsageIsAtomicIdempotentAndBudgetBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = database.conn.Exec("DELETE FROM account_ledger WHERE user_id = $1", userID)
 		_, _ = database.conn.Exec("DELETE FROM request_logs WHERE user_id = $1", userID)
 		_ = database.DeleteVirtualKey(keyID)
 		_ = database.DeleteUser(userID)
@@ -58,15 +58,16 @@ func TestSettleUsageIsAtomicIdempotentAndBudgetBounded(t *testing.T) {
 		t.Fatalf("idempotent retry: %v", err)
 	}
 
-	var logs, debits int
+	var logs int
+	var credits float64
 	if err := database.conn.QueryRow("SELECT COUNT(*) FROM request_logs WHERE id = $1", settled.ID).Scan(&logs); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.conn.QueryRow("SELECT COUNT(*) FROM account_ledger WHERE request_id = $1", settled.ID).Scan(&debits); err != nil {
+	if err := database.conn.QueryRow("SELECT credits_consumed::double precision FROM request_logs WHERE id = $1", settled.ID).Scan(&credits); err != nil {
 		t.Fatal(err)
 	}
-	if logs != 1 || debits != 1 {
-		t.Fatalf("logs=%d debits=%d, want one atomic row of each", logs, debits)
+	if logs != 1 || credits != 4 {
+		t.Fatalf("logs=%d credits=%f, want one authoritative request row consuming 4 credits", logs, credits)
 	}
 	available, err := database.AvailableBudgetNano(context.Background(), userID)
 	if err != nil {
@@ -96,5 +97,33 @@ func TestSettleUsageIsAtomicIdempotentAndBudgetBounded(t *testing.T) {
 	}
 	if availableAfter != 0 {
 		t.Fatalf("availableAfter=%s, want 0", availableAfter)
+	}
+}
+
+func TestMissingBudgetWindowFailsClosed(t *testing.T) {
+	database := openTestDB(t)
+	defer database.Close()
+
+	suffix := uuid.NewString()[:8]
+	planID := "plan-no-window-" + suffix
+	userID := "user-no-window-" + suffix
+	if err := database.CreatePlan(Plan{
+		ID: planID, Name: "No Window", RPMLimit: 100, TPMLimit: 1_000_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateUser(User{
+		ID: userID, Name: "No Window User", Email: suffix + "@test.invalid",
+		PlanID: planID, Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = database.DeleteUser(userID)
+		_ = database.DeletePlan(planID)
+	})
+
+	if _, err := database.GetBudgetAvailability(context.Background(), userID); !errors.Is(err, ErrNoBudgetWindow) {
+		t.Fatalf("missing budget window error = %v, want ErrNoBudgetWindow", err)
 	}
 }

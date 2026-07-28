@@ -593,6 +593,7 @@ var serviceAllowlist = []string{
 	"/api/users", // users CRUD + /api/users/topups + /api/users/reset-usage
 	"/api/keys",  // key issuance / rotation / delete
 	"/api/logs",  // usage reads
+	"/api/usage-resets",
 	"/api/stats", // dashboard stats
 	"/api/plans", // plan reads
 	"/api/settings",
@@ -717,7 +718,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		// first pins a conversation's model so provider prefix caches stay warm,
 		// the second gates model visibility and the cost chunk. A browser client
 		// that cannot send them silently loses both.
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version, X-Muhiya-Effort, X-Muhiya-Session, X-Client-App")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version, X-Muhiya-Effort, X-Muhiya-Session, X-Session-Id, X-Muhiya-Request-ID, X-Muhiya-Attempt, X-Muhiya-Cache-Epoch, X-Muhiya-Expected-Model-Record, X-Muhiya-Expected-Target-Model, X-Muhiya-Compatibility-Epoch, X-Client-App")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)

@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -80,12 +81,14 @@ const streamIdleTimeout = 120 * time.Second
 // bufio.Reader.ReadString then returns promptly with an error instead of
 // blocking until the full client timeout. Call reset() after every
 // successful read and stop() once the read loop exits normally.
-func armIdleWatchdog(body io.Closer, d time.Duration) (reset func(), stop func()) {
+func armIdleWatchdog(body io.Closer, d time.Duration) (reset func(), stop func(), timedOut func() bool) {
+	var fired atomic.Bool
 	timer := time.AfterFunc(d, func() {
+		fired.Store(true)
 		log.Printf("[STREAM-IDLE] upstream produced no data for %s - closing the connection", d)
 		_ = body.Close()
 	})
-	return func() { timer.Reset(d) }, func() { timer.Stop() }
+	return func() { timer.Reset(d) }, func() { timer.Stop() }, fired.Load
 }
 
 // maxChatRequestBytes bounds chat/messages request bodies. Large coding-agent
@@ -145,17 +148,33 @@ func NewProxyHandler(database *db.DB, limiter *RateLimiter, identitySecret strin
 // default model; the message tells the caller how to migrate.
 const routerModelDeprecated = "muhiya-ai-router"
 
-// clientRequestIDHeader is the header the MuhiyaCode client uses to send a
-// per-request correlation ID (P0-W5, UMI-26). When present, the gateway uses
+// clientRequestIDHeader is the logical request ID sent by MuhiyaCode. The
+// gateway combines it with the authenticated key and attempt number to derive
 // it as the request_log row ID so one ID ties client turn → gateway attempt →
-// settlement. Empty means the gateway generates its own (backward compatible
-// for non-MuhiyaCode clients or older clients).
+// settlement while keeping retries observable and same-attempt replays
+// idempotent. Empty means the gateway generates its own ID.
 const clientRequestIDHeader = "X-Muhiya-Request-ID"
+const clientAttemptHeader = "X-Muhiya-Attempt"
+const clientCacheEpochHeader = "X-Muhiya-Cache-Epoch"
 
-// correlationID returns the per-request correlation ID. It prefers the
-// client-supplied header and falls back to a server-generated UUID. The same
-// value is used as the request_log row ID and the muhiya_log log_id chunk.
-func correlationID(r *http.Request) string {
+type requestCorrelation struct {
+	LogID           string
+	ClientRequestID string
+	AttemptNumber   int
+}
+
+// requestCorrelationFor creates one stable request-log identity per client
+// attempt. Replaying the same attempt is idempotent; a transport retry increments
+// X-Muhiya-Attempt and receives a distinct row under the same logical request.
+func requestCorrelationFor(r *http.Request, keyID string) requestCorrelation {
+	attempt := 1
+	if raw := strings.TrimSpace(r.Header.Get(clientAttemptHeader)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 100 {
+			attempt = parsed
+		} else {
+			log.Printf("[REQUEST] ignored malformed %s header", clientAttemptHeader)
+		}
+	}
 	if id := strings.TrimSpace(r.Header.Get(clientRequestIDHeader)); id != "" {
 		if len(id) <= 100 {
 			valid := true
@@ -167,12 +186,54 @@ func correlationID(r *http.Request) string {
 				}
 			}
 			if valid {
-				return id
+				digest := sha256.Sum256([]byte(keyID + "\x00" + id + "\x00" + strconv.Itoa(attempt)))
+				return requestCorrelation{
+					LogID:           fmt.Sprintf("req-%x", digest[:]),
+					ClientRequestID: id,
+					AttemptNumber:   attempt,
+				}
 			}
 		}
 		log.Printf("[REQUEST] ignored malformed %s header", clientRequestIDHeader)
 	}
-	return uuid.New().String()
+	return requestCorrelation{LogID: uuid.New().String(), AttemptNumber: attempt}
+}
+
+func correlationID(r *http.Request) string {
+	return requestCorrelationFor(r, "").LogID
+}
+
+func requestSessionID(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("X-Muhiya-Session"))
+	if value == "" {
+		value = strings.TrimSpace(r.Header.Get("X-Session-Id"))
+	}
+	if len(value) > 128 || strings.ContainsAny(value, "\r\n\x00") {
+		return ""
+	}
+	return value
+}
+
+func requestCacheEpoch(r *http.Request) int64 {
+	raw := strings.TrimSpace(r.Header.Get(clientCacheEpochHeader))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+func applyRequestContext(entry *db.RequestLog, r *http.Request, key *db.VirtualKey, identity requestCorrelation) {
+	entry.ID = identity.LogID
+	entry.VirtualKeyID = key.ID
+	entry.UserID = key.UserID
+	entry.SessionID = requestSessionID(r)
+	entry.ClientRequestID = identity.ClientRequestID
+	entry.AttemptNumber = identity.AttemptNumber
+	entry.CacheEpoch = requestCacheEpoch(r)
 }
 
 func (h *ProxyHandler) rejectDeprecatedRouterModel(w http.ResponseWriter, requested string) {
@@ -221,7 +282,17 @@ func (h *ProxyHandler) saveRequestLog(entry db.RequestLog) {
 		if h.outbox != nil {
 			h.outbox.enqueue(entry)
 		}
+		return
 	}
+	event, _ := json.Marshal(map[string]any{
+		"event": "request_settled", "request_log_id": entry.ID,
+		"client_request_id": entry.ClientRequestID, "attempt": entry.AttemptNumber,
+		"user_id": entry.UserID, "session_id": entry.SessionID,
+		"provider_id": entry.ProviderID, "model_id": entry.ModelID,
+		"status": db.RequestStatusForHTTP(entry.StatusCode), "status_code": entry.StatusCode,
+		"cost_nano_usd": entry.CostNanoUSD, "budget_window_id": entry.BudgetWindowID,
+	})
+	log.Printf("%s", event)
 }
 
 type responseWriterWithRequest struct {
@@ -730,7 +801,8 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	requestedOutput := requestedOpenAIOutput(&oaiReq, targetModel)
-	requestID := correlationID(r)
+	correlation := requestCorrelationFor(r, key.ID)
+	requestID := correlation.LogID
 	if err := h.limiter.CheckLimit(key, promptTokens+requestedOutput); err != nil {
 		h.saveAdmissionFailure(admissionFailure{
 			request: r, key: key, model: targetModel, provider: provider,
@@ -769,7 +841,7 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	resolvedProvider := *provider
 	resolvedProvider.BaseURL = targetURL
 
-	allowedOutput, chargeCeiling, err := h.affordableGeneration(r.Context(), generationQuoteRequest{
+	allowedOutput, chargeCeiling, budgetWindow, err := h.affordableGeneration(r.Context(), generationQuoteRequest{
 		userID:          key.UserID,
 		model:           targetModel,
 		inputUpperBound: conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
@@ -780,6 +852,7 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 			request: r, key: key, model: targetModel, provider: provider,
 			requestID: requestID, requestedModel: oaiReq.Model,
 			inputTokens: promptTokens, status: budgetErrorStatus(err), err: err,
+			budget: budgetWindow,
 		})
 		h.writeBudgetError(w, err)
 		return
@@ -797,9 +870,6 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 
 	startTime := time.Now()
 	reqLog := db.RequestLog{
-		ID:                   requestID,
-		VirtualKeyID:         key.ID,
-		UserID:               key.UserID,
 		ModelID:              targetModel.ID,
 		ProviderID:           provider.ID,
 		ChargeCeilingNanoUSD: chargeCeiling,
@@ -809,8 +879,11 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		RequestedModel:       oaiReq.Model,
 		Complexity:           "direct",
 		ThinkingLevel:        thinkingLevel,
+		Streamed:             oaiReq.Stream,
 		CreatedAt:            startTime,
 	}
+	applyRequestContext(&reqLog, r, key, correlation)
+	applyBudgetWindow(&reqLog, budgetWindow)
 
 	if useAnthropicUpstream {
 		h.proxyOpenAIToAnthropic(w, r, &reqCopy, targetModel, &resolvedProvider, reqLog, startTime)
@@ -890,7 +963,8 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	requestedOutput := boundedOutputLimit(anthReq.MaxTokens, targetModel)
-	requestID := correlationID(r)
+	correlation := requestCorrelationFor(r, key.ID)
+	requestID := correlation.LogID
 	if err := h.limiter.CheckLimit(key, promptTokens+requestedOutput); err != nil {
 		h.saveAdmissionFailure(admissionFailure{
 			request: r, key: key, model: targetModel, provider: provider,
@@ -929,7 +1003,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	resolvedProvider := *provider
 	resolvedProvider.BaseURL = targetURL
 
-	allowedOutput, chargeCeiling, err := h.affordableGeneration(r.Context(), generationQuoteRequest{
+	allowedOutput, chargeCeiling, budgetWindow, err := h.affordableGeneration(r.Context(), generationQuoteRequest{
 		userID:          key.UserID,
 		model:           targetModel,
 		inputUpperBound: conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
@@ -940,6 +1014,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 			request: r, key: key, model: targetModel, provider: provider,
 			requestID: requestID, requestedModel: anthReq.Model,
 			inputTokens: promptTokens, status: budgetErrorStatus(err), err: err,
+			budget: budgetWindow,
 		})
 		h.writeBudgetError(w, err)
 		return
@@ -951,9 +1026,6 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 
 	startTime := time.Now()
 	reqLog := db.RequestLog{
-		ID:                   requestID,
-		VirtualKeyID:         key.ID,
-		UserID:               key.UserID,
 		ModelID:              targetModel.ID,
 		ProviderID:           provider.ID,
 		ChargeCeilingNanoUSD: chargeCeiling,
@@ -963,8 +1035,11 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		RequestedModel:       anthReq.Model,
 		Complexity:           "direct",
 		ThinkingLevel:        thinkingLevel,
+		Streamed:             anthReq.Stream,
 		CreatedAt:            startTime,
 	}
+	applyRequestContext(&reqLog, r, key, correlation)
+	applyBudgetWindow(&reqLog, budgetWindow)
 
 	// Perform proxy
 	if useAnthropicUpstream {
@@ -1151,7 +1226,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
-		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		resetIdle, stopIdle, idleTimedOut := armIdleWatchdog(resp.Body, streamIdleTimeout)
 		defer stopIdle()
 		var textAccumulator strings.Builder
 		var finalUsage *OpenAIUsage
@@ -1181,7 +1256,6 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 				log.CacheMissTokens = finalUsage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 			}
 			log.UsageEstimated = finalUsage == nil
-			log.StatusCode = http.StatusOK
 			log.InputTokens = inputTokens
 			log.OutputTokens = completionTokens
 			log.CacheReadTokens = cacheRead
@@ -1189,6 +1263,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.UpstreamProvider = upstreamProvider
 			h.observeProviderAffinity(routeScope, upstreamProvider)
 			setCalculatedCost(&log, model, inputTokens, completionTokens, cacheRead, cacheWrite)
+			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -1331,7 +1406,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
-		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		resetIdle, stopIdle, idleTimedOut := armIdleWatchdog(resp.Body, streamIdleTimeout)
 		defer stopIdle()
 		var usageTracker OpenAIUsage
 		msgID := "chatcmpl-" + uuid.New().String()
@@ -1345,13 +1420,13 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 				return
 			}
 			logged = true
-			log.StatusCode = http.StatusOK
 			log.InputTokens = usageTracker.PromptTokens
 			log.OutputTokens = usageTracker.CompletionTokens
 			cacheRead := usageTracker.CacheReadTokens()
 			log.CacheReadTokens = cacheRead
 			log.CacheWriteTokens = usageTracker.CacheWriteTokens
 			setCalculatedCost(&log, model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
+			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -1464,7 +1539,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
-		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		resetIdle, stopIdle, idleTimedOut := armIdleWatchdog(resp.Body, streamIdleTimeout)
 		defer stopIdle()
 		var usageTracker AnthropicUsage
 		msgID := "msg_" + uuid.New().String()
@@ -1478,11 +1553,11 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 				return
 			}
 			logged = true
-			log.StatusCode = http.StatusOK
 			log.InputTokens = usageTracker.InputTokens
 			log.OutputTokens = usageTracker.OutputTokens
 			log.CacheReadTokens = usageTracker.CacheReadInputTokens
 			setCalculatedCost(&log, model, usageTracker.InputTokens, usageTracker.OutputTokens, usageTracker.CacheReadInputTokens, 0)
+			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -1597,7 +1672,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		flusher := asFlusher(w)
 
 		reader := bufio.NewReader(resp.Body)
-		resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+		resetIdle, stopIdle, idleTimedOut := armIdleWatchdog(resp.Body, streamIdleTimeout)
 		defer stopIdle()
 		var usageTracker AnthropicUsage
 
@@ -1610,12 +1685,12 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 				return
 			}
 			logged = true
-			log.StatusCode = http.StatusOK
 			log.InputTokens = usageTracker.InputTokens
 			log.OutputTokens = usageTracker.OutputTokens
 			log.CacheReadTokens = usageTracker.CacheReadInputTokens
 			log.CacheWriteTokens = usageTracker.CacheCreationInputTokens
 			setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens)
+			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -1976,8 +2051,43 @@ func (h *ProxyHandler) writeError(w http.ResponseWriter, code int, msg string, e
 	_ = json.NewEncoder(w).Encode(errPayload)
 }
 
+func setStreamOutcome(entry *db.RequestLog, normalClose, idleTimedOut bool, requestErr error) {
+	switch {
+	case normalClose:
+		entry.StatusCode = http.StatusOK
+	case errors.Is(requestErr, context.DeadlineExceeded) || idleTimedOut:
+		entry.StatusCode = http.StatusGatewayTimeout
+		entry.ErrorMessage = "stream timed out before the terminal event"
+	case errors.Is(requestErr, context.Canceled):
+		entry.StatusCode = 499
+		entry.ErrorMessage = "request cancelled before the terminal event"
+	default:
+		entry.StatusCode = http.StatusBadGateway
+		entry.ErrorMessage = "upstream stream ended before the terminal event"
+	}
+	entry.RequestStatus = db.RequestStatusForHTTP(entry.StatusCode)
+	if !normalClose {
+		// Failed/cancelled attempts remain observable with their token estimates,
+		// but never consume customer credits. A later retry has its own attempt row.
+		entry.Cost = 0
+		entry.CostNanoUSD = 0
+	}
+}
+
 func (h *ProxyHandler) logAndWriteError(w http.ResponseWriter, code int, msg string, errType string, log *db.RequestLog, startTime time.Time) {
+	request := h.getRequest(w)
+	if request != nil {
+		switch {
+		case errors.Is(request.Context().Err(), context.DeadlineExceeded),
+			strings.Contains(strings.ToLower(msg), "timeout"),
+			strings.Contains(strings.ToLower(msg), "deadline exceeded"):
+			code = http.StatusGatewayTimeout
+		case errors.Is(request.Context().Err(), context.Canceled):
+			code = 499
+		}
+	}
 	log.StatusCode = code
+	log.RequestStatus = db.RequestStatusForHTTP(code)
 	log.ErrorMessage = msg
 	log.LatencyMS = int(time.Since(startTime).Milliseconds())
 	h.saveRequestLog(*log)
@@ -2203,10 +2313,10 @@ type generationQuoteRequest struct {
 	requestedOutput int
 }
 
-func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generationQuoteRequest) (int, money.NanoUSD, error) {
+func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generationQuoteRequest) (int, money.NanoUSD, db.BudgetAvailability, error) {
 	rules, err := pricingRulesForModel(request.model)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, db.BudgetAvailability{}, err
 	}
 	usage := pricing.Usage{
 		InputTokens:  int64(request.inputUpperBound),
@@ -2214,14 +2324,15 @@ func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generat
 	}
 	quote, err := rules.Quote(usage)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, db.BudgetAvailability{}, err
 	}
-	available, err := h.db.AvailableBudgetNano(ctx, request.userID)
+	availability, err := h.db.GetBudgetAvailability(ctx, request.userID)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, db.BudgetAvailability{}, err
 	}
+	available := availability.Available
 	if quote.Cost <= available {
-		return request.requestedOutput, quote.Cost, nil
+		return request.requestedOutput, quote.Cost, availability, nil
 	}
 	allowed, maxErr := rules.MaxOutputTokens(
 		pricing.Usage{InputTokens: int64(request.inputUpperBound)},
@@ -2229,21 +2340,33 @@ func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generat
 		available,
 	)
 	if maxErr != nil {
-		return 0, 0, maxErr
+		return 0, 0, db.BudgetAvailability{}, maxErr
 	}
 	if allowed < 1 {
-		return 0, 0, &db.BudgetExceededError{Requested: quote.Cost, Available: available}
+		return 0, 0, availability, &db.BudgetExceededError{Requested: quote.Cost, Available: available}
 	}
 	usage.OutputTokens = allowed
 	reduced, quoteErr := rules.Quote(usage)
 	if quoteErr != nil {
-		return 0, 0, quoteErr
+		return 0, 0, db.BudgetAvailability{}, quoteErr
 	}
-	return int(allowed), reduced.Cost, nil
+	return int(allowed), reduced.Cost, availability, nil
+}
+
+func applyBudgetWindow(entry *db.RequestLog, availability db.BudgetAvailability) {
+	entry.BudgetWindowID = availability.WindowID
+	if !availability.WindowStartedAt.IsZero() {
+		started := availability.WindowStartedAt
+		entry.BudgetWindowStartedAt = &started
+	}
+	if !availability.WindowResetAt.IsZero() {
+		reset := availability.WindowResetAt
+		entry.BudgetWindowResetAt = &reset
+	}
 }
 
 func (h *ProxyHandler) writeBudgetError(w http.ResponseWriter, err error) {
-	if errors.Is(err, db.ErrBudgetExceeded) {
+	if errors.Is(err, db.ErrBudgetExceeded) || errors.Is(err, db.ErrNoBudgetWindow) {
 		h.writeError(w, http.StatusPaymentRequired, err.Error(), "budget_exceeded")
 		return
 	}
@@ -2251,7 +2374,7 @@ func (h *ProxyHandler) writeBudgetError(w http.ResponseWriter, err error) {
 }
 
 func budgetErrorStatus(err error) int {
-	if errors.Is(err, db.ErrBudgetExceeded) {
+	if errors.Is(err, db.ErrBudgetExceeded) || errors.Is(err, db.ErrNoBudgetWindow) {
 		return http.StatusPaymentRequired
 	}
 	return http.StatusServiceUnavailable
@@ -2267,13 +2390,12 @@ type admissionFailure struct {
 	inputTokens    int
 	status         int
 	err            error
+	budget         db.BudgetAvailability
 }
 
 func (h *ProxyHandler) saveAdmissionFailure(failure admissionFailure) {
+	correlation := requestCorrelationFor(failure.request, failure.key.ID)
 	entry := db.RequestLog{
-		ID:             failure.requestID,
-		VirtualKeyID:   failure.key.ID,
-		UserID:         failure.key.UserID,
 		ModelID:        failure.model.ID,
 		ProviderID:     failure.provider.ID,
 		RequestPath:    failure.request.URL.Path,
@@ -2285,6 +2407,11 @@ func (h *ProxyHandler) saveAdmissionFailure(failure admissionFailure) {
 		Complexity:     "admission",
 		CreatedAt:      time.Now().UTC(),
 	}
+	if failure.requestID != "" {
+		correlation.LogID = failure.requestID
+	}
+	applyRequestContext(&entry, failure.request, failure.key, correlation)
+	applyBudgetWindow(&entry, failure.budget)
 	h.saveRequestLog(entry)
 }
 
@@ -2350,7 +2477,8 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", modelName), "invalid_request_error")
 		return
 	}
-	requestID := correlationID(r)
+	correlation := requestCorrelationFor(r, key.ID)
+	requestID := correlation.LogID
 
 	// Entitlement is checked HERE, like every other billable route. This handler
 	// used to skip CheckLimit entirely, so a tenant who had exhausted their plan
@@ -2359,25 +2487,27 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	// (Account suspension is enforced earlier, in authenticateVirtualKey, so it
 	// cannot be missed by a handler again.)
 	if err := h.limiter.CheckLimit(key, estimateTokens(modelName)); err != nil {
-		h.saveRequestLog(db.RequestLog{
-			ID: requestID, VirtualKeyID: key.ID, UserID: key.UserID,
+		entry := db.RequestLog{
 			ModelID: targetModel.ID, ProviderID: targetModel.ProviderID,
 			RequestPath: r.URL.Path, StatusCode: http.StatusTooManyRequests,
 			ErrorMessage: err.Error(), ClientApp: getClientAppName(r),
 			RequestedModel: modelName, Complexity: "admission", CreatedAt: time.Now().UTC(),
-		})
+		}
+		applyRequestContext(&entry, r, key, correlation)
+		h.saveRequestLog(entry)
 		h.writeLimitError(w, err)
 		return
 	}
 	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, requestID)
 	if err != nil {
-		h.saveRequestLog(db.RequestLog{
-			ID: requestID, VirtualKeyID: key.ID, UserID: key.UserID,
+		entry := db.RequestLog{
 			ModelID: targetModel.ID, ProviderID: targetModel.ProviderID,
 			RequestPath: r.URL.Path, StatusCode: http.StatusServiceUnavailable,
 			ErrorMessage: err.Error(), ClientApp: getClientAppName(r),
 			RequestedModel: modelName, Complexity: "admission", CreatedAt: time.Now().UTC(),
-		})
+		}
+		applyRequestContext(&entry, r, key, correlation)
+		h.saveRequestLog(entry)
 		h.serviceUnavailableResponse(w, "generation guard failed", err)
 		return
 	}
@@ -2393,11 +2523,9 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	// the admin logs (previously only successes were logged, so a misconfigured
 	// or upstream-rejected transcription vanished silently). Cost is always 0 on
 	// failure — the provider produced nothing.
+	var budgetWindow db.BudgetAvailability
 	saveTranscriptionFailure := func(status int, msg string, started time.Time) {
-		h.saveRequestLog(db.RequestLog{
-			ID:             requestID,
-			VirtualKeyID:   key.ID,
-			UserID:         key.UserID,
+		entry := db.RequestLog{
 			ModelID:        targetModel.ID,
 			ProviderID:     targetModel.ProviderID,
 			RequestPath:    "/v1/audio/transcriptions",
@@ -2408,8 +2536,11 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 			ClientApp:      getClientAppName(r),
 			RequestedModel: targetModel.Name,
 			Complexity:     "direct",
-			CreatedAt:      time.Now(),
-		})
+			CreatedAt:      started,
+		}
+		applyRequestContext(&entry, r, key, correlation)
+		applyBudgetWindow(&entry, budgetWindow)
+		h.saveRequestLog(entry)
 	}
 
 	if provider == nil || provider.Status != "active" {
@@ -2508,14 +2639,14 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		h.writeError(w, http.StatusBadRequest, "Invalid transcription pricing: "+err.Error(), "invalid_request_error")
 		return
 	}
-	available, err := h.db.AvailableBudgetNano(r.Context(), key.UserID)
+	budgetWindow, err = h.db.GetBudgetAvailability(r.Context(), key.UserID)
 	if err != nil {
 		saveTranscriptionFailure(budgetErrorStatus(err), err.Error(), startTime)
 		h.writeBudgetError(w, err)
 		return
 	}
-	if chargeCeiling > available {
-		err = &db.BudgetExceededError{Requested: chargeCeiling, Available: available}
+	if chargeCeiling > budgetWindow.Available {
+		err = &db.BudgetExceededError{Requested: chargeCeiling, Available: budgetWindow.Available}
 		saveTranscriptionFailure(http.StatusPaymentRequired, err.Error(), startTime)
 		h.writeBudgetError(w, err)
 		return
@@ -2534,8 +2665,14 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		saveTranscriptionFailure(http.StatusBadGateway, "connection to upstream failed: "+err.Error(), startTime)
-		h.writeError(w, http.StatusBadGateway, "Connection to upstream failed: "+err.Error(), "api_error")
+		status := http.StatusBadGateway
+		if errors.Is(r.Context().Err(), context.Canceled) {
+			status = 499
+		} else if errors.Is(r.Context().Err(), context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+			status = http.StatusGatewayTimeout
+		}
+		saveTranscriptionFailure(status, "connection to upstream failed: "+err.Error(), startTime)
+		h.writeError(w, status, "Connection to upstream failed: "+err.Error(), "api_error")
 		return
 	}
 	defer resp.Body.Close()
@@ -2604,10 +2741,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 
 	// Log request and deduct credits
 	logEntry := db.RequestLog{
-		ID:                   requestID,
 		ChargeCeilingNanoUSD: chargeCeiling,
-		VirtualKeyID:         key.ID,
-		UserID:               key.UserID,
 		ModelID:              targetModel.ID,
 		ProviderID:           targetModel.ProviderID,
 		RequestPath:          "/v1/audio/transcriptions",
@@ -2620,8 +2754,10 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		ClientApp:            getClientAppName(r),
 		RequestedModel:       targetModel.Name,
 		Complexity:           "direct",
-		CreatedAt:            time.Now(),
+		CreatedAt:            startTime,
 	}
+	applyRequestContext(&logEntry, r, key, correlation)
+	applyBudgetWindow(&logEntry, budgetWindow)
 
 	h.saveRequestLog(logEntry)
 

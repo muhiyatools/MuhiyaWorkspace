@@ -47,6 +47,7 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"027_disable_automatic_model_routing.sql",
 		"028_release_stranded_authorizations.sql",
 		"029_remove_budget_reservations.sql",
+		"030_request_logs_single_source.sql",
 	} {
 		found := false
 		for _, n := range names {
@@ -70,7 +71,6 @@ func TestReservationRemovalMigrationDropsAllRuntimeState(t *testing.T) {
 	for _, required := range []string{
 		"drop table if exists budget_reservations",
 		"alter table request_logs drop column if exists reservation_id",
-		"alter table account_ledger drop column if exists reservation_id",
 		"drop table if exists user_window_charge_state",
 	} {
 		if !strings.Contains(sql, required) {
@@ -79,7 +79,7 @@ func TestReservationRemovalMigrationDropsAllRuntimeState(t *testing.T) {
 	}
 }
 
-func TestExactMoneyMigrationDefinesLedgerAuthority(t *testing.T) {
+func TestExactMoneyMigrationDefinesRequestLogAuthority(t *testing.T) {
 	data, err := migrationFS.ReadFile("migrations/023_exact_money_foundation.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -89,11 +89,35 @@ func TestExactMoneyMigrationDefinesLedgerAuthority(t *testing.T) {
 		"budget_nano_usd", "cost_nano_usd",
 		"input_cost_nano_usd_per_million",
 		"amount_nano_usd", "used_nano_usd",
-		"create table if not exists account_ledger",
-		"idempotency_key varchar(255) not null unique",
 	} {
 		if !strings.Contains(sql, required) {
 			t.Fatalf("exact-money migration missing %q", required)
+		}
+	}
+	if strings.Contains(sql, "account_ledger") {
+		t.Fatal("exact-money migration must not create the retired account ledger")
+	}
+}
+
+func TestRequestLogConsolidationMigrationPreservesThenDropsLedger(t *testing.T) {
+	data, err := migrationFS.ReadFile("migrations/030_request_logs_single_source.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(data))
+	for _, required := range []string{
+		"insert into request_logs",
+		"from account_ledger",
+		"drop table account_ledger",
+		"session_id",
+		"client_request_id",
+		"attempt_number",
+		"credits_consumed",
+		"budget_window_id",
+		"idx_request_logs_client_attempt_unique",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("request-log consolidation migration missing %q", required)
 		}
 	}
 }

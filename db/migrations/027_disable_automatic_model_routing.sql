@@ -13,6 +13,3 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_created_id
 
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_created
     ON budget_reservations (created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_account_ledger_created
-    ON account_ledger (created_at DESC);

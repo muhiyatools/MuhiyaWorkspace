@@ -44,7 +44,8 @@ func RegisterRoutes(mux *http.ServeMux, database *db.DB, limits limitCacheInvali
 	mux.HandleFunc("/api/coverage", api.handleCoverage)
 	mux.HandleFunc("/api/settings", api.handleSettings)
 	mux.HandleFunc("/api/logs", api.handleLogs)
-	mux.HandleFunc("/api/operations", api.handleOperations)
+	mux.HandleFunc("/api/logs/summary", api.handleLogSummary)
+	mux.HandleFunc("/api/usage-resets", api.handleUsageResets)
 	mux.HandleFunc("/api/users/topups", api.handleUserTopups)
 	mux.HandleFunc("/api/users/reset-usage", api.handleResetUsage)
 }
@@ -1280,26 +1281,6 @@ func (api *AdminAPI) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 // --- Logs Handler ---
 func (api *AdminAPI) handleLogs(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		var log db.RequestLog
-		if err := json.NewDecoder(r.Body).Decode(&log); err != nil {
-			api.errorResponse(w, http.StatusBadRequest, "Invalid JSON body")
-			return
-		}
-		if log.ID == "" {
-			log.ID = "log-" + generateRandomString(16)
-		}
-		if log.CreatedAt.IsZero() {
-			log.CreatedAt = time.Now()
-		}
-		if err := api.db.InsertRequestLog(log); err != nil {
-			api.dbErrorResponse(w, err)
-			return
-		}
-		api.jsonResponse(w, http.StatusCreated, log)
-		return
-	}
-
 	if r.Method != http.MethodGet {
 		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
@@ -1317,11 +1298,20 @@ func (api *AdminAPI) handleLogs(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "status must be all, success, or error")
 			return
 		}
+		var since time.Time
+		if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				api.errorResponse(w, http.StatusBadRequest, "since must be RFC3339")
+				return
+			}
+			since = parsed.UTC()
+		}
 		logPage, err := api.db.ListRequestLogsPage(db.RequestLogQuery{
 			Limit: pageSize, Offset: (page - 1) * pageSize,
 			UserID: userID, KeyID: keyID,
 			Search: strings.TrimSpace(r.URL.Query().Get("search")),
-			Status: status, ModelID: r.URL.Query().Get("model"),
+			Status: status, ModelID: r.URL.Query().Get("model"), Since: since,
 		})
 		if err != nil {
 			api.dbErrorResponse(w, err)
@@ -1338,17 +1328,44 @@ func (api *AdminAPI) handleLogs(w http.ResponseWriter, r *http.Request) {
 	api.jsonResponse(w, http.StatusOK, list)
 }
 
-func (api *AdminAPI) handleOperations(w http.ResponseWriter, r *http.Request) {
+func (api *AdminAPI) handleLogSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	operations, err := api.db.ListAdminOperations(positiveQueryInt(r, "limit", 100, 200))
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	if !validID(userID) {
+		api.errorResponse(w, http.StatusBadRequest, "valid user_id is required")
+		return
+	}
+	var since time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			api.errorResponse(w, http.StatusBadRequest, "since must be RFC3339")
+			return
+		}
+		since = parsed.UTC()
+	}
+	summary, err := api.db.GetRequestUsageSummary(userID, since)
 	if err != nil {
 		api.dbErrorResponse(w, err)
 		return
 	}
-	api.jsonResponse(w, http.StatusOK, operations)
+	api.jsonResponse(w, http.StatusOK, summary)
+}
+
+func (api *AdminAPI) handleUsageResets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	resets, err := api.db.ListUsageResets(positiveQueryInt(r, "limit", 100, 200))
+	if err != nil {
+		api.dbErrorResponse(w, err)
+		return
+	}
+	api.jsonResponse(w, http.StatusOK, resets)
 }
 
 func positiveQueryInt(r *http.Request, name string, fallback, maximum int) int {

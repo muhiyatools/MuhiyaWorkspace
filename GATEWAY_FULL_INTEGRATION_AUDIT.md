@@ -8,16 +8,16 @@
 
 The gateway was not suffering from one isolated Admin UI problem. Its most damaging defect was a repeated PostgreSQL protocol misuse: several functions executed a second statement on a transaction/connection while a prior `Rows` result remained open. With PostgreSQL/libpq this can fail the second query, abort a transaction, or return incomplete Admin data. The pattern existed in settlement overage calculation, user listing, plan listing, and dashboard statistics.
 
-The settlement instance was the highest-severity failure. The former reservation path could fail before the request-log insert, ledger debit, and authorization closure. This directly explained the supplied schema state in which authorizations existed while the account ledger had no corresponding entries and recent requests were absent from request logs. The reservation architecture has now been removed completely by migration 029.
+The settlement instance was the highest-severity failure. The former reservation path could fail before the request-log insert, top-up deduction, and authorization closure. This directly explained the supplied schema state in which authorizations existed while recent requests were absent from request logs. The reservation architecture has now been removed completely by migration 029.
 
-The Admin UI also represented an older architecture. It fetched only the newest 100 logs, filtered them in the browser, displayed time without date, retained an automatic-router screen after automatic routing had been removed, and did not expose account ledger entries, reset history, model catalog metadata, or model pricing tiers.
+The Admin UI also represented an older architecture. It fetched only the newest 100 logs, filtered them in the browser, displayed time without date, retained an automatic-router screen after automatic routing had been removed, and did not expose reset history, model catalog metadata, or model pricing tiers.
 
 This remediation unifies those surfaces:
 
-- Completed-usage logging, top-up charging, and ledger insertion now complete atomically without nested result-set queries or monetary holds.
+- Completed-usage logging and top-up charging now complete atomically without nested result-set queries or monetary holds.
 - Admin request logs have a count/page API, bounded inputs, stable ordering, server-side filters, pagination controls, and full timestamps.
 - User/plan/dashboard queries fully consume and close result sets before dependent queries. User-list hydration is bulk-loaded instead of issuing several round trips per user.
-- Billing operations are visible in the Admin UI: completed-usage ledger entries and usage resets.
+- Usage-reset history is visible in the Admin UI.
 - Model base data, catalog metadata, cache contract, and pricing tiers save in one transaction and are editable in the Admin UI.
 - The obsolete automatic-routing Admin screen and controls are removed; migration 027 normalizes all legacy routing tiers to `none`.
 - Budget and rate-limit admission failures are now recorded as zero-cost request-log rows.
@@ -36,11 +36,9 @@ flowchart TD
     Q --> U[Upstream provider]
     U --> S[Stream or collect response]
     S --> X[Atomic completed-usage transaction]
-    X --> R[Request log]
-    X --> G[Account ledger]
+    X --> R[Request log and charge authority]
     X --> T[Top-up deduction]
     R --> UI[Paginated Admin audit UI]
-    G --> UI
 ```
 
 ## Schema-to-code integration map
@@ -50,8 +48,7 @@ flowchart TD
 | `users` | `db/db.go`, `proxy/limiter.go` | Users tab | Wired; mutations invalidate limiter definitions |
 | `plans`, `budget_windows` | `db/db.go`, `db/billing_atomic.go` | Plans tab | Wired; settled request logs are the usage authority |
 | `user_topups` | `db/db.go`, `db/billing_atomic.go` | User top-up modal | Wired; exact nano-USD settlement remains authoritative |
-| `usage_resets` | `db/billing.go` | Billing Operations tab | Wired; nonexistent user reset now returns 404 |
-| `account_ledger` | `db/billing_atomic.go` | Billing Operations tab | Wired and observable |
+| `usage_resets` | `db/billing.go` | Usage Resets tab | Wired; nonexistent user reset now returns 404 |
 | `request_logs` | `db/db.go`, `proxy/handler.go` | Request Logs tab | Paginated, searchable, full timestamp |
 | `model_catalog_metadata` | `db/db.go`, `proxy/catalog.go` | Model modal | Transactionally wired |
 | `model_pricing_tiers` | `db/db.go`, `pricing/pricing.go` | Model modal | Transactionally wired |
@@ -66,8 +63,8 @@ flowchart TD
 - **Category:** Billing integrity / PostgreSQL correctness
 - **Affected component:** Former `db/reservations.go` settlement path
 - **Root cause:** A spending query was executed inside a loop while budget-window `Rows` remained active on the same transaction.
-- **Impact:** Successful provider requests could remain unlogged, never create ledger entries, and never deduct top-ups. Stranded authorizations could also make an account appear out of credits without any completed usage.
-- **Fix:** The reservation subsystem, reconciler, schema, Admin surface, and request-log links were removed. `SettleUsageAndLog` atomically records completed usage and top-up/ledger changes under a brief per-user transaction lock.
+- **Impact:** Successful provider requests could remain unlogged and never deduct top-ups. Stranded authorizations could also make an account appear out of credits without any completed usage.
+- **Fix:** The reservation subsystem, reconciler, schema, Admin surface, and request-log links were removed. `SettleUsageAndLog` atomically records completed usage and top-up changes under a brief per-user transaction lock.
 - **Complexity:** Medium
 - **Priority:** P0
 - **Verification:** Atomic-billing, migration-removal, active-generation-guard, and full Go suites.
@@ -105,14 +102,14 @@ flowchart TD
 - **Complexity:** Low
 - **Priority:** P0
 
-### F-05 — Billing operations were operationally invisible
+### F-05 — Usage-reset history was operationally invisible
 
 - **Severity:** High
 - **Category:** Observability
-- **Affected component:** `account_ledger`, `usage_resets`; Admin API/UI
+- **Affected component:** `usage_resets`; Admin API/UI
 - **Root cause:** Migrations added backend authorities but no Admin endpoints or views.
-- **Impact:** Operators could not verify completed-usage ledger idempotency or audit resets.
-- **Fix:** `db/admin_operations.go`, `/api/operations`, and Billing Operations UI tables.
+- **Impact:** Operators could not audit reset actions.
+- **Fix:** `/api/usage-resets` and the Usage Resets Admin table.
 - **Complexity:** Medium
 - **Priority:** P0
 
@@ -134,7 +131,7 @@ flowchart TD
 - **Affected component:** Admin Router tab, routing-tier form/table, router statistics JavaScript/CSS
 - **Root cause:** The inference path was simplified earlier, but the UI and persisted tier metadata were not retired with it.
 - **Impact:** Operators could configure fields that no longer controlled inference and believe the gateway might switch models.
-- **Fix:** Router tab replaced by Billing Operations; routing controls and dead router UI logic removed. Admin and DB saves force `routing_tier='none'`; migration 027 cleans existing rows.
+- **Fix:** Routing controls and dead router UI logic were removed. Admin and DB saves force `routing_tier='none'`; migration 027 cleans existing rows.
 - **Complexity:** Medium
 - **Priority:** P0
 
@@ -239,7 +236,7 @@ flowchart TD
 
 ## PostgreSQL and Redis reliability assessment
 
-PostgreSQL is the monetary authority. Exact nano-USD columns, settled request logs, brief per-user advisory transaction locks, ledger idempotency keys, and completed-usage transactions are the foundation. There is no pending monetary state. Statement, lock, and connect timeouts in `main.go:postgresSafetyParams` prevent indefinite pool starvation.
+PostgreSQL is the monetary authority. Exact nano-USD columns, settled request-log idempotency, brief per-user advisory transaction locks, and completed-usage transactions are the foundation. There is no pending monetary state. Statement, lock, and connect timeouts in `main.go:postgresSafetyParams` prevent indefinite pool starvation.
 
 Redis is correctly limited to throughput enforcement and MiniMax/OpenRouter affinity. It does not own balances. RPM/TPM enforcement uses a single Lua script, so prune/count/admit/write is atomic. Production now fails closed when distributed limiting is unavailable. Provider affinity remains optional because losing affinity affects cache efficiency, not billing authority.
 
@@ -265,7 +262,7 @@ These are deployment properties, not disconnected code:
 
 - [ ] `/health` reports `status=ok`, migration count includes migration 027, and `billing_loss=0`.
 - [ ] Redis startup log reports distributed limiter connected; with Redis intentionally unavailable, inference fails closed.
-- [ ] Create one low-cost request and verify one request log and one debit ledger entry share the request identifier.
+- [ ] Create one low-cost request and verify one request log contains the final tokens, cost, credits, user, session, and budget window.
 - [ ] Trigger a budget denial and verify a 402 zero-cost request-log row.
 - [ ] Trigger RPM denial and verify a 429 zero-cost request-log row.
 - [ ] Change a user’s plan and verify the next request uses new RPM/TPM values.
@@ -277,4 +274,4 @@ These are deployment properties, not disconnected code:
 
 ## Definition of done
 
-The gateway is ready for public launch when all production checklist items pass against the Elest.io PostgreSQL and Redis instances, `billing_loss` remains zero under restart/fault testing, every successful generation produces an actual-usage request-log/ledger chain, all denials are visible, Admin mutations take effect on the next request, and the Admin UI can read and modify every schema-backed product feature without hidden legacy routing behavior.
+The gateway is ready for public launch when all production checklist items pass against the Elest.io PostgreSQL and Redis instances, `billing_loss` remains zero under restart/fault testing, every generation attempt produces exactly one authoritative request log, all denials are visible, Admin mutations take effect on the next request, and the Admin UI can read and modify every schema-backed product feature without hidden legacy routing behavior.

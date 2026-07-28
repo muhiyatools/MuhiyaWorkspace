@@ -178,10 +178,16 @@ type RequestLog struct {
 	VirtualKeyID     string `json:"virtual_key_id"`
 	UserID           string `json:"user_id"`
 	OwnerName        string `json:"owner_name,omitempty"`
+	SessionID        string `json:"session_id"`
+	ClientRequestID  string `json:"client_request_id"`
+	AttemptNumber    int    `json:"attempt_number"`
 	ModelID          string `json:"model_id"`
 	ProviderID       string `json:"provider_id"`
 	RequestPath      string `json:"request_path"`
 	StatusCode       int    `json:"status_code"`
+	RequestStatus    string `json:"request_status"`
+	Streamed         bool   `json:"streamed"`
+	CacheEpoch       int64  `json:"cache_epoch"`
 	InputTokens      int    `json:"input_tokens"`
 	OutputTokens     int    `json:"output_tokens"`
 	CacheReadTokens  int    `json:"cache_read_tokens"`
@@ -193,6 +199,7 @@ type RequestLog struct {
 	CacheMissTokens *int64        `json:"cache_miss_tokens,omitempty"`
 	Cost            float64       `json:"cost"`
 	CostNanoUSD     money.NanoUSD `json:"cost_nano_usd"`
+	CreditsConsumed float64       `json:"credits_consumed"`
 	// ChargeCeilingNanoUSD is an ephemeral admission-time cap. Completed
 	// request logs remain the sole source of budget-window usage.
 	ChargeCeilingNanoUSD money.NanoUSD `json:"-"`
@@ -215,8 +222,28 @@ type RequestLog struct {
 	// It exists for one question: prompt caches are per-upstream, so a request
 	// re-routed to a peer re-reads the whole conversation uncached. Without this
 	// column that failure is indistinguishable from a mysterious cache miss.
-	UpstreamProvider string    `json:"upstream_provider,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
+	UpstreamProvider      string     `json:"upstream_provider,omitempty"`
+	BudgetWindowID        string     `json:"budget_window_id,omitempty"`
+	BudgetWindowStartedAt *time.Time `json:"budget_window_started_at,omitempty"`
+	BudgetWindowResetAt   *time.Time `json:"budget_window_reset_at,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+}
+
+func RequestStatusForHTTP(statusCode int) string {
+	switch {
+	case statusCode >= 200 && statusCode < 300:
+		return "succeeded"
+	case statusCode == 402:
+		return "rejected_budget"
+	case statusCode == 429:
+		return "rejected_rate_limit"
+	case statusCode == 499:
+		return "cancelled"
+	case statusCode == 504:
+		return "timed_out"
+	default:
+		return "failed"
+	}
 }
 
 type RequestLogQuery struct {
@@ -227,6 +254,7 @@ type RequestLogQuery struct {
 	Search  string
 	Status  string
 	ModelID string
+	Since   time.Time
 }
 
 type RequestLogPage struct {
@@ -236,15 +264,18 @@ type RequestLogPage struct {
 	PageSize int          `json:"page_size"`
 }
 
-type AccountLedgerEntry struct {
-	ID             string        `json:"id"`
-	UserID         string        `json:"user_id"`
-	RequestID      string        `json:"request_id"`
-	Kind           string        `json:"kind"`
-	AmountNanoUSD  money.NanoUSD `json:"amount_nano_usd"`
-	IdempotencyKey string        `json:"idempotency_key"`
-	Metadata       string        `json:"metadata"`
-	CreatedAt      time.Time     `json:"created_at"`
+type RequestUsageSummary struct {
+	Requests         int64         `json:"requests"`
+	Successful       int64         `json:"successful"`
+	Failed           int64         `json:"failed"`
+	InputTokens      int64         `json:"input_tokens"`
+	OutputTokens     int64         `json:"output_tokens"`
+	CacheReadTokens  int64         `json:"cache_read_tokens"`
+	CacheWriteTokens int64         `json:"cache_write_tokens"`
+	CacheMissTokens  int64         `json:"cache_miss_tokens"`
+	CostNanoUSD      money.NanoUSD `json:"cost_nano_usd"`
+	CostUSD          float64       `json:"cost_usd"`
+	CreditsConsumed  float64       `json:"credits_consumed"`
 }
 
 type UsageReset struct {
@@ -1685,7 +1716,7 @@ type requestLogExecer interface {
 }
 
 func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
-	var modelID, providerID, upstream any
+	var modelID, providerID, upstream, budgetWindowID any
 	if entry.ModelID != "" {
 		modelID = entry.ModelID
 	}
@@ -1695,16 +1726,33 @@ func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
 	if entry.UpstreamProvider != "" {
 		upstream = entry.UpstreamProvider
 	}
+	if entry.BudgetWindowID != "" {
+		budgetWindowID = entry.BudgetWindowID
+	}
+	if entry.AttemptNumber <= 0 {
+		entry.AttemptNumber = 1
+	}
+	if entry.RequestStatus == "" {
+		entry.RequestStatus = RequestStatusForHTTP(entry.StatusCode)
+	}
 	_, err := exec.Exec(`INSERT INTO request_logs (
-		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
+		id, virtual_key_id, user_id, session_id, client_request_id, attempt_number,
+		model_id, provider_id, request_path, status_code, request_status, streamed, cache_epoch,
 		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_miss_tokens,
 		cost, cost_nano_usd, latency_ms, error_message, created_at, client_app,
-		requested_model, complexity, failover_attempts, thinking_level, usage_estimated, upstream_provider
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
-		entry.ID, entry.VirtualKeyID, entry.UserID, modelID, providerID, entry.RequestPath, entry.StatusCode,
+		requested_model, complexity, failover_attempts, thinking_level, usage_estimated, upstream_provider,
+		budget_window_id, budget_window_started_at, budget_window_reset_at
+	) VALUES (
+		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+		$14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+		$25, $26, $27, $28, $29, $30, $31, $32, $33
+	) ON CONFLICT (id) DO NOTHING`,
+		entry.ID, entry.VirtualKeyID, entry.UserID, entry.SessionID, entry.ClientRequestID, entry.AttemptNumber,
+		modelID, providerID, entry.RequestPath, entry.StatusCode, entry.RequestStatus, entry.Streamed, entry.CacheEpoch,
 		entry.InputTokens, entry.OutputTokens, entry.CacheReadTokens, entry.CacheWriteTokens, entry.CacheMissTokens,
 		entry.Cost, entry.CostNanoUSD, entry.LatencyMS, entry.ErrorMessage, entry.CreatedAt, entry.ClientApp,
-		entry.RequestedModel, entry.Complexity, entry.FailoverAttempts, entry.ThinkingLevel, entry.UsageEstimated, upstream)
+		entry.RequestedModel, entry.Complexity, entry.FailoverAttempts, entry.ThinkingLevel, entry.UsageEstimated, upstream,
+		budgetWindowID, entry.BudgetWindowStartedAt, entry.BudgetWindowResetAt)
 	return err
 }
 
@@ -1735,10 +1783,16 @@ func (db *DB) ListRequestLogsPage(query RequestLogQuery) (RequestLogPage, error)
 	// nullable (ON DELETE SET NULL): a log whose user or key was later deleted
 	// survives with a null reference and must still scan into a string.
 	selectSQL := `
-		SELECT request_logs.id, COALESCE(request_logs.virtual_key_id, ''), COALESCE(request_logs.user_id, ''), COALESCE(users.name, ''), COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code,
-		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.cost_nano_usd, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
+		SELECT request_logs.id, COALESCE(request_logs.virtual_key_id, ''), COALESCE(request_logs.user_id, ''), COALESCE(users.name, ''),
+		       request_logs.session_id, request_logs.client_request_id, request_logs.attempt_number,
+		       COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code,
+		       request_logs.request_status, request_logs.streamed, request_logs.cache_epoch,
+		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cache_miss_tokens,
+		       request_logs.cost, request_logs.cost_nano_usd, request_logs.credits_consumed::double precision,
+		       request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
 		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, ''), COALESCE(request_logs.usage_estimated, FALSE),
-		       COALESCE(request_logs.upstream_provider, '')
+		       COALESCE(request_logs.upstream_provider, ''), COALESCE(request_logs.budget_window_id, ''),
+		       request_logs.budget_window_started_at, request_logs.budget_window_reset_at
 		FROM request_logs
 		LEFT JOIN models ON request_logs.model_id = models.id
 		LEFT JOIN users ON request_logs.user_id = users.id
@@ -1754,9 +1808,14 @@ func (db *DB) ListRequestLogsPage(query RequestLogQuery) (RequestLogPage, error)
 	list := []RequestLog{}
 	for rows.Next() {
 		var r RequestLog
-		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.OwnerName, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.CostNanoUSD, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
-			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider)
+		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.OwnerName,
+			&r.SessionID, &r.ClientRequestID, &r.AttemptNumber,
+			&r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
+			&r.RequestStatus, &r.Streamed, &r.CacheEpoch,
+			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.CacheMissTokens,
+			&r.Cost, &r.CostNanoUSD, &r.CreditsConsumed, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
+			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider,
+			&r.BudgetWindowID, &r.BudgetWindowStartedAt, &r.BudgetWindowResetAt)
 		if err != nil {
 			return RequestLogPage{}, err
 		}
@@ -1785,6 +1844,9 @@ func requestLogFilter(query RequestLogQuery) (string, []any) {
 	if query.ModelID != "" {
 		add(" AND COALESCE(models.name, request_logs.model_id, '') = $%d", query.ModelID)
 	}
+	if !query.Since.IsZero() {
+		add(" AND request_logs.created_at >= $%d", query.Since.UTC())
+	}
 	switch query.Status {
 	case "success":
 		where.WriteString(" AND request_logs.status_code BETWEEN 200 AND 299")
@@ -1797,13 +1859,54 @@ func requestLogFilter(query RequestLogQuery) (string, []any) {
 		where.WriteString(fmt.Sprintf(` AND (COALESCE(request_logs.virtual_key_id, '') ILIKE '%%' || $%d || '%%'
 			OR COALESCE(request_logs.user_id, '') ILIKE '%%' || $%d || '%%'
 			OR COALESCE(users.name, '') ILIKE '%%' || $%d || '%%'
+			OR request_logs.session_id ILIKE '%%' || $%d || '%%'
+			OR request_logs.client_request_id ILIKE '%%' || $%d || '%%'
 			OR COALESCE(models.name, request_logs.model_id, '') ILIKE '%%' || $%d || '%%'
 			OR request_logs.request_path ILIKE '%%' || $%d || '%%'
 			OR COALESCE(request_logs.client_app, '') ILIKE '%%' || $%d || '%%'
 			OR COALESCE(request_logs.error_message, '') ILIKE '%%' || $%d || '%%')`,
-			placeholder, placeholder, placeholder, placeholder, placeholder, placeholder, placeholder))
+			placeholder, placeholder, placeholder, placeholder, placeholder, placeholder, placeholder, placeholder, placeholder))
 	}
 	return where.String(), args
+}
+
+func (db *DB) GetRequestUsageSummary(userID string, since time.Time) (RequestUsageSummary, error) {
+	var summary RequestUsageSummary
+	var cost money.NanoUSD
+	err := db.conn.QueryRow(`
+		SELECT COUNT(*),
+		       COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 300),
+		       COUNT(*) FILTER (WHERE status_code < 200 OR status_code >= 300),
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_read_tokens), 0),
+		       COALESCE(SUM(cache_write_tokens), 0),
+		       COALESCE(SUM(cache_miss_tokens), 0),
+		       COALESCE(SUM(cost_nano_usd), 0)
+		  FROM request_logs
+		 WHERE user_id = $1
+		   AND ($2::timestamptz IS NULL OR created_at >= $2)`,
+		userID, nullableTime(since),
+	).Scan(
+		&summary.Requests, &summary.Successful, &summary.Failed,
+		&summary.InputTokens, &summary.OutputTokens,
+		&summary.CacheReadTokens, &summary.CacheWriteTokens,
+		&summary.CacheMissTokens, &cost,
+	)
+	if err != nil {
+		return RequestUsageSummary{}, err
+	}
+	summary.CostNanoUSD = cost
+	summary.CostUSD = cost.USD()
+	summary.CreditsConsumed = cost.Credits()
+	return summary, nil
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
 }
 
 func (db *DB) GetUserSpendingInWindow(userID string, durationSeconds int) (float64, error) {

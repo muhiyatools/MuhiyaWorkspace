@@ -8,6 +8,3 @@ ALTER TABLE request_logs
 CREATE UNIQUE INDEX IF NOT EXISTS idx_request_logs_reservation_unique
     ON request_logs(reservation_id)
     WHERE reservation_id IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_account_ledger_user_created
-    ON account_ledger(user_id, created_at DESC);

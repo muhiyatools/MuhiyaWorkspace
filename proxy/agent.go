@@ -367,7 +367,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 	accum := newToolCallAccumulator()
 	var textBuf strings.Builder
 	reader := bufio.NewReader(resp.Body)
-	resetIdle, stopIdle := armIdleWatchdog(resp.Body, streamIdleTimeout)
+	resetIdle, stopIdle, _ := armIdleWatchdog(resp.Body, streamIdleTimeout)
 	defer stopIdle()
 
 	for {

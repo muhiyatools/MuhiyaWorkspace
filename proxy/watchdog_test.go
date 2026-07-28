@@ -24,12 +24,14 @@ func (c *countingCloser) Close() error {
 // once the idle window elapses - the stall detection that bounds a hung stream.
 func TestIdleWatchdogFiresOnSilence(t *testing.T) {
 	body := newCountingCloser()
-	_, stop := armIdleWatchdog(body, 40*time.Millisecond)
+	_, stop, timedOut := armIdleWatchdog(body, 40*time.Millisecond)
 	defer stop()
 
 	select {
 	case <-body.closed:
-		// fired as expected
+		if !timedOut() {
+			t.Fatal("watchdog closed the body without recording the timeout")
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("watchdog never closed the body after the idle window elapsed")
 	}
@@ -41,7 +43,7 @@ func TestIdleWatchdogFiresOnSilence(t *testing.T) {
 // traffic relies on.
 func TestIdleWatchdogResetKeepsAlive(t *testing.T) {
 	body := newCountingCloser()
-	reset, stop := armIdleWatchdog(body, 60*time.Millisecond)
+	reset, stop, _ := armIdleWatchdog(body, 60*time.Millisecond)
 	defer stop()
 
 	// Reset every 20ms for 100ms total - each "keep-alive" pushes the deadline
@@ -61,7 +63,7 @@ func TestIdleWatchdogResetKeepsAlive(t *testing.T) {
 // stop(), a later deadline must not close an already-finished body.
 func TestIdleWatchdogStopPreventsClose(t *testing.T) {
 	body := newCountingCloser()
-	_, stop := armIdleWatchdog(body, 30*time.Millisecond)
+	_, stop, _ := armIdleWatchdog(body, 30*time.Millisecond)
 	stop()
 
 	select {

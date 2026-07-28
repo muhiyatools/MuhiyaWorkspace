@@ -936,7 +936,7 @@ input:focus, select:focus, textarea:focus {
 .details-subtable tr:hover td {
     background: none;
 }
-/* Request history and billing operations */
+/* Request history and usage reset audit */
 .log-pagination {
     display: flex;
     align-items: center;

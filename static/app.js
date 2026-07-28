@@ -150,7 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 plans: "Configure plans and define budget window parameters inline",
                 providers: "Manage connection keys and model mapping configurations",
                 logs: "Audit live API request headers, latencies, and token spendings",
-                operations: "Inspect completed usage, ledger, and usage reset integrity",
+                'usage-resets': "Inspect administrative budget-reset history",
                 settings: "Customize global gateway variables and system settings"
             };
             pageSubtitle.innerText = subtitles[tab] || "";
@@ -186,8 +186,8 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'logs':
                 loadLogs();
                 break;
-            case 'operations':
-                loadOperations();
+            case 'usage-resets':
+                loadUsageResets();
                 break;
             case 'settings':
                 loadSettings();
@@ -1397,7 +1397,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const upstreamText = l.upstream_provider
                 ? ` <small style="color:var(--text-muted-dark)">via ${escapeHtml(l.upstream_provider)}</small>`
                 : '';
-            const tokensText = `${l.input_tokens} / ${l.output_tokens} <small style="color:var(--text-muted-dark)">(R:${l.cache_read_tokens} W:${l.cache_write_tokens})</small>${upstreamText}`;
+            const cacheMiss = l.cache_miss_tokens == null ? '—' : l.cache_miss_tokens;
+            const tokensText = `${l.input_tokens} / ${l.output_tokens} <small style="color:var(--text-muted-dark)">(hit:${l.cache_read_tokens} miss:${cacheMiss} write:${l.cache_write_tokens})</small>${upstreamText}`;
 
             const app = escapeHtml(l.client_app || 'API Client');
             const appLower = (l.client_app || 'API Client').toLowerCase();
@@ -1643,17 +1644,18 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!l) return;
 
         const ownerUser = state.users.find(u => u.id === l.user_id);
-        const ownerName = ownerUser ? ownerUser.name : 'Unknown User';
+        const ownerName = l.owner_name || (ownerUser ? ownerUser.name : l.user_id || 'Unknown User');
         const ownerEmail = ownerUser ? ownerUser.email : 'Unknown';
 
         const statusClass = l.status_code >= 200 && l.status_code < 300 ? 'status-success' : 'status-error';
-        const statusText = l.status_code >= 200 && l.status_code < 300 ? 'Success' : 'Error';
+        const statusText = String(l.request_status || (l.status_code >= 200 && l.status_code < 300 ? 'succeeded' : 'failed')).replaceAll('_', ' ');
         const dateStr = new Date(l.created_at).toLocaleString();
 
         const inputTokens = l.input_tokens || 0;
         const outputTokens = l.output_tokens || 0;
         const cacheRead = l.cache_read_tokens || 0;
         const cacheWrite = l.cache_write_tokens || 0;
+        const cacheMiss = l.cache_miss_tokens == null ? 'Unavailable' : l.cache_miss_tokens;
         
         const cacheHitRate = inputTokens > 0 ? ((cacheRead / inputTokens) * 100).toFixed(1) : '0.0';
 
@@ -1710,6 +1712,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         <tr><td style="color:var(--text-muted);">Timestamp:</td><td>${dateStr}</td></tr>
                         <tr><td style="color:var(--text-muted);">Virtual Key:</td><td><small><code>${escapeHtml(l.virtual_key_id.substring(0,18))}...</code></small></td></tr>
                         <tr><td style="color:var(--text-muted);">User:</td><td><strong>${escapeHtml(ownerName)}</strong></td></tr>
+                        <tr><td style="color:var(--text-muted);">Session:</td><td><small><code>${escapeHtml(l.session_id || '—')}</code></small></td></tr>
+                        <tr><td style="color:var(--text-muted);">Client request:</td><td><small><code>${escapeHtml(l.client_request_id || '—')}</code></small></td></tr>
+                        <tr><td style="color:var(--text-muted);">Attempt:</td><td>${Number(l.attempt_number || 1)}</td></tr>
                         <tr><td style="color:var(--text-muted);">Client App:</td><td><code>${escapeHtml(l.client_app || 'API Client')}</code></td></tr>
                         <tr><td style="color:var(--text-muted);">Path:</td><td><code>${escapeHtml(l.request_path)}</code></td></tr>
                     </table>
@@ -1721,7 +1726,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         <tr><td style="color:var(--text-muted); width:100px;">HTTP Status:</td><td><span class="status-indicator-badge ${statusClass}" style="padding: 2px 6px; border-radius:4px; font-size: 10px;">${l.status_code} ${statusText}</span></td></tr>
                         <tr><td style="color:var(--text-muted);">Latency:</td><td><strong>${l.latency_ms} ms</strong></td></tr>
                         <tr><td style="color:var(--text-muted);">Routed Model:</td><td><code>${escapeHtml(l.model_id)}</code></td></tr>
+                        <tr><td style="color:var(--text-muted);">Provider:</td><td><code>${escapeHtml(l.provider_id || '—')}</code></td></tr>
+                        <tr><td style="color:var(--text-muted);">Budget window:</td><td><code>${escapeHtml(l.budget_window_id || '—')}</code></td></tr>
                         <tr><td style="color:var(--text-muted);">Precise Cost:</td><td><strong style="color:#10b981; font-size:1rem;">$${l.cost.toFixed(6)}</strong></td></tr>
+                        <tr><td style="color:var(--text-muted);">Credits:</td><td><strong>${Number(l.credits_consumed || 0).toFixed(6)}</strong></td></tr>
                         <tr><td style="color:var(--text-muted);">Cache Hit Rate:</td><td><strong style="color:#3b82f6;">${cacheHitRate}%</strong></td></tr>
                     </table>
                 </div>
@@ -1742,7 +1750,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             <div style="font-size: 1.25rem; font-weight: bold; font-family: var(--font-mono); color:#10b981;">${cacheRead}</div>
                         </div>
                         <div>
-                            <span style="font-size: 0.75rem; color: var(--text-muted);">Cache Writes (Misses)</span>
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">Uncached (Miss)</span>
+                            <div style="font-size: 1.25rem; font-weight: bold; font-family: var(--font-mono); color:#fbbf24;">${cacheMiss}</div>
+                        </div>
+                        <div>
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">Cache Writes</span>
                             <div style="font-size: 1.25rem; font-weight: bold; font-family: var(--font-mono); color:#fbbf24;">${cacheWrite}</div>
                         </div>
                     </div>
@@ -1756,15 +1768,11 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('modal-log-details').classList.add('show');
     };
 
-    function loadOperations() {
-        fetchJSON('/api/operations?limit=100')
-            .then(operations => {
-                renderOperationsLedger(operations?.ledger || []);
-                renderUsageResets(operations?.usage_resets || []);
-            })
+    function loadUsageResets() {
+        fetchJSON('/api/usage-resets?limit=100')
+            .then(rows => renderUsageResets(rows || []))
             .catch(err => {
-                renderTableError(document.querySelector('#operations-ledger-table tbody'), 6, err.message);
-                renderTableError(document.querySelector('#operations-resets-table tbody'), 5, err.message);
+                renderTableError(document.querySelector('#usage-resets-table tbody'), 5, err.message);
             });
     }
 
@@ -1775,28 +1783,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function nanoUSD(value) {
-        return `$${(Number(value || 0) / 1_000_000_000).toFixed(6)}`;
-    }
-
-    function renderOperationsLedger(rows) {
-        const tbody = document.querySelector('#operations-ledger-table tbody');
-        if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center">No ledger entries recorded.</td></tr>';
-            return;
-        }
-        tbody.innerHTML = rows.map(row => `<tr>
-            <td>${escapeHtml(operationTimestamp(row.created_at))}</td>
-            <td><code>${escapeHtml(row.user_id)}</code></td>
-            <td><code>${escapeHtml(row.request_id || '—')}</code></td>
-            <td>${escapeHtml(row.kind)}</td>
-            <td>${nanoUSD(row.amount_nano_usd)}</td>
-            <td><code>${escapeHtml(row.idempotency_key)}</code></td>
-        </tr>`).join('');
-    }
-
     function renderUsageResets(rows) {
-        const tbody = document.querySelector('#operations-resets-table tbody');
+        const tbody = document.querySelector('#usage-resets-table tbody');
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No usage resets recorded.</td></tr>';
             return;
@@ -1848,8 +1836,8 @@ document.addEventListener('DOMContentLoaded', () => {
             loadUsers();
         } else if (tab === 'logs') {
             loadLogs();
-        } else if (tab === 'operations') {
-            loadOperations();
+        } else if (tab === 'usage-resets') {
+            loadUsageResets();
         }
     }, 5000);
 });

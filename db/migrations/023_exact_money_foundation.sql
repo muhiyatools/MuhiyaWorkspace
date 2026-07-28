@@ -70,18 +70,6 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_user_active
     ON budget_reservations(user_id, status, lease_expires_at);
 
-CREATE TABLE IF NOT EXISTS account_ledger (
-    id VARCHAR(100) PRIMARY KEY,
-    user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    request_id VARCHAR(100),
-    reservation_id VARCHAR(100) REFERENCES budget_reservations(id) ON DELETE SET NULL,
-    kind VARCHAR(32) NOT NULL CHECK (kind IN ('debit', 'credit', 'refund', 'adjustment')),
-    amount_nano_usd BIGINT NOT NULL,
-    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 ALTER TABLE budget_windows DROP CONSTRAINT IF EXISTS budget_windows_budget_nano_nonnegative;
 ALTER TABLE budget_windows ADD CONSTRAINT budget_windows_budget_nano_nonnegative CHECK (budget_nano_usd >= 0);
 ALTER TABLE models DROP CONSTRAINT IF EXISTS models_exact_prices_nonnegative;

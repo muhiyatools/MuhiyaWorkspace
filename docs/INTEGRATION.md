@@ -82,10 +82,10 @@ They are safe today; the note is the guard against future drift.
   while GW enforces 1.2M/2.5M TPM (`limiter.go`). Recommended: correct the
   marketing copy + `plans.tpm_limit` to the enforced values (honesty; enforcement
   wins). Owner decision — not auto-changed.
-- **I9 — `api_usage_logs` is a dead ledger** with no writer, so
-  `transitionPlan.oldSpend` and the admin 30-day spend read ~0. Real usage lives
-  in GW `request_logs`. Fix path: read spend via `GET /api/logs`/`/api/stats`
-  instead. The table stays for now (schema-history stability).
+- **I9 — request usage has one authority.** Dashboard summaries, admin spend,
+  and plan-transition audit values read gateway `request_logs` through
+  `GET /api/logs` and `GET /api/logs/summary`. Supabase does not store a second
+  request-usage table.
 - **I10 — LiteLLM leftovers.** Historical migrations reference LiteLLM endpoints
   that no longer exist; `budget_duration`/`key_budget_duration` columns are unused
   by code. Harmless; left for schema-history stability.
