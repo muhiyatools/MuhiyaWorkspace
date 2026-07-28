@@ -9,23 +9,28 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 	"time"
 
+	"gateway/money"
+	"gateway/pricing"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type UserBudgetUsage struct {
-	WindowID        string     `json:"window_id"`
-	Name            string     `json:"name"`
-	DurationSeconds int        `json:"duration_seconds"`
-	BudgetUSD       float64    `json:"budget_usd"`
-	CurrentSpent    float64    `json:"current_spent"`
-	ResetTime       *time.Time `json:"reset_time,omitempty"`
+	WindowID            string        `json:"window_id"`
+	Name                string        `json:"name"`
+	DurationSeconds     int           `json:"duration_seconds"`
+	BudgetUSD           float64       `json:"budget_usd"`
+	BudgetNanoUSD       money.NanoUSD `json:"budget_nano_usd"`
+	CurrentSpent        float64       `json:"current_spent"`
+	CurrentSpentNanoUSD money.NanoUSD `json:"current_spent_nano_usd"`
+	ResetTime           *time.Time    `json:"reset_time,omitempty"`
 }
 
 type User struct {
@@ -39,6 +44,8 @@ type User struct {
 	BudgetUsage           []UserBudgetUsage `json:"budget_usage,omitempty"`
 	ExtraCredits          float64           `json:"extra_credits"`
 	RemainingExtraCredits float64           `json:"remaining_extra_credits"`
+	ExtraCreditsNanoUSD   money.NanoUSD     `json:"extra_credits_nano_usd"`
+	RemainingExtraNanoUSD money.NanoUSD     `json:"remaining_extra_nano_usd"`
 }
 
 type Plan struct {
@@ -51,12 +58,13 @@ type Plan struct {
 }
 
 type BudgetWindow struct {
-	ID              string    `json:"id"`
-	PlanID          string    `json:"plan_id"`
-	Name            string    `json:"name"`
-	DurationSeconds int       `json:"duration_seconds"`
-	BudgetUSD       float64   `json:"budget_usd"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID              string        `json:"id"`
+	PlanID          string        `json:"plan_id"`
+	Name            string        `json:"name"`
+	DurationSeconds int           `json:"duration_seconds"`
+	BudgetUSD       float64       `json:"budget_usd"`
+	BudgetNanoUSD   money.NanoUSD `json:"budget_nano_usd"`
+	CreatedAt       time.Time     `json:"created_at"`
 }
 
 type VirtualKey struct {
@@ -90,24 +98,41 @@ type Provider struct {
 }
 
 type Model struct {
-	ID                       string  `json:"id"`
-	Name                     string  `json:"name"` // virtual model name (e.g. gpt-4o)
-	ProviderID               string  `json:"provider_id"`
-	TargetModel              string  `json:"target_model"` // provider target name
-	InputCostPerMillion      float64 `json:"input_cost_per_million"`
-	OutputCostPerMillion     float64 `json:"output_cost_per_million"`
-	CacheReadCostPerMillion  float64 `json:"cache_read_cost_per_million"`
-	CacheWriteCostPerMillion float64 `json:"cache_write_cost_per_million"`
-	Status                   string  `json:"status"`       // active, inactive
-	RoutingTier              string  `json:"routing_tier"` // none, simple, medium, hard
-	ModelType                string  `json:"model_type"`   // llm, transcript
-	PricePerMinute           float64 `json:"price_per_minute"`
-	Transcribe               bool    `json:"transcribe"`
-	ContextWindow            int     `json:"context_window"`
-	MaxOutputTokens          int     `json:"max_output_tokens"`
-	DisplayName              string  `json:"display_name"`
-	Description              string  `json:"description"`
-	OwnedBy                  string  `json:"owned_by"`
+	ID                           string         `json:"id"`
+	Name                         string         `json:"name"` // virtual model name (e.g. gpt-4o)
+	ProviderID                   string         `json:"provider_id"`
+	TargetModel                  string         `json:"target_model"` // provider target name
+	InputCostPerMillion          float64        `json:"input_cost_per_million"`
+	OutputCostPerMillion         float64        `json:"output_cost_per_million"`
+	CacheReadCostPerMillion      float64        `json:"cache_read_cost_per_million"`
+	CacheWriteCostPerMillion     float64        `json:"cache_write_cost_per_million"`
+	InputCostNanoPerMillion      money.NanoUSD  `json:"input_cost_nano_usd_per_million"`
+	OutputCostNanoPerMillion     money.NanoUSD  `json:"output_cost_nano_usd_per_million"`
+	CacheReadCostNanoPerMillion  money.NanoUSD  `json:"cache_read_cost_nano_usd_per_million"`
+	CacheWriteCostNanoPerMillion money.NanoUSD  `json:"cache_write_cost_nano_usd_per_million"`
+	Status                       string         `json:"status"`       // active, inactive
+	RoutingTier                  string         `json:"routing_tier"` // none, simple, medium, hard
+	ModelType                    string         `json:"model_type"`   // llm, transcript
+	PricePerMinute               float64        `json:"price_per_minute"`
+	PricePerMinuteNano           money.NanoUSD  `json:"price_per_minute_nano_usd"`
+	PricingTiers                 []pricing.Tier `json:"pricing_tiers,omitempty"`
+	CatalogRecordID              string         `json:"catalog_record_id,omitempty"`
+	Tags                         []string       `json:"tags,omitempty"`
+	ProviderFamily               string         `json:"provider_family,omitempty"`
+	AdapterVersion               string         `json:"adapter_version,omitempty"`
+	CompatibilityEpoch           int            `json:"compatibility_epoch,omitempty"`
+	CacheContract                string         `json:"cache_contract,omitempty"`
+	SupportedParameters          []string       `json:"supported_parameters,omitempty"`
+	PricingRuleSetID             string         `json:"pricing_rule_set_id,omitempty"`
+	Health                       string         `json:"health,omitempty"`
+	DeprecatedAt                 *time.Time     `json:"deprecated_at,omitempty"`
+	DeprecationMessage           string         `json:"deprecation_message,omitempty"`
+	Transcribe                   bool           `json:"transcribe"`
+	ContextWindow                int            `json:"context_window"`
+	MaxOutputTokens              int            `json:"max_output_tokens"`
+	DisplayName                  string         `json:"display_name"`
+	Description                  string         `json:"description"`
+	OwnedBy                      string         `json:"owned_by"`
 	// SupportsVision is the operator-set flag that a model accepts image input.
 	// It is the source of truth for vision routing (the name heuristic is only a
 	// fallback), so a vision model with any name is routed correctly.
@@ -158,15 +183,17 @@ type RequestLog struct {
 	// token count. It is nil for rows logged before feature 007 or by upstreams
 	// that do not report it, in which case the dashboard hit-rate falls back to
 	// the input_tokens-based approximation.
-	CacheMissTokens  *int64  `json:"cache_miss_tokens,omitempty"`
-	Cost             float64 `json:"cost"`
-	LatencyMS        int     `json:"latency_ms"`
-	ErrorMessage     string  `json:"error_message"`
-	ClientApp        string  `json:"client_app"`
-	RequestedModel   string  `json:"requested_model"`
-	Complexity       string  `json:"complexity"`
-	ThinkingLevel    string  `json:"thinking_level"`
-	FailoverAttempts int     `json:"failover_attempts"`
+	CacheMissTokens  *int64        `json:"cache_miss_tokens,omitempty"`
+	Cost             float64       `json:"cost"`
+	CostNanoUSD      money.NanoUSD `json:"cost_nano_usd"`
+	ReservationID    string        `json:"reservation_id,omitempty"`
+	LatencyMS        int           `json:"latency_ms"`
+	ErrorMessage     string        `json:"error_message"`
+	ClientApp        string        `json:"client_app"`
+	RequestedModel   string        `json:"requested_model"`
+	Complexity       string        `json:"complexity"`
+	ThinkingLevel    string        `json:"thinking_level"`
+	FailoverAttempts int           `json:"failover_attempts"`
 	// UsageEstimated is true when the upstream disconnected before sending
 	// its usage payload and InputTokens/OutputTokens/Cost were computed from
 	// the local word-count heuristic instead of provider-reported numbers.
@@ -189,11 +216,13 @@ type SystemSetting struct {
 }
 
 type UserTopup struct {
-	ID          string    `json:"id"`
-	UserID      string    `json:"user_id"`
-	Credits     float64   `json:"credits"`
-	UsedCredits float64   `json:"used_credits"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID            string        `json:"id"`
+	UserID        string        `json:"user_id"`
+	Credits       float64       `json:"credits"`
+	UsedCredits   float64       `json:"used_credits"`
+	AmountNanoUSD money.NanoUSD `json:"amount_nano_usd"`
+	UsedNanoUSD   money.NanoUSD `json:"used_nano_usd"`
+	CreatedAt     time.Time     `json:"created_at"`
 	// ExpiresAt (migration 012) lapses a top-up on a date; DeletedAt is a soft
 	// delete. Either one hides the top-up from all user-facing balances and from
 	// consumption (INV-6); admins still see it, badged. Nil = never / not deleted.
@@ -208,6 +237,7 @@ type UserTopup struct {
 type DashboardStats struct {
 	TotalRequests    int            `json:"total_requests"`
 	TotalCost        float64        `json:"total_cost"`
+	TotalCostNanoUSD money.NanoUSD  `json:"total_cost_nano_usd"`
 	TotalTokens      int            `json:"total_tokens"`
 	AvgLatency       float64        `json:"avg_latency"`
 	SuccessRate      float64        `json:"success_rate"`
@@ -219,10 +249,11 @@ type DashboardStats struct {
 }
 
 type DailyStat struct {
-	Date     string  `json:"date"`
-	Requests int     `json:"requests"`
-	Tokens   int     `json:"tokens"`
-	Cost     float64 `json:"cost"`
+	Date        string        `json:"date"`
+	Requests    int           `json:"requests"`
+	Tokens      int           `json:"tokens"`
+	Cost        float64       `json:"cost"`
+	CostNanoUSD money.NanoUSD `json:"cost_nano_usd"`
 }
 
 type TopModelStat struct {
@@ -265,12 +296,31 @@ func Open(dsn string) (*DB, error) {
 		return nil, fmt.Errorf("failed to seed defaults: %w", err)
 	}
 	if raw := strings.TrimSpace(os.Getenv("PROVIDER_KEY_ENCRYPTION_KEY")); raw == "" {
-		log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is not set; upstream provider API keys are stored in PLAINTEXT. Set it (32 raw bytes, base64-encoded) to encrypt them at rest.")
+		if devModeEnabled() {
+			log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is not set; upstream provider API keys are stored in PLAINTEXT. DEV_MODE is enabled — this is permitted for development ONLY. Never set DEV_MODE in production.")
+		} else {
+			conn.Close()
+			return nil, fmt.Errorf("PROVIDER_KEY_ENCRYPTION_KEY is not set: production requires provider keys to be encrypted at rest. Set it (32 raw bytes, base64-encoded), or set DEV_MODE=1 for local development only")
+		}
 	} else if providerKeyCipher() == nil {
-		log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is set but invalid; upstream provider API keys are stored in PLAINTEXT.")
+		if devModeEnabled() {
+			log.Printf("[SECURITY] PROVIDER_KEY_ENCRYPTION_KEY is set but invalid; upstream provider API keys are stored in PLAINTEXT. DEV_MODE is enabled — this is permitted for development ONLY.")
+		} else {
+			conn.Close()
+			return nil, fmt.Errorf("PROVIDER_KEY_ENCRYPTION_KEY is set but invalid: production requires a valid 32-byte base64-encoded key. Fix it, or set DEV_MODE=1 for local development only")
+		}
 	}
 
 	return db, nil
+}
+
+// devModeEnabled reports whether the gateway is running in development mode.
+// DEV_MODE relaxes production-hardened security checks (e.g. plaintext provider
+// keys) so a developer can boot without configuring encryption. It MUST NOT be
+// set in production — the DB Open path fails closed without it.
+func devModeEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEV_MODE")), "1") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("DEV_MODE")), "true")
 }
 
 // backfillVirtualKeyHashes computes key_hash for any row that predates
@@ -451,11 +501,14 @@ func (db *DB) seedDefaults() error {
 		{ID: "budget-max-31d", PlanID: "max", Name: "Monthly Budget (31 Days)", DurationSeconds: 2678400, BudgetUSD: 50.00},
 	}
 	for _, bw := range budgetWindows {
+		if err := normalizeBudgetWindowMoney(&bw); err != nil {
+			return err
+		}
 		_, err = tx.Exec(`
-			INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) 
-			VALUES ($1, $2, $3, $4, $5) 
+			INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd, budget_nano_usd)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (id) DO NOTHING`,
-			bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
+			bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD, bw.BudgetNanoUSD)
 		if err != nil {
 			return err
 		}
@@ -486,17 +539,23 @@ func (db *DB) seedDefaults() error {
 		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", InputCostPerMillion: 0.00, OutputCostPerMillion: 0.00, CacheReadCostPerMillion: 0.00, CacheWriteCostPerMillion: 0.00, Status: "active", ModelType: "transcript", PricePerMinute: 0.006, Transcribe: true, ContextWindow: 0, MaxOutputTokens: 0, DisplayName: "Whisper 1", Description: "OpenAI speech-to-text model", OwnedBy: "openai"},
 	}
 	for _, m := range models {
+		if err := normalizeModelMoney(&m); err != nil {
+			return err
+		}
 		_, err := tx.Exec(`
 			INSERT INTO models (
 				id, name, provider_id, target_model, input_cost_per_million, 
-				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status, 
-				routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
+				output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million,
+				input_cost_nano_usd_per_million, output_cost_nano_usd_per_million,
+				cache_read_cost_nano_usd_per_million, cache_write_cost_nano_usd_per_million, status,
+				routing_tier, model_type, price_per_minute, price_per_minute_nano_usd, transcribe, context_window, max_output_tokens,
 				display_name, description, owned_by
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 			ON CONFLICT (id) DO NOTHING`,
 			m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
-			m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
+			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
+			m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
+			m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.PricePerMinuteNano, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
 			m.DisplayName, m.Description, m.OwnedBy)
 		if err != nil {
 			return err
@@ -527,11 +586,13 @@ func (db *DB) GetUser(id string) (*User, error) {
 	if err == nil {
 		u.BudgetUsage = usage
 	}
-	var extra, remaining float64
-	err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, u.ID).Scan(&extra, &remaining)
+	var extraNano, remainingNano int64
+	err = db.conn.QueryRow("SELECT COALESCE(SUM(amount_nano_usd), 0), COALESCE(SUM(amount_nano_usd - used_nano_usd), 0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, u.ID).Scan(&extraNano, &remainingNano)
 	if err == nil {
-		u.ExtraCredits = extra
-		u.RemainingExtraCredits = remaining
+		u.ExtraCreditsNanoUSD = money.NanoUSD(extraNano)
+		u.RemainingExtraNanoUSD = money.NanoUSD(remainingNano)
+		u.ExtraCredits = u.ExtraCreditsNanoUSD.Credits()
+		u.RemainingExtraCredits = u.RemainingExtraNanoUSD.Credits()
 	}
 	return &u, nil
 }
@@ -553,11 +614,13 @@ func (db *DB) ListUsers() ([]User, error) {
 		if err == nil {
 			u.BudgetUsage = usage
 		}
-		var extra, remaining float64
-		err = db.conn.QueryRow("SELECT COALESCE(SUM(credits), 0.0), COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, u.ID).Scan(&extra, &remaining)
+		var extraNano, remainingNano int64
+		err = db.conn.QueryRow("SELECT COALESCE(SUM(amount_nano_usd), 0), COALESCE(SUM(amount_nano_usd - used_nano_usd), 0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, u.ID).Scan(&extraNano, &remainingNano)
 		if err == nil {
-			u.ExtraCredits = extra
-			u.RemainingExtraCredits = remaining
+			u.ExtraCreditsNanoUSD = money.NanoUSD(extraNano)
+			u.RemainingExtraNanoUSD = money.NanoUSD(remainingNano)
+			u.ExtraCredits = u.ExtraCreditsNanoUSD.Credits()
+			u.RemainingExtraCredits = u.RemainingExtraNanoUSD.Credits()
 		}
 		list = append(list, u)
 	}
@@ -653,8 +716,11 @@ func (db *DB) CreatePlan(p Plan) error {
 		if bw.ID == "" {
 			bw.ID = "budget-" + uuid.New().String()
 		}
-		_, err = tx.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) VALUES ($1, $2, $3, $4, $5)",
-			bw.ID, p.ID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
+		if err := normalizeBudgetWindowMoney(&bw); err != nil {
+			return err
+		}
+		_, err = tx.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd, budget_nano_usd) VALUES ($1, $2, $3, $4, $5, $6)",
+			bw.ID, p.ID, bw.Name, bw.DurationSeconds, bw.BudgetUSD, bw.BudgetNanoUSD)
 		if err != nil {
 			return err
 		}
@@ -684,8 +750,11 @@ func (db *DB) UpdatePlan(p Plan) error {
 		if bw.ID == "" {
 			bw.ID = "budget-" + uuid.New().String()
 		}
-		_, err = tx.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) VALUES ($1, $2, $3, $4, $5)",
-			bw.ID, p.ID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
+		if err := normalizeBudgetWindowMoney(&bw); err != nil {
+			return err
+		}
+		_, err = tx.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd, budget_nano_usd) VALUES ($1, $2, $3, $4, $5, $6)",
+			bw.ID, p.ID, bw.Name, bw.DurationSeconds, bw.BudgetUSD, bw.BudgetNanoUSD)
 		if err != nil {
 			return err
 		}
@@ -703,8 +772,8 @@ func (db *DB) DeletePlan(id string) error {
 
 func (db *DB) GetBudgetWindow(id string) (*BudgetWindow, error) {
 	var bw BudgetWindow
-	err := db.conn.QueryRow("SELECT id, plan_id, name, duration_seconds, budget_usd, created_at FROM budget_windows WHERE id = $1", id).
-		Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.CreatedAt)
+	err := db.conn.QueryRow("SELECT id, plan_id, name, duration_seconds, budget_usd, budget_nano_usd, created_at FROM budget_windows WHERE id = $1", id).
+		Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.BudgetNanoUSD, &bw.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -715,7 +784,7 @@ func (db *DB) GetBudgetWindow(id string) (*BudgetWindow, error) {
 }
 
 func (db *DB) ListBudgetWindows() ([]BudgetWindow, error) {
-	rows, err := db.conn.Query("SELECT id, plan_id, name, duration_seconds, budget_usd, created_at FROM budget_windows ORDER BY created_at DESC")
+	rows, err := db.conn.Query("SELECT id, plan_id, name, duration_seconds, budget_usd, budget_nano_usd, created_at FROM budget_windows ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -724,7 +793,7 @@ func (db *DB) ListBudgetWindows() ([]BudgetWindow, error) {
 	list := []BudgetWindow{}
 	for rows.Next() {
 		var bw BudgetWindow
-		if err := rows.Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.CreatedAt); err != nil {
+		if err := rows.Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.BudgetNanoUSD, &bw.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, bw)
@@ -733,7 +802,7 @@ func (db *DB) ListBudgetWindows() ([]BudgetWindow, error) {
 }
 
 func (db *DB) ListBudgetWindowsByPlan(planID string) ([]BudgetWindow, error) {
-	rows, err := db.conn.Query("SELECT id, plan_id, name, duration_seconds, budget_usd, created_at FROM budget_windows WHERE plan_id = $1 ORDER BY duration_seconds ASC", planID)
+	rows, err := db.conn.Query("SELECT id, plan_id, name, duration_seconds, budget_usd, budget_nano_usd, created_at FROM budget_windows WHERE plan_id = $1 ORDER BY duration_seconds ASC", planID)
 	if err != nil {
 		return nil, err
 	}
@@ -742,7 +811,7 @@ func (db *DB) ListBudgetWindowsByPlan(planID string) ([]BudgetWindow, error) {
 	list := []BudgetWindow{}
 	for rows.Next() {
 		var bw BudgetWindow
-		if err := rows.Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.CreatedAt); err != nil {
+		if err := rows.Scan(&bw.ID, &bw.PlanID, &bw.Name, &bw.DurationSeconds, &bw.BudgetUSD, &bw.BudgetNanoUSD, &bw.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, bw)
@@ -751,12 +820,18 @@ func (db *DB) ListBudgetWindowsByPlan(planID string) ([]BudgetWindow, error) {
 }
 
 func (db *DB) CreateBudgetWindow(bw BudgetWindow) error {
-	_, err := db.conn.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd) VALUES ($1, $2, $3, $4, $5)", bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD)
+	if err := normalizeBudgetWindowMoney(&bw); err != nil {
+		return err
+	}
+	_, err := db.conn.Exec("INSERT INTO budget_windows (id, plan_id, name, duration_seconds, budget_usd, budget_nano_usd) VALUES ($1, $2, $3, $4, $5, $6)", bw.ID, bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD, bw.BudgetNanoUSD)
 	return err
 }
 
 func (db *DB) UpdateBudgetWindow(bw BudgetWindow) error {
-	_, err := db.conn.Exec("UPDATE budget_windows SET plan_id = $1, name = $2, duration_seconds = $3, budget_usd = $4 WHERE id = $5", bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD, bw.ID)
+	if err := normalizeBudgetWindowMoney(&bw); err != nil {
+		return err
+	}
+	_, err := db.conn.Exec("UPDATE budget_windows SET plan_id = $1, name = $2, duration_seconds = $3, budget_usd = $4, budget_nano_usd = $5 WHERE id = $6", bw.PlanID, bw.Name, bw.DurationSeconds, bw.BudgetUSD, bw.BudgetNanoUSD, bw.ID)
 	return err
 }
 
@@ -942,8 +1017,11 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 	// name match is always preferred when both would match.
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million,
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million,
+		input_cost_nano_usd_per_million, output_cost_nano_usd_per_million,
+		cache_read_cost_nano_usd_per_million, cache_write_cost_nano_usd_per_million, status,
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
+		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
 		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
@@ -952,14 +1030,22 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		ORDER BY (name = $1) DESC, (id = $1) DESC
 		LIMIT 1`, normalizedName).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
-			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion,
+			&m.InputCostNanoPerMillion, &m.OutputCostNanoPerMillion, &m.CacheReadCostNanoPerMillion, &m.CacheWriteCostNanoPerMillion,
+			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
+			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
 			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := db.attachPricingTiers(&m); err != nil {
+		return nil, err
+	}
+	if err := db.attachCatalogMetadata(&m); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -968,15 +1054,20 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 func (db *DB) GetModel(id string) (*Model, error) {
 	var m Model
 	err := db.conn.QueryRow(`SELECT id, name, provider_id, target_model, input_cost_per_million,
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million,
+		input_cost_nano_usd_per_million, output_cost_nano_usd_per_million,
+		cache_read_cost_nano_usd_per_million, cache_write_cost_nano_usd_per_million, status,
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
+		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
 		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
-			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion,
+			&m.InputCostNanoPerMillion, &m.OutputCostNanoPerMillion, &m.CacheReadCostNanoPerMillion, &m.CacheWriteCostNanoPerMillion,
+			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
+			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
 			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
 	if err == sql.ErrNoRows {
@@ -985,13 +1076,22 @@ func (db *DB) GetModel(id string) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := db.attachPricingTiers(&m); err != nil {
+		return nil, err
+	}
+	if err := db.attachCatalogMetadata(&m); err != nil {
+		return nil, err
+	}
 	return &m, nil
 }
 
 func (db *DB) ListModels() ([]Model, error) {
 	rows, err := db.conn.Query(`SELECT id, name, provider_id, target_model, input_cost_per_million,
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million,
+		input_cost_nano_usd_per_million, output_cost_nano_usd_per_million,
+		cache_read_cost_nano_usd_per_million, cache_write_cost_nano_usd_per_million, status,
 		COALESCE(routing_tier, 'none'), COALESCE(model_type, 'llm'), COALESCE(price_per_minute, 0.0),
+		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
 		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
@@ -1005,8 +1105,10 @@ func (db *DB) ListModels() ([]Model, error) {
 	for rows.Next() {
 		var m Model
 		err := rows.Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
-			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion, &m.Status, &m.RoutingTier, &m.ModelType,
-			&m.PricePerMinute, &m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
+			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion,
+			&m.InputCostNanoPerMillion, &m.OutputCostNanoPerMillion, &m.CacheReadCostNanoPerMillion, &m.CacheWriteCostNanoPerMillion,
+			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
+			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
 			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
 		if err != nil {
@@ -1014,10 +1116,117 @@ func (db *DB) ListModels() ([]Model, error) {
 		}
 		list = append(list, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if err := db.attachPricingTiers(&list[i]); err != nil {
+			return nil, err
+		}
+		if err := db.attachCatalogMetadata(&list[i]); err != nil {
+			return nil, err
+		}
+	}
 	return list, nil
 }
 
+func (db *DB) attachPricingTiers(model *Model) error {
+	rows, err := db.conn.Query(`SELECT min_input_tokens_exclusive,
+		input_nano_usd_per_million, output_nano_usd_per_million,
+		cache_read_nano_usd_per_million, cache_write_nano_usd_per_million
+		FROM model_pricing_tiers
+		WHERE model_id = $1 AND enabled = TRUE
+		ORDER BY min_input_tokens_exclusive ASC`, model.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	model.PricingTiers = nil
+	for rows.Next() {
+		var tier pricing.Tier
+		if err := rows.Scan(
+			&tier.MinInputTokensExclusive,
+			&tier.Rates.InputPerMillion,
+			&tier.Rates.OutputPerMillion,
+			&tier.Rates.CacheReadPerMillion,
+			&tier.Rates.CacheWritePerMillion,
+		); err != nil {
+			return err
+		}
+		model.PricingTiers = append(model.PricingTiers, tier)
+	}
+	return rows.Err()
+}
+
+func (db *DB) attachCatalogMetadata(model *Model) error {
+	var deprecated sql.NullTime
+	err := db.conn.QueryRow(`SELECT tags, provider_family, adapter_version,
+		compatibility_epoch, cache_contract::text, supported_parameters,
+		pricing_rule_set_id, health, deprecated_at, deprecation_message
+		FROM model_catalog_metadata WHERE model_id = $1`, model.ID).Scan(
+		pq.Array(&model.Tags),
+		&model.ProviderFamily,
+		&model.AdapterVersion,
+		&model.CompatibilityEpoch,
+		&model.CacheContract,
+		pq.Array(&model.SupportedParameters),
+		&model.PricingRuleSetID,
+		&model.Health,
+		&deprecated,
+		&model.DeprecationMessage,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if deprecated.Valid {
+		model.DeprecatedAt = &deprecated.Time
+	}
+	return nil
+}
+
+func (db *DB) UpdateModelCatalogMetadata(model Model) error {
+	if model.AdapterVersion == "" {
+		model.AdapterVersion = "1"
+	}
+	if model.CompatibilityEpoch <= 0 {
+		return fmt.Errorf("compatibility epoch must be positive")
+	}
+	if model.Health == "" {
+		model.Health = "unknown"
+	}
+	if model.CacheContract == "" {
+		model.CacheContract = "{}"
+	}
+	_, err := db.conn.Exec(`INSERT INTO model_catalog_metadata (
+		model_id, tags, provider_family, adapter_version, compatibility_epoch,
+		cache_contract, supported_parameters, pricing_rule_set_id, health,
+		deprecated_at, deprecation_message, updated_at
+	) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,now())
+	ON CONFLICT (model_id) DO UPDATE SET
+		tags=EXCLUDED.tags, provider_family=EXCLUDED.provider_family,
+		adapter_version=EXCLUDED.adapter_version,
+		compatibility_epoch=EXCLUDED.compatibility_epoch,
+		cache_contract=EXCLUDED.cache_contract,
+		supported_parameters=EXCLUDED.supported_parameters,
+		pricing_rule_set_id=EXCLUDED.pricing_rule_set_id,
+		health=EXCLUDED.health, deprecated_at=EXCLUDED.deprecated_at,
+		deprecation_message=EXCLUDED.deprecation_message, updated_at=now()`,
+		model.ID, pq.Array(model.Tags), model.ProviderFamily, model.AdapterVersion,
+		model.CompatibilityEpoch, model.CacheContract, pq.Array(model.SupportedParameters),
+		model.PricingRuleSetID, model.Health, model.DeprecatedAt, model.DeprecationMessage)
+	return err
+}
+
 func (db *DB) CreateModel(m Model) error {
+	if err := normalizeModelMoney(&m); err != nil {
+		return err
+	}
 	if m.RoutingTier == "" {
 		m.RoutingTier = "none"
 	}
@@ -1026,15 +1235,18 @@ func (db *DB) CreateModel(m Model) error {
 	}
 	_, err := db.conn.Exec(`INSERT INTO models (
 		id, name, provider_id, target_model, input_cost_per_million,
-		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million, status,
-		routing_tier, model_type, price_per_minute, transcribe, context_window, max_output_tokens,
+		output_cost_per_million, cache_read_cost_per_million, cache_write_cost_per_million,
+		input_cost_nano_usd_per_million, output_cost_nano_usd_per_million,
+		cache_read_cost_nano_usd_per_million, cache_write_cost_nano_usd_per_million, status,
+		routing_tier, model_type, price_per_minute, price_per_minute_nano_usd, transcribe, context_window, max_output_tokens,
 		display_name, description, owned_by, supports_vision, supports_thinking,
 		supports_audio, supports_video, supports_documents, max_attachment_mb, accepted_mime_types,
 		muhiyacode_visible
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
-		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status,
-		m.RoutingTier, m.ModelType, m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
+		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
+		m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
+		m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.PricePerMinuteNano, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
 		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision, m.SupportsThinking,
 		m.SupportsAudio, m.SupportsVideo, m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes,
 		m.MuhiyaCodeVisible)
@@ -1042,6 +1254,9 @@ func (db *DB) CreateModel(m Model) error {
 }
 
 func (db *DB) UpdateModel(m Model) error {
+	if err := normalizeModelMoney(&m); err != nil {
+		return err
+	}
 	if m.RoutingTier == "" {
 		m.RoutingTier = "none"
 	}
@@ -1050,14 +1265,19 @@ func (db *DB) UpdateModel(m Model) error {
 	}
 	_, err := db.conn.Exec(`UPDATE models SET name = $1, provider_id = $2, target_model = $3,
 		input_cost_per_million = $4, output_cost_per_million = $5,
-		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7, status = $8, routing_tier = $9,
-		model_type = $10, price_per_minute = $11, transcribe = $12, context_window = $13, max_output_tokens = $14,
-		display_name = $15, description = $16, owned_by = $17, supports_vision = $18,
-		supports_thinking = $19, supports_audio = $20, supports_video = $21, supports_documents = $22,
-		max_attachment_mb = $23, accepted_mime_types = $24, muhiyacode_visible = $25 WHERE id = $26`,
+		cache_read_cost_per_million = $6, cache_write_cost_per_million = $7,
+		input_cost_nano_usd_per_million = $8, output_cost_nano_usd_per_million = $9,
+		cache_read_cost_nano_usd_per_million = $10, cache_write_cost_nano_usd_per_million = $11,
+		status = $12, routing_tier = $13, model_type = $14, price_per_minute = $15,
+		price_per_minute_nano_usd = $16, transcribe = $17, context_window = $18, max_output_tokens = $19,
+		display_name = $20, description = $21, owned_by = $22, supports_vision = $23,
+		supports_thinking = $24, supports_audio = $25, supports_video = $26, supports_documents = $27,
+		max_attachment_mb = $28, accepted_mime_types = $29, muhiyacode_visible = $30 WHERE id = $31`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
-		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion, m.Status, m.RoutingTier, m.ModelType,
-		m.PricePerMinute, m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
+		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
+		m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
+		m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.PricePerMinuteNano,
+		m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
 		m.OwnedBy, m.SupportsVision, m.SupportsThinking, m.SupportsAudio, m.SupportsVideo,
 		m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes, m.MuhiyaCodeVisible, m.ID)
 	return err
@@ -1119,42 +1339,51 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 	// they never paid for. No caller has a legitimate negative: calculateCost floors
 	// every component at zero. Reject rather than clamp — a clamped row would
 	// silently persist a forged billing record.
-	if log.Cost < 0 {
-		return fmt.Errorf("refusing to insert request log %s: negative cost %.6f", log.ID, log.Cost)
+	if err := normalizeRequestLogMoney(&log); err != nil {
+		return fmt.Errorf("refusing to insert request log %s: %w", log.ID, err)
 	}
 
-	var modelID, providerID interface{}
-	if log.ModelID != "" {
-		modelID = log.ModelID
-	}
-	if log.ProviderID != "" {
-		providerID = log.ProviderID
-	}
+	err := insertRequestLog(db.conn, log)
 
-	// upstream_provider is written as NULL rather than "" when absent, so a
-	// direct connection stays distinguishable from a routed one whose upstream
-	// we failed to parse.
-	var upstream any
-	if log.UpstreamProvider != "" {
-		upstream = log.UpstreamProvider
-	}
-	_, err := db.conn.Exec(`INSERT INTO request_logs (
-		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
-		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_miss_tokens, cost, latency_ms, error_message, created_at, client_app,
-		requested_model, complexity, failover_attempts, thinking_level, usage_estimated, upstream_provider
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
-		log.ID, log.VirtualKeyID, log.UserID, modelID, providerID, log.RequestPath, log.StatusCode,
-		log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens, log.CacheMissTokens, log.Cost, log.LatencyMS, log.ErrorMessage, log.CreatedAt, log.ClientApp,
-		log.RequestedModel, log.Complexity, log.FailoverAttempts, log.ThinkingLevel, log.UsageEstimated, upstream)
-
-	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.Cost > 0 {
-		if derr := db.DeductExtraCreditsIfExceeded(log.UserID, log.Cost); derr != nil {
+	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.CostNanoUSD > 0 {
+		if derr := db.DeductExtraNanoIfExceeded(log.UserID, log.CostNanoUSD); derr != nil {
 			// F2: never swallow a credit-deduction failure — the billing row is
 			// already committed, so a lost deduction is a revenue leak. Surface it
 			// with request context for the ops log / alerting.
 			logCreditFailure(log.UserID, log.Cost, derr)
 		}
 	}
+	return err
+}
+
+type requestLogExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
+	var modelID, providerID, upstream, reservationID any
+	if entry.ModelID != "" {
+		modelID = entry.ModelID
+	}
+	if entry.ProviderID != "" {
+		providerID = entry.ProviderID
+	}
+	if entry.UpstreamProvider != "" {
+		upstream = entry.UpstreamProvider
+	}
+	if entry.ReservationID != "" {
+		reservationID = entry.ReservationID
+	}
+	_, err := exec.Exec(`INSERT INTO request_logs (
+		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
+		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_miss_tokens,
+		cost, cost_nano_usd, reservation_id, latency_ms, error_message, created_at, client_app,
+		requested_model, complexity, failover_attempts, thinking_level, usage_estimated, upstream_provider
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)`,
+		entry.ID, entry.VirtualKeyID, entry.UserID, modelID, providerID, entry.RequestPath, entry.StatusCode,
+		entry.InputTokens, entry.OutputTokens, entry.CacheReadTokens, entry.CacheWriteTokens, entry.CacheMissTokens,
+		entry.Cost, entry.CostNanoUSD, reservationID, entry.LatencyMS, entry.ErrorMessage, entry.CreatedAt, entry.ClientApp,
+		entry.RequestedModel, entry.Complexity, entry.FailoverAttempts, entry.ThinkingLevel, entry.UsageEstimated, upstream)
 	return err
 }
 
@@ -1171,9 +1400,9 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	// survives with a null reference and must still scan into a string.
 	query := `
 		SELECT request_logs.id, COALESCE(request_logs.virtual_key_id, ''), COALESCE(request_logs.user_id, ''), COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code,
-		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
+		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.cost_nano_usd, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
 		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, ''), COALESCE(request_logs.usage_estimated, FALSE),
-		       COALESCE(request_logs.upstream_provider, '')
+		       COALESCE(request_logs.upstream_provider, ''), COALESCE(request_logs.reservation_id, '')
 		FROM request_logs
 		LEFT JOIN models ON request_logs.model_id = models.id
 		WHERE 1=1`
@@ -1206,8 +1435,8 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 	for rows.Next() {
 		var r RequestLog
 		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
-			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider)
+			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.CostNanoUSD, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
+			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider, &r.ReservationID)
 		if err != nil {
 			return nil, err
 		}
@@ -1217,6 +1446,11 @@ func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string
 }
 
 func (db *DB) GetUserSpendingInWindow(userID string, durationSeconds int) (float64, error) {
+	exact, err := db.GetUserSpendingNanoInWindow(userID, durationSeconds)
+	return exact.USD(), err
+}
+
+func (db *DB) GetUserSpendingNanoInWindow(userID string, durationSeconds int) (money.NanoUSD, error) {
 	var planAssignedAt time.Time
 	var usageResetAt sql.NullTime
 	err := db.conn.QueryRow("SELECT plan_assigned_at, usage_reset_at FROM users WHERE id = $1", userID).Scan(&planAssignedAt, &usageResetAt)
@@ -1224,15 +1458,20 @@ func (db *DB) GetUserSpendingInWindow(userID string, durationSeconds int) (float
 		return 0, err
 	}
 	floor := effectiveFloor(windowPeriodStart(planAssignedAt, durationSeconds, time.Now()), usageResetAt)
-	var total float64
-	err = db.conn.QueryRow("SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, floor).Scan(&total)
-	return total, err
+	var total int64
+	err = db.conn.QueryRow("SELECT COALESCE(SUM(cost_nano_usd), 0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, floor).Scan(&total)
+	return money.NanoUSD(total), err
 }
 
 func (db *DB) GetRemainingExtraCredits(userID string) (float64, error) {
-	var remaining float64
-	err := db.conn.QueryRow("SELECT COALESCE(SUM(credits - used_credits), 0.0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, userID).Scan(&remaining)
-	return remaining, err
+	exact, err := db.GetRemainingExtraNanoUSD(userID)
+	return exact.Credits(), err
+}
+
+func (db *DB) GetRemainingExtraNanoUSD(userID string) (money.NanoUSD, error) {
+	var remaining int64
+	err := db.conn.QueryRow("SELECT COALESCE(SUM(amount_nano_usd - used_nano_usd), 0) FROM user_topups WHERE user_id = $1"+activeTopupFilter, userID).Scan(&remaining)
+	return money.NanoUSD(remaining), err
 }
 
 // GetUserSpendingToday sums a user's cost over the current UTC calendar day
@@ -1240,12 +1479,12 @@ func (db *DB) GetRemainingExtraCredits(userID string) (float64, error) {
 // GetUserSpendingInWindow/GetUserBudgetUsage so the "today" figure sums the
 // identical row set as the budget windows' current_spent.
 func (db *DB) GetUserSpendingToday(userID string) (float64, error) {
-	var total float64
+	var total int64
 	err := db.conn.QueryRow(
-		"SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND status_code >= 200 AND status_code < 300 AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')",
+		"SELECT COALESCE(SUM(cost_nano_usd), 0) FROM request_logs WHERE user_id = $1 AND status_code >= 200 AND status_code < 300 AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')",
 		userID,
 	).Scan(&total)
-	return total, err
+	return money.NanoUSD(total).USD(), err
 }
 
 // DeductExtraCreditsIfExceeded charges a user's top-up credits for the over-budget
@@ -1259,7 +1498,15 @@ func (db *DB) GetUserSpendingToday(userID string) (float64, error) {
 // period start derives from it via windowPeriodStart. The math lives in billing.go
 // as pure, unit-tested functions.
 func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error {
-	if costUSD <= 0 {
+	exact, err := money.FromUSD(costUSD)
+	if err != nil {
+		return err
+	}
+	return db.DeductExtraNanoIfExceeded(userID, exact)
+}
+
+func (db *DB) DeductExtraNanoIfExceeded(userID string, cost money.NanoUSD) error {
+	if cost <= 0 {
 		return nil
 	}
 	tx, err := db.conn.Begin()
@@ -1286,25 +1533,25 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 	}
 
 	now := time.Now()
-	var maxCredits float64
+	var maxCharge money.NanoUSD
 	for _, w := range windows {
-		if w.BudgetUSD <= 0 {
+		if w.BudgetNanoUSD <= 0 {
 			continue
 		}
 		floor := effectiveFloor(windowPeriodStart(planAssignedAt, w.DurationSeconds, now), usageResetAt)
-		currentSpend, err := spendInWindowTx(tx, userID, floor)
+		currentSpend, err := spendNanoInWindowTx(tx, userID, floor)
 		if err != nil {
 			return err
 		}
-		lastBilled, err := loadChargeWatermark(tx, userID, w.ID, currentSpend, costUSD)
+		lastBilled, err := loadChargeWatermarkNano(tx, userID, w.ID, currentSpend, cost)
 		if err != nil {
 			return err
 		}
-		credits, newWatermark := overageChargeCredits(currentSpend, w.BudgetUSD, lastBilled)
-		if credits > maxCredits {
-			maxCredits = credits
+		charge, newWatermark := overageChargeNano(currentSpend, w.BudgetNanoUSD, lastBilled)
+		if charge > maxCharge {
+			maxCharge = charge
 		}
-		if err := saveChargeWatermark(tx, userID, w.ID, newWatermark); err != nil {
+		if err := saveChargeWatermarkNano(tx, userID, w.ID, newWatermark); err != nil {
 			return err
 		}
 	}
@@ -1312,8 +1559,8 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 	// Charge the single worst window's marginal overage — unchanged semantics:
 	// overlapping windows (e.g. 5h and monthly) count the same spend, so summing
 	// them would double-charge.
-	if maxCredits > 0 {
-		if err := deductFromTopups(tx, userID, maxCredits); err != nil {
+	if maxCharge > 0 {
+		if err := deductNanoFromTopupsTx(context.Background(), tx, userID, maxCharge); err != nil {
 			return err
 		}
 	}
@@ -1324,7 +1571,7 @@ func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error
 // the user-facing sums it does NOT hide expired/deleted rows — admins keep full
 // visibility (badged in the UI); only the money paths apply activeTopupFilter.
 func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
-	rows, err := db.conn.Query("SELECT id, user_id, credits, used_credits, created_at, expires_at, deleted_at FROM user_topups WHERE user_id = $1 ORDER BY created_at DESC", userID)
+	rows, err := db.conn.Query("SELECT id, user_id, credits, used_credits, amount_nano_usd, used_nano_usd, created_at, expires_at, deleted_at FROM user_topups WHERE user_id = $1 ORDER BY created_at DESC", userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1334,7 +1581,7 @@ func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
 	for rows.Next() {
 		var u UserTopup
 		var expiresAt, deletedAt sql.NullTime
-		if err := rows.Scan(&u.ID, &u.UserID, &u.Credits, &u.UsedCredits, &u.CreatedAt, &expiresAt, &deletedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.UserID, &u.Credits, &u.UsedCredits, &u.AmountNanoUSD, &u.UsedNanoUSD, &u.CreatedAt, &expiresAt, &deletedAt); err != nil {
 			return nil, err
 		}
 		if expiresAt.Valid {
@@ -1352,9 +1599,12 @@ func (db *DB) ListUserTopups(userID string) ([]UserTopup, error) {
 // same key is silently ignored (migration 013 partial unique index) so retries and
 // gift-card redemptions can never double-credit. A NULL IdemKey never conflicts.
 func (db *DB) CreateUserTopup(t UserTopup) error {
+	if err := normalizeTopupMoney(&t); err != nil {
+		return err
+	}
 	_, err := db.conn.Exec(
-		"INSERT INTO user_topups (id, user_id, credits, used_credits, created_at, expires_at, idem_key) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (idem_key) WHERE idem_key IS NOT NULL DO NOTHING",
-		t.ID, t.UserID, t.Credits, t.UsedCredits, t.CreatedAt, t.ExpiresAt, t.IdemKey)
+		"INSERT INTO user_topups (id, user_id, credits, used_credits, amount_nano_usd, used_nano_usd, created_at, expires_at, idem_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (idem_key) WHERE idem_key IS NOT NULL DO NOTHING",
+		t.ID, t.UserID, t.Credits, t.UsedCredits, t.AmountNanoUSD, t.UsedNanoUSD, t.CreatedAt, t.ExpiresAt, t.IdemKey)
 	return err
 }
 
@@ -1395,19 +1645,21 @@ func (db *DB) GetUserBudgetUsage(userID string, planID string) ([]UserBudgetUsag
 		resetTime := periodStart.Add(time.Duration(w.DurationSeconds) * time.Second)
 		floor := effectiveFloor(periodStart, usageResetAt)
 
-		var spent float64
-		err := db.conn.QueryRow("SELECT COALESCE(SUM(cost), 0.0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, floor).Scan(&spent)
+		var spentNano int64
+		err := db.conn.QueryRow("SELECT COALESCE(SUM(cost_nano_usd), 0) FROM request_logs WHERE user_id = $1 AND created_at >= $2 AND status_code >= 200 AND status_code < 300", userID, floor).Scan(&spentNano)
 		if err != nil {
 			return nil, err
 		}
 
 		usage = append(usage, UserBudgetUsage{
-			WindowID:        w.ID,
-			Name:            w.Name,
-			DurationSeconds: w.DurationSeconds,
-			BudgetUSD:       w.BudgetUSD,
-			CurrentSpent:    spent,
-			ResetTime:       &resetTime,
+			WindowID:            w.ID,
+			Name:                w.Name,
+			DurationSeconds:     w.DurationSeconds,
+			BudgetUSD:           w.BudgetUSD,
+			BudgetNanoUSD:       w.BudgetNanoUSD,
+			CurrentSpent:        money.NanoUSD(spentNano).USD(),
+			CurrentSpentNanoUSD: money.NanoUSD(spentNano),
+			ResetTime:           &resetTime,
 		})
 	}
 
@@ -1420,17 +1672,18 @@ func (db *DB) GetDashboardStats() (*DashboardStats, error) {
 	err := db.conn.QueryRow(`
 		SELECT 
 			COUNT(*), 
-			COALESCE(SUM(cost), 0.0), 
+			COALESCE(SUM(cost_nano_usd), 0),
 			COALESCE(SUM(input_tokens + output_tokens), 0),
 			COALESCE(AVG(latency_ms), 0.0),
 			COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 100.0),
 			COALESCE(SUM(cache_read_tokens), 0),
 			COALESCE(SUM(cache_write_tokens), 0),
 			COALESCE(SUM(cache_read_tokens) * 100.0 / NULLIF(SUM(CASE WHEN cache_miss_tokens IS NOT NULL THEN cache_read_tokens + cache_miss_tokens ELSE input_tokens END), 0), 0.0)
-		FROM request_logs`).Scan(&stats.TotalRequests, &stats.TotalCost, &stats.TotalTokens, &stats.AvgLatency, &stats.SuccessRate, &stats.CacheReadTokens, &stats.CacheWriteTokens, &stats.CacheHitRate)
+		FROM request_logs`).Scan(&stats.TotalRequests, &stats.TotalCostNanoUSD, &stats.TotalTokens, &stats.AvgLatency, &stats.SuccessRate, &stats.CacheReadTokens, &stats.CacheWriteTokens, &stats.CacheHitRate)
 	if err != nil {
 		return nil, err
 	}
+	stats.TotalCost = stats.TotalCostNanoUSD.USD()
 
 	daysLimit := time.Now().Add(-7 * 24 * time.Hour)
 	rows, err := db.conn.Query(`
@@ -1438,7 +1691,7 @@ func (db *DB) GetDashboardStats() (*DashboardStats, error) {
 			to_char(created_at, 'YYYY-MM-DD') as day, 
 			COUNT(*), 
 			SUM(input_tokens + output_tokens), 
-			SUM(cost)
+			SUM(cost_nano_usd)
 		FROM request_logs 
 		WHERE created_at >= $1
 		GROUP BY day 
@@ -1451,12 +1704,13 @@ func (db *DB) GetDashboardStats() (*DashboardStats, error) {
 	for rows.Next() {
 		var ds DailyStat
 		var tokens sql.NullInt64
-		var cost sql.NullFloat64
+		var cost sql.NullInt64
 		if err := rows.Scan(&ds.Date, &ds.Requests, &tokens, &cost); err != nil {
 			return nil, err
 		}
 		ds.Tokens = int(tokens.Int64)
-		ds.Cost = cost.Float64
+		ds.CostNanoUSD = money.NanoUSD(cost.Int64)
+		ds.Cost = ds.CostNanoUSD.USD()
 		stats.DailyStats = append(stats.DailyStats, ds)
 	}
 

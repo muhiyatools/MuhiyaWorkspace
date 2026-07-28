@@ -5,7 +5,20 @@ import (
 	"testing"
 
 	"gateway/db"
+	"gateway/pricing"
 )
+
+func miniMaxM3TestTier() []pricing.Tier {
+	return []pricing.Tier{{
+		MinInputTokensExclusive: 512_000,
+		Rates: pricing.Rates{
+			InputPerMillion:      600_000_000,
+			OutputPerMillion:     2_400_000_000,
+			CacheReadPerMillion:  120_000_000,
+			CacheWritePerMillion: 600_000_000,
+		},
+	}}
+}
 
 // All MiniMax values in this test are simulated from the documented pricing
 // table; this suite never contacts the live MiniMax API.
@@ -13,6 +26,7 @@ func TestMiniMaxTieredCostSimulated(t *testing.T) {
 	m3 := &db.Model{
 		Name: "minimax-m3", TargetModel: "MiniMax-M3",
 		InputCostPerMillion: 0.30, OutputCostPerMillion: 1.20, CacheReadCostPerMillion: 0.06,
+		PricingTiers: miniMaxM3TestTier(),
 	}
 	cases := []struct {
 		name                  string
@@ -51,6 +65,7 @@ func TestMiniMaxM3VariantNamesStayTiered(t *testing.T) {
 	}
 	for _, model := range tiered {
 		model.InputCostPerMillion, model.OutputCostPerMillion, model.CacheReadCostPerMillion = base.InputCostPerMillion, base.OutputCostPerMillion, base.CacheReadCostPerMillion
+		model.PricingTiers = miniMaxM3TestTier()
 		got := calculateCost(&model, upperTierInput, output, 0, 0)
 		want := 0.60 // 0.6M in × $0.60/M + 0.1M out × $2.40/M
 		if math.Abs(got-want) > 1e-12 {

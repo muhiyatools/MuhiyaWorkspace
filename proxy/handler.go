@@ -3,10 +3,14 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -16,6 +20,8 @@ import (
 	"time"
 
 	"gateway/db"
+	"gateway/money"
+	"gateway/pricing"
 	"github.com/google/uuid"
 )
 
@@ -111,10 +117,10 @@ func asFlusher(w http.ResponseWriter) http.Flusher {
 }
 
 type ProxyHandler struct {
-	db      *db.DB
-	limiter *RateLimiter
-	sticky  *modelSticky
-	outbox  *logOutbox
+	db       *db.DB
+	limiter  *RateLimiter
+	outbox   *logOutbox
+	affinity *routeAffinityStore
 	// identitySecret is the HMAC key used to derive a stable, opaque upstream
 	// "user" identifier (see DeriveUserID). Empty disables identity injection.
 	identitySecret string
@@ -124,10 +130,56 @@ func NewProxyHandler(database *db.DB, limiter *RateLimiter, identitySecret strin
 	return &ProxyHandler{
 		db:             database,
 		limiter:        limiter,
-		sticky:         newModelSticky(),
 		outbox:         newLogOutbox(database),
+		affinity:       newRouteAffinityStore(),
 		identitySecret: identitySecret,
 	}
+}
+
+// routerModelDeprecated is the legacy virtual model name that used to select a
+// model automatically by task complexity. Automatic/cross-model routing was
+// removed to enforce the single-active-model invariant: the model selected for
+// a session is the only model that may generate any token for that session.
+// Requests naming it must fail explicitly so they never silently resolve to a
+// default model; the message tells the caller how to migrate.
+const routerModelDeprecated = "muhiya-ai-router"
+
+// clientRequestIDHeader is the header the MuhiyaCode client uses to send a
+// per-request correlation ID (P0-W5, UMI-26). When present, the gateway uses
+// it as the request_log row ID so one ID ties client turn → gateway attempt →
+// settlement. Empty means the gateway generates its own (backward compatible
+// for non-MuhiyaCode clients or older clients).
+const clientRequestIDHeader = "X-Muhiya-Request-ID"
+
+// correlationID returns the per-request correlation ID. It prefers the
+// client-supplied header and falls back to a server-generated UUID. The same
+// value is used as the request_log row ID and the muhiya_log log_id chunk.
+func correlationID(r *http.Request) string {
+	if id := strings.TrimSpace(r.Header.Get(clientRequestIDHeader)); id != "" {
+		if len(id) <= 100 {
+			valid := true
+			for _, char := range id {
+				if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+					(char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.') {
+					valid = false
+					break
+				}
+			}
+			if valid {
+				return id
+			}
+		}
+		log.Printf("[REQUEST] ignored malformed %s header", clientRequestIDHeader)
+	}
+	return uuid.New().String()
+}
+
+func (h *ProxyHandler) rejectDeprecatedRouterModel(w http.ResponseWriter, requested string) {
+	h.writeError(w, http.StatusBadRequest,
+		"Model '"+requested+"' is no longer supported. The automatic model router was removed: "+
+			"select a concrete model for the session (e.g. via /model) and send its exact name as the "+
+			"`model` parameter. See the MuhiyaCode single-model migration guide.",
+		"invalid_request_error")
 }
 
 // internalErrorResponse logs the real error server-side (with a short
@@ -155,7 +207,15 @@ func (h *ProxyHandler) serviceUnavailableResponse(w http.ResponseWriter, context
 // bounded, backoff-retrying outbox so a transient database blip cannot lose
 // billing history (see outbox.go).
 func (h *ProxyHandler) saveRequestLog(entry db.RequestLog) {
-	if err := h.db.InsertRequestLog(entry); err != nil {
+	var err error
+	if entry.ReservationID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = h.db.SettleReservationAndLog(ctx, entry)
+		cancel()
+	} else {
+		err = h.db.InsertRequestLog(entry)
+	}
+	if err != nil {
 		log.Printf("[BILLING-ERROR] failed to insert request log %s: %v - queued for retry", entry.ID, err)
 		if h.outbox != nil {
 			h.outbox.enqueue(entry)
@@ -328,6 +388,14 @@ func translateErrorBytes(respBytes []byte, clientIsAnthropic bool) []byte {
 
 func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w = &responseWriterWithRequest{ResponseWriter: w, req: r}
+
+	if r.Method == http.MethodGet && strings.TrimSuffix(r.URL.Path, "/") == "/v1/muhiyacode/models" {
+		if _, ok := h.authenticateVirtualKey(w, r); !ok {
+			return
+		}
+		h.handleMuhiyaCodeCatalog(w, r)
+		return
+	}
 
 	// Handle GET /v1/models and /v1/models/{id} endpoints (Model Discovery).
 	// Requires a valid virtual key, same as /capabilities and
@@ -620,195 +688,121 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	// client `thinking` object is NOT a level: it passes through untouched.
 	thinkingLevel := ResolveThinkingLevel(r, oaiReq.ReasoningEffort)
 
-	isRouterRequest := oaiReq.Model == "muhiya-ai-router"
-	var targetModel *db.Model
-	var fallbackModels []*db.Model
-	var err error
-	complexity := "direct"
-	// Sticky key + repin lifecycle: set AFTER a candidate succeeds, evict on
-	// total failure, so a conversation is never trapped on a broken model.
-	var stKey string
-
-	if isRouterRequest {
-		complexity = AnalyzePromptComplexity(oaiReq.Messages)
-		needs := detectMediaNeedsOpenAI(oaiReq.Messages)
-
-		// minimal/low means "think less" - it must never route the request
-		// onto a pricier thinking tier. An explicit client thinking object
-		// still counts as a thinking request.
-		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
-		targetModel, err = h.RouteToModel(complexity, needs, thinkingRequested)
-		if err != nil {
-			h.internalErrorResponse(w, "routing error", err)
-			return
-		}
-
-		// Session stickiness: DeepSeek's prefix cache is per upstream model,
-		// so once a conversation has picked one, a later turn must not
-		// silently re-route it just because effort/complexity shifted - that
-		// would wipe the whole cached prefix for a request that could have
-		// reused it. A client that sends X-Muhiya-Session pins the model for
-		// the session's lifetime; without the header, routing is unchanged.
-		stKey = stickyKeyFor(key.ID, r.Header.Get(SessionHeader))
-		if pinnedID, ok := h.sticky.get(stKey); ok {
-			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil {
-				// Reuse the pin only if it is still ELIGIBLE for this request:
-				// active, capable of every media modality present, and not a free
-				// (rate-limited) model on a text turn. Otherwise keep the fresh
-				// route (preferPaid already made it paid/capability-correct) and
-				// let it repin after success — this self-heals sessions previously
-				// pinned to a broken/free model, with no 24h TTL wait.
-				eligible := pinned.Status == "active" &&
-					modelSupportsMedia(pinned, needs) &&
-					(needs.Any() || !modelIsFree(pinned))
-				if eligible {
-					if pinned.ID != targetModel.ID {
-						log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
-					}
-					targetModel = pinned
-				} else {
-					log.Printf("[ROUTER-STICKY] pinned model %s ineligible (media=%q free=%v); re-routing to %s", pinned.Name, needs.describe(), modelIsFree(pinned), targetModel.Name)
-				}
-			}
-		}
-		// NOTE: the pin is set AFTER a candidate succeeds (see end of the
-		// candidates loop), not here — so a failed model is never pinned.
-
-		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needs)
-		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, media: %q) with %d fallback(s)", targetModel.Name, complexity, needs.describe(), len(fallbackModels))
-	} else {
-		targetModel, err = h.db.GetModelByName(oaiReq.Model)
-		if err != nil {
-			h.internalErrorResponse(w, "database error", err)
-			return
-		}
-		if targetModel == nil {
-			h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", oaiReq.Model), "invalid_request_error")
-			return
-		}
+	// The automatic model router was removed (single-active-model invariant).
+	// Legacy router requests fail explicitly; they must never resolve to a
+	// default model. The caller selects the exact model for the session.
+	if oaiReq.Model == routerModelDeprecated {
+		h.rejectDeprecatedRouterModel(w, oaiReq.Model)
+		return
 	}
 
-	// Prepare candidate models to try
-	candidates := []*db.Model{targetModel}
-	if isRouterRequest {
-		candidates = append(candidates, fallbackModels...)
+	targetModel, err := h.db.GetModelByName(oaiReq.Model)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
+	if targetModel == nil {
+		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", oaiReq.Model), "invalid_request_error")
+		return
+	}
+	if !h.establishModelResolution(w, r, targetModel) {
+		return
+	}
+	// One model, one attempt. Cross-model failover was removed: it could
+	// silently substitute a different model mid-session and bust the upstream
+	// prefix cache, violating the single-active-model invariant. A transient
+	// upstream failure is reported to the caller rather than rerouted.
+	provider, err := h.db.GetProvider(targetModel.ProviderID)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
+	if provider == nil || provider.Status != "active" {
+		h.writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("Provider for model '%s' is unavailable", targetModel.Name), "api_error")
+		return
 	}
 
-	// Estimate prompt tokens once: the prompt is identical across failover
-	// candidates (only the target model changes), so the rate/budget check must
-	// run a single time. Checking per-candidate double-counted RPM/TPM on retry.
+	// Estimate prompt tokens once for rate/budget admission.
 	var textBuilder strings.Builder
 	for _, m := range oaiReq.Messages {
 		textBuilder.WriteString(GetMessageContentString(m.Content))
 	}
 	promptTokens := estimateTokens(textBuilder.String())
-	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+	requestedOutput := requestedOpenAIOutput(&oaiReq, targetModel)
+	if err := h.limiter.CheckLimit(key, promptTokens+requestedOutput); err != nil {
 		h.writeLimitError(w, err)
 		return
 	}
 
-	var lastBuffer *BufferedResponseWriter
-	success := false
+	var targetURL string
+	var useAnthropicUpstream bool
 
-	for idx, model := range candidates {
-		// Clone request to avoid mutating original for subsequent retries
-		reqCopy := oaiReq
-		reqCopy.Model = model.Name
-
-		provider, err := h.db.GetProvider(model.ProviderID)
-		if err != nil {
-			log.Printf("[ROUTER-WARNING] Failed to get provider for model %s: %v", model.Name, err)
-			continue
-		}
-		if provider == nil || provider.Status != "active" {
-			log.Printf("[ROUTER-WARNING] Provider %s is inactive for model %s", model.ProviderID, model.Name)
-			continue
-		}
-
-		requestedModel := oaiReq.Model
-		complexityStr := "direct"
-		if isRouterRequest {
-			requestedModel = "muhiya-ai-router"
-			complexityStr = complexity
-		}
-
-		startTime := time.Now()
-		reqLog := db.RequestLog{
-			ID:               uuid.New().String(),
-			VirtualKeyID:     key.ID,
-			UserID:           key.UserID,
-			ModelID:          model.ID,
-			ProviderID:       provider.ID,
-			RequestPath:      r.URL.Path,
-			InputTokens:      promptTokens,
-			ClientApp:        getClientAppName(r),
-			RequestedModel:   requestedModel,
-			Complexity:       complexityStr,
-			ThinkingLevel:    thinkingLevel,
-			FailoverAttempts: idx,
-			CreatedAt:        startTime,
-		}
-
-		var targetURL string
-		var useAnthropicUpstream bool
-
-		if provider.BaseURL != "" {
-			targetURL = provider.BaseURL
-			useAnthropicUpstream = false
-		} else if provider.AnthropicBaseURL != "" {
-			targetURL = provider.AnthropicBaseURL
-			useAnthropicUpstream = true
-		} else {
-			log.Printf("[ROUTER-WARNING] Provider %s has no base URL", provider.ID)
-			continue
-		}
-
-		resolvedProvider := *provider
-		resolvedProvider.BaseURL = targetURL
-
-		// Create buffered writer to intercept failures cleanly
-		bufW := NewBufferedResponseWriter(w)
-		lastBuffer = bufW
-
-		// Perform proxy (thinking mapping happens per-candidate inside, since
-		// failover can switch to a provider with a different dialect)
-		if useAnthropicUpstream {
-			h.proxyOpenAIToAnthropic(bufW, r, &reqCopy, model, &resolvedProvider, reqLog, startTime)
-		} else {
-			// Forward the client's ORIGINAL bytes, not a re-marshal of the
-			// lossy typed struct: proxyOpenAIToOpenAI already unmarshals its
-			// origBody into a map and overwrites "model" there, so passing
-			// bodyBytes directly preserves every field the client sent
-			// (reasoning_content, stop, response_format, seed, ...) instead
-			// of silently dropping anything OpenAIRequest doesn't declare.
-			// reqCopy.Model is redundant here anyway - proxyOpenAIToOpenAI
-			// overwrites bodyMap["model"] with model.TargetModel regardless.
-			h.proxyOpenAIToOpenAI(bufW, r, bodyBytes, model, &resolvedProvider, reqLog, startTime)
-		}
-
-		// Check if request was successful
-		if bufW.statusCode > 0 && bufW.statusCode < 400 {
-			success = true
-			// Pin the model that actually SUCCEEDED (not the one first chosen),
-			// so the conversation sticks to a working model and a failed primary
-			// is never pinned.
-			h.sticky.set(stKey, model.ID)
-			if idx > 0 {
-				log.Printf("[ROUTER-SUCCESS] Router failover succeeded with model %s on attempt %d", model.Name, idx+1)
-			}
-			break
-		}
-
-		log.Printf("[ROUTER-FAILOVER] Model %s failed (status %d). Trying next candidate...", model.Name, bufW.statusCode)
+	if provider.BaseURL != "" {
+		targetURL = provider.BaseURL
+		useAnthropicUpstream = false
+	} else if provider.AnthropicBaseURL != "" {
+		targetURL = provider.AnthropicBaseURL
+		useAnthropicUpstream = true
+	} else {
+		h.writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("Provider '%s' has no base URL", provider.ID), "api_error")
+		return
 	}
 
-	// If every candidate failed, evict any stale pin so the next turn routes
-	// fresh, and flush the last failure response to the client.
-	if !success {
-		h.sticky.evict(stKey)
-		if lastBuffer != nil {
-			lastBuffer.FlushToActual()
-		}
+	resolvedProvider := *provider
+	resolvedProvider.BaseURL = targetURL
+
+	requestID := correlationID(r)
+	reservation, allowedOutput, err := h.reserveGeneration(
+		r.Context(),
+		key,
+		targetModel,
+		requestID,
+		conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
+		requestedOutput,
+	)
+	if err != nil {
+		h.writeReservationError(w, err)
+		return
+	}
+	bodyBytes, err = rewriteOpenAIOutputLimit(bodyBytes, allowedOutput)
+	if err != nil {
+		_ = h.db.ReleaseReservation(context.Background(), reservation.ID)
+		h.writeError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error(), "invalid_request_error")
+		return
+	}
+
+	reqCopy := oaiReq
+	reqCopy.Model = targetModel.Name
+	reqCopy.MaxTokens = &allowedOutput
+	reqCopy.MaxCompletionTokens = nil
+
+	startTime := time.Now()
+	reqLog := db.RequestLog{
+		ID:             requestID,
+		VirtualKeyID:   key.ID,
+		UserID:         key.UserID,
+		ModelID:        targetModel.ID,
+		ProviderID:     provider.ID,
+		ReservationID:  reservation.ID,
+		RequestPath:    r.URL.Path,
+		InputTokens:    promptTokens,
+		ClientApp:      getClientAppName(r),
+		RequestedModel: oaiReq.Model,
+		Complexity:     "direct",
+		ThinkingLevel:  thinkingLevel,
+		CreatedAt:      startTime,
+	}
+
+	if useAnthropicUpstream {
+		h.proxyOpenAIToAnthropic(w, r, &reqCopy, targetModel, &resolvedProvider, reqLog, startTime)
+	} else {
+		// Forward the client's ORIGINAL bytes, not a re-marshal of the
+		// lossy typed struct: proxyOpenAIToOpenAI already unmarshals its
+		// origBody into a map and overwrites "model" there, so passing
+		// bodyBytes directly preserves every field the client sent
+		// (reasoning_content, stop, response_format, seed, ...) instead
+		// of silently dropping anything OpenAIRequest doesn't declare.
+		h.proxyOpenAIToOpenAI(w, r, bodyBytes, targetModel, &resolvedProvider, reqLog, startTime)
 	}
 }
 
@@ -834,73 +828,39 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	// A native `thinking` object is the client's own control - not a level.
 	thinkingLevel := ResolveThinkingLevel(r, anthReq.ReasoningEffort)
 
-	isRouterRequest := anthReq.Model == "muhiya-ai-router"
-	var targetModel *db.Model
-	var fallbackModels []*db.Model
-	var err error
-	complexity := "direct"
-
-	if isRouterRequest {
-		// Convert Anthropic format messages to OpenAI format for simple complexity analysis
-		var oaiMessages []OpenAIMessage
-		for _, m := range anthReq.Messages {
-			var textBuilder strings.Builder
-			for _, c := range m.Content {
-				textBuilder.WriteString(c.Text)
-			}
-			oaiMessages = append(oaiMessages, OpenAIMessage{
-				Role:    m.Role,
-				Content: textBuilder.String(),
-			})
-		}
-		complexity = AnalyzePromptComplexity(oaiMessages)
-
-		needs := detectMediaNeedsAnthropic(anthReq.Messages)
-
-		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(anthReq.Thinking)
-		targetModel, err = h.RouteToModel(complexity, needs, thinkingRequested)
-		if err != nil {
-			h.internalErrorResponse(w, "routing error", err)
-			return
-		}
-
-		// Same session stickiness as the OpenAI-format path (see there for
-		// the full rationale): protects the provider prefix cache from a
-		// mid-session model re-route. A pin is reused only while it can still
-		// serve every media modality this turn carries.
-		stKey := stickyKeyFor(key.ID, r.Header.Get(SessionHeader))
-		if pinnedID, ok := h.sticky.get(stKey); ok {
-			if pinned, pErr := h.db.GetModel(pinnedID); pErr == nil && pinned != nil && pinned.Status == "active" && modelSupportsMedia(pinned, needs) {
-				if pinned.ID != targetModel.ID {
-					log.Printf("[ROUTER-STICKY] session pinned to model %s; ignoring re-route to %s (effort/complexity changed) to protect the provider prefix cache", pinned.Name, targetModel.Name)
-				}
-				targetModel = pinned
-			}
-		}
-		h.sticky.set(stKey, targetModel.ID)
-
-		fallbackModels, _ = h.GetFallbackModels(targetModel.ID, needs)
-		log.Printf("[ROUTER] Selected target model: %s (complexity: %s, media: %q) with %d fallback(s)", targetModel.Name, complexity, needs.describe(), len(fallbackModels))
-	} else {
-		targetModel, err = h.db.GetModelByName(anthReq.Model)
-		if err != nil {
-			h.internalErrorResponse(w, "database error", err)
-			return
-		}
-		if targetModel == nil {
-			h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", anthReq.Model), "invalid_request_error")
-			return
-		}
+	// The automatic model router was removed (single-active-model invariant).
+	if anthReq.Model == routerModelDeprecated {
+		h.rejectDeprecatedRouterModel(w, anthReq.Model)
+		return
 	}
 
-	// Prepare candidate models to try
-	candidates := []*db.Model{targetModel}
-	if isRouterRequest {
-		candidates = append(candidates, fallbackModels...)
+	targetModel, err := h.db.GetModelByName(anthReq.Model)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
+	if targetModel == nil {
+		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", anthReq.Model), "invalid_request_error")
+		return
+	}
+	if !h.establishModelResolution(w, r, targetModel) {
+		return
 	}
 
-	// Estimate prompt tokens and check limits once (identical across failover
-	// candidates); checking per-candidate double-counted RPM/TPM on retry.
+	// One model, one attempt. Cross-model failover was removed (see
+	// serveOpenAIClient). A transient upstream failure is reported, never
+	// rerouted to a different model.
+	provider, err := h.db.GetProvider(targetModel.ProviderID)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
+	if provider == nil || provider.Status != "active" {
+		h.writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("Provider for model '%s' is unavailable", targetModel.Name), "api_error")
+		return
+	}
+
+	// Estimate prompt tokens and check limits once.
 	var textBuilder strings.Builder
 	textBuilder.WriteString(string(anthReq.System))
 	for _, m := range anthReq.Messages {
@@ -910,97 +870,70 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	promptTokens := estimateTokens(textBuilder.String())
-	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+	requestedOutput := boundedOutputLimit(anthReq.MaxTokens, targetModel)
+	if err := h.limiter.CheckLimit(key, promptTokens+requestedOutput); err != nil {
 		h.writeLimitError(w, err)
 		return
 	}
 
-	var lastBuffer *BufferedResponseWriter
-	success := false
+	var targetURL string
+	var useAnthropicUpstream bool
 
-	for idx, model := range candidates {
-		// Clone request to avoid mutating original for subsequent retries
-		reqCopy := anthReq
-		reqCopy.Model = model.Name
-
-		provider, err := h.db.GetProvider(model.ProviderID)
-		if err != nil {
-			log.Printf("[ROUTER-WARNING] Failed to get provider for model %s: %v", model.Name, err)
-			continue
-		}
-		if provider == nil || provider.Status != "active" {
-			log.Printf("[ROUTER-WARNING] Provider %s is inactive for model %s", model.ProviderID, model.Name)
-			continue
-		}
-
-		requestedModel := anthReq.Model
-		complexityStr := "direct"
-		if isRouterRequest {
-			requestedModel = "muhiya-ai-router"
-			complexityStr = complexity
-		}
-
-		startTime := time.Now()
-		reqLog := db.RequestLog{
-			ID:               uuid.New().String(),
-			VirtualKeyID:     key.ID,
-			UserID:           key.UserID,
-			ModelID:          model.ID,
-			ProviderID:       provider.ID,
-			RequestPath:      r.URL.Path,
-			InputTokens:      promptTokens,
-			ClientApp:        getClientAppName(r),
-			RequestedModel:   requestedModel,
-			Complexity:       complexityStr,
-			ThinkingLevel:    thinkingLevel,
-			FailoverAttempts: idx,
-			CreatedAt:        startTime,
-		}
-
-		var targetURL string
-		var useAnthropicUpstream bool
-
-		if provider.BaseURL != "" {
-			targetURL = provider.BaseURL
-			useAnthropicUpstream = false
-		} else if provider.AnthropicBaseURL != "" {
-			targetURL = provider.AnthropicBaseURL
-			useAnthropicUpstream = true
-		} else {
-			log.Printf("[ROUTER-WARNING] Provider %s has no base URL", provider.ID)
-			continue
-		}
-
-		resolvedProvider := *provider
-		resolvedProvider.BaseURL = targetURL
-
-		// Create buffered writer to intercept failures cleanly
-		bufW := NewBufferedResponseWriter(w)
-		lastBuffer = bufW
-
-		// Perform proxy
-		if useAnthropicUpstream {
-			newBody, _ := json.Marshal(reqCopy)
-			h.proxyAnthropicToAnthropic(bufW, r, newBody, &reqCopy, model, &resolvedProvider, reqLog, startTime)
-		} else {
-			h.proxyAnthropicToOpenAI(bufW, r, &reqCopy, model, &resolvedProvider, reqLog, startTime)
-		}
-
-		// Check if request was successful
-		if bufW.statusCode > 0 && bufW.statusCode < 400 {
-			success = true
-			if idx > 0 {
-				log.Printf("[ROUTER-SUCCESS] Router failover succeeded with model %s on attempt %d", model.Name, idx+1)
-			}
-			break
-		}
-
-		log.Printf("[ROUTER-FAILOVER] Model %s failed (status %d). Trying next candidate...", model.Name, bufW.statusCode)
+	if provider.BaseURL != "" {
+		targetURL = provider.BaseURL
+		useAnthropicUpstream = false
+	} else if provider.AnthropicBaseURL != "" {
+		targetURL = provider.AnthropicBaseURL
+		useAnthropicUpstream = true
+	} else {
+		h.writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("Provider '%s' has no base URL", provider.ID), "api_error")
+		return
 	}
 
-	// If all candidates failed, flush the last failure response to the client
-	if !success && lastBuffer != nil {
-		lastBuffer.FlushToActual()
+	resolvedProvider := *provider
+	resolvedProvider.BaseURL = targetURL
+
+	requestID := correlationID(r)
+	reservation, allowedOutput, err := h.reserveGeneration(
+		r.Context(),
+		key,
+		targetModel,
+		requestID,
+		conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
+		requestedOutput,
+	)
+	if err != nil {
+		h.writeReservationError(w, err)
+		return
+	}
+
+	reqCopy := anthReq
+	reqCopy.Model = targetModel.Name
+	reqCopy.MaxTokens = allowedOutput
+
+	startTime := time.Now()
+	reqLog := db.RequestLog{
+		ID:             requestID,
+		VirtualKeyID:   key.ID,
+		UserID:         key.UserID,
+		ModelID:        targetModel.ID,
+		ProviderID:     provider.ID,
+		ReservationID:  reservation.ID,
+		RequestPath:    r.URL.Path,
+		InputTokens:    promptTokens,
+		ClientApp:      getClientAppName(r),
+		RequestedModel: anthReq.Model,
+		Complexity:     "direct",
+		ThinkingLevel:  thinkingLevel,
+		CreatedAt:      startTime,
+	}
+
+	// Perform proxy
+	if useAnthropicUpstream {
+		newBody, _ := json.Marshal(reqCopy)
+		h.proxyAnthropicToAnthropic(w, r, newBody, &reqCopy, targetModel, &resolvedProvider, reqLog, startTime)
+	} else {
+		h.proxyAnthropicToOpenAI(w, r, &reqCopy, targetModel, &resolvedProvider, reqLog, startTime)
 	}
 }
 
@@ -1041,10 +974,10 @@ func sanitizeUpstreamIdentity(bodyMap map[string]interface{}, family upstreamFam
 // The false claim mattered: it sent an investigation into a real, expensive
 // per-upstream cache-miss bug looking anywhere but here.
 //
-// Upstream affinity is expressed by the CLIENT, which learns which upstream
-// served it from the response and sends `provider.order` on later requests.
-// That body field reaches OpenRouter untouched because this handler forwards
-// unknown fields verbatim (see proxyOpenAIToOpenAI's origBody note).
+// Upstream affinity is owned by the gateway. It scopes the observed provider to
+// the virtual key, session, and immutable model record, then injects a strict
+// provider order before forwarding the request. Clients supply only the
+// session identity and never select a hidden model or provider.
 func setOpenRouterHeaders(req *http.Request, provider *db.Provider, r *http.Request) {
 	if provider == nil || provider.ID != "openrouter" {
 		return
@@ -1109,6 +1042,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			bodyMap["user"] = derived
 		}
 	}
+	routeScope := h.applyProviderAffinity(r.Context(), bodyMap, r, model, &log)
 
 	newBody, _ := json.Marshal(bodyMap)
 	url := strings.TrimSuffix(provider.BaseURL, "/")
@@ -1131,6 +1065,39 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer resp.Body.Close()
+	if _, wasPinned := bodyMap["provider"]; wasPinned && routeScope != "" && resp.StatusCode >= 400 {
+		// One same-model rebind is allowed only before any downstream bytes.
+		// Clear the rejected route and retry the byte-identical model request
+		// without provider.order; never retry a partial stream.
+		originalStatus := resp.StatusCode
+		originalHeader := resp.Header.Clone()
+		originalBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		clearCtx, clearCancel := context.WithTimeout(context.Background(), time.Second)
+		_ = h.affinity.clear(clearCtx, routeScope)
+		clearCancel()
+		delete(bodyMap, "provider")
+		unpinnedBody, marshalErr := json.Marshal(bodyMap)
+		if marshalErr != nil {
+			h.logFailedUpstream(w, originalStatus, originalBody, originalHeader, &log, startTime)
+			return
+		}
+		retryReq, requestErr := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(unpinnedBody))
+		if requestErr != nil {
+			h.logFailedUpstream(w, originalStatus, originalBody, originalHeader, &log, startTime)
+			return
+		}
+		retryReq.Header.Set("Content-Type", "application/json")
+		retryReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
+		setOpenRouterHeaders(retryReq, provider, r)
+		retryResp, retryErr := httpClient.Do(retryReq)
+		if retryErr != nil {
+			h.logAndWriteError(w, http.StatusBadGateway, "Affinity rebind failed: "+retryErr.Error(), "api_error", &log, startTime)
+			return
+		}
+		resp = retryResp
+		defer resp.Body.Close()
+	}
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -1182,10 +1149,10 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.CacheReadTokens = cacheRead
 			log.CacheWriteTokens = cacheWrite
 			log.UpstreamProvider = upstreamProvider
-			log.Cost = calculateCost(model, inputTokens, completionTokens, cacheRead, cacheWrite)
+			h.observeProviderAffinity(routeScope, upstreamProvider)
+			setCalculatedCost(&log, model, inputTokens, completionTokens, cacheRead, cacheWrite)
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
-			h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
 		}
 
@@ -1265,10 +1232,10 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		log.CacheReadTokens = cacheRead
 		log.CacheWriteTokens = cacheWrite
 		log.UpstreamProvider = oaiResp.Provider
-		log.Cost = calculateCost(model, log.InputTokens, completionTokens, cacheRead, cacheWrite)
+		h.observeProviderAffinity(routeScope, oaiResp.Provider)
+		setCalculatedCost(&log, model, log.InputTokens, completionTokens, cacheRead, cacheWrite)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, completionTokens)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1346,10 +1313,9 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 			cacheRead := usageTracker.CacheReadTokens()
 			log.CacheReadTokens = cacheRead
 			log.CacheWriteTokens = usageTracker.CacheWriteTokens
-			log.Cost = calculateCost(model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
+			setCalculatedCost(&log, model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
-			h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.CompletionTokens)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
 		}
 
@@ -1402,10 +1368,9 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		cacheWrite := anthResp.Usage.CacheCreationInputTokens
 		log.CacheReadTokens = cacheRead
 		log.CacheWriteTokens = cacheWrite
-		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
+		setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1479,10 +1444,9 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 			log.InputTokens = usageTracker.InputTokens
 			log.OutputTokens = usageTracker.OutputTokens
 			log.CacheReadTokens = usageTracker.CacheReadInputTokens
-			log.Cost = calculateCost(model, usageTracker.InputTokens, usageTracker.OutputTokens, usageTracker.CacheReadInputTokens, 0)
+			setCalculatedCost(&log, model, usageTracker.InputTokens, usageTracker.OutputTokens, usageTracker.CacheReadInputTokens, 0)
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
-			h.limiter.RecordTokens(log.VirtualKeyID, usageTracker.OutputTokens)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
 		}
 
@@ -1534,10 +1498,9 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		cacheRead := oaiResp.Usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
 		log.CacheReadTokens = cacheRead
 		log.CacheMissTokens = oaiResp.Usage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
-		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, 0)
+		setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, cacheRead, 0)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1614,10 +1577,9 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 			log.OutputTokens = usageTracker.OutputTokens
 			log.CacheReadTokens = usageTracker.CacheReadInputTokens
 			log.CacheWriteTokens = usageTracker.CacheCreationInputTokens
-			log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens)
+			setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens)
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
-			h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
 		}
 
@@ -1690,10 +1652,9 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		cacheWrite := anthResp.Usage.CacheCreationInputTokens
 		log.CacheReadTokens = cacheRead
 		log.CacheWriteTokens = cacheWrite
-		log.Cost = calculateCost(model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
+		setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
-		h.limiter.RecordTokens(log.VirtualKeyID, log.OutputTokens)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1930,6 +1891,9 @@ func durationFromBytes(uploaded int64) float64 {
 // gives up. MuhiyaCode reads these to decide whether to wait or to stop.
 func (h *ProxyHandler) writeLimitError(w http.ResponseWriter, err error) {
 	switch KindOf(err) {
+	case LimitInfrastructure:
+		w.Header().Set("Retry-After", "2")
+		h.writeError(w, http.StatusServiceUnavailable, err.Error(), "api_error")
 	case LimitSuspended:
 		// Not a rate limit at all: no amount of waiting changes it.
 		h.writeError(w, http.StatusForbidden, err.Error(), "permission_error")
@@ -2052,58 +2016,212 @@ func estimateTokens(text string) int {
 // seeded by db/migrations (009 MiniMax models); the >512k tier below MUST be
 // updated in lockstep if that row is ever repriced. Data-driven tier columns
 // are the durable follow-up; today only M3 is tier-priced.
-const (
-	minimaxM3TierThresholdTokens   = 512000
-	minimaxM3HighTierInputRate     = 0.60
-	minimaxM3HighTierOutputRate    = 2.40
-	minimaxM3HighTierCacheReadRate = 0.12
-)
-
 func calculateCost(model *db.Model, input, output, cacheRead, cacheWrite int) float64 {
-	// Cost calculation supporting prompt caching tokens
-	inputRate := model.InputCostPerMillion
-	outputRate := model.OutputCostPerMillion
-	cacheReadRate := model.CacheReadCostPerMillion
-	if isMiniMaxM3(model) && input > minimaxM3TierThresholdTokens {
-		inputRate = minimaxM3HighTierInputRate
-		outputRate = minimaxM3HighTierOutputRate
-		cacheReadRate = minimaxM3HighTierCacheReadRate
+	cost, err := calculateCostNano(model, input, output, cacheRead, cacheWrite)
+	if err != nil {
+		return 0
 	}
-	standardInput := input - cacheRead - cacheWrite
-	if standardInput < 0 {
-		standardInput = 0
-	}
-	writeCostPerMillion := model.CacheWriteCostPerMillion
-	if writeCostPerMillion == 0 && cacheWrite > 0 {
-		writeCostPerMillion = model.InputCostPerMillion
-	}
-	inputCost := (float64(standardInput) / 1000000.0) * inputRate
-	outputCost := (float64(output) / 1000000.0) * outputRate
-	cacheReadCost := (float64(cacheRead) / 1000000.0) * cacheReadRate
-	cacheWriteCost := (float64(cacheWrite) / 1000000.0) * writeCostPerMillion
-	return inputCost + outputCost + cacheReadCost + cacheWriteCost
+	return cost.USD()
 }
 
-// isMiniMaxM3 reports whether a model row is a MiniMax-M3 variant (the only
-// tier-priced family). Prefix matching mirrors classifyUpstream's family
-// detection so an M3 variant row (e.g. a future minimax-m3-highspeed) cannot
-// be famMiniMax for cache/reasoning yet silently miss the pricing tier. M2.x
-// rows never match ("minimax-m2..." fails every prefix). Residual assumption:
-// a hypothetical minimax-m3.5 with different pricing would need its own rule.
-func isMiniMaxM3(model *db.Model) bool {
-	if model == nil {
-		return false
-	}
-	for _, value := range []string{model.Name, model.TargetModel} {
-		normalized := strings.ToLower(strings.TrimSpace(value))
-		if normalized == "m3" ||
-			strings.HasPrefix(normalized, "m3-") ||
-			strings.HasPrefix(normalized, "minimax-m3") ||
-			strings.HasPrefix(normalized, "minimax m3") {
-			return true
+func setCalculatedCost(entry *db.RequestLog, model *db.Model, input, output, cacheRead, cacheWrite int) {
+	cost, err := calculateCostNano(model, input, output, cacheRead, cacheWrite)
+	if err != nil {
+		entry.Cost = 0
+		entry.CostNanoUSD = 0
+		entry.UsageEstimated = true
+		if entry.ErrorMessage != "" {
+			entry.ErrorMessage += "; "
 		}
+		entry.ErrorMessage += "exact pricing failed: " + err.Error()
+		log.Printf("[BILLING-ERROR] exact pricing failed for request %s: %v", entry.ID, err)
+		return
 	}
-	return false
+	entry.CostNanoUSD = cost
+	entry.Cost = cost.USD()
+}
+
+func calculateCostNano(model *db.Model, input, output, cacheRead, cacheWrite int) (money.NanoUSD, error) {
+	rules, err := pricingRulesForModel(model)
+	if err != nil {
+		return 0, err
+	}
+	quote, err := rules.Quote(pricing.Usage{
+		InputTokens:      int64(input),
+		OutputTokens:     int64(output),
+		CacheReadTokens:  int64(cacheRead),
+		CacheWriteTokens: int64(cacheWrite),
+	})
+	if err != nil {
+		return 0, err
+	}
+	return quote.Cost, nil
+}
+
+func pricingRulesForModel(model *db.Model) (pricing.RuleSet, error) {
+	if model == nil {
+		return pricing.RuleSet{}, fmt.Errorf("model is required for pricing")
+	}
+	input, err := exactRate(model.InputCostNanoPerMillion, model.InputCostPerMillion)
+	if err != nil {
+		return pricing.RuleSet{}, err
+	}
+	output, err := exactRate(model.OutputCostNanoPerMillion, model.OutputCostPerMillion)
+	if err != nil {
+		return pricing.RuleSet{}, err
+	}
+	cacheRead, err := exactRate(model.CacheReadCostNanoPerMillion, model.CacheReadCostPerMillion)
+	if err != nil {
+		return pricing.RuleSet{}, err
+	}
+	cacheWrite, err := exactRate(model.CacheWriteCostNanoPerMillion, model.CacheWriteCostPerMillion)
+	if err != nil {
+		return pricing.RuleSet{}, err
+	}
+	base := pricing.Rates{
+		InputPerMillion:      input,
+		OutputPerMillion:     output,
+		CacheReadPerMillion:  cacheRead,
+		CacheWritePerMillion: cacheWrite,
+	}
+	canonical := fmt.Sprintf("%s|%d|%d|%d|%d|%v",
+		model.ID, input, output, cacheRead, cacheWrite, model.PricingTiers)
+	snapshot := sha256.Sum256([]byte(canonical))
+	ruleID := fmt.Sprintf("pricing:%x", snapshot)
+	return pricing.NewRuleSet(ruleID, base, model.PricingTiers)
+}
+
+func exactRate(exact money.NanoUSD, legacy float64) (money.NanoUSD, error) {
+	if exact != 0 || legacy == 0 {
+		return exact, nil
+	}
+	return money.FromUSD(legacy)
+}
+
+func requestedOpenAIOutput(req *OpenAIRequest, model *db.Model) int {
+	requested := 0
+	if req.MaxCompletionTokens != nil {
+		requested = *req.MaxCompletionTokens
+	} else if req.MaxTokens != nil {
+		requested = *req.MaxTokens
+	}
+	return boundedOutputLimit(requested, model)
+}
+
+func boundedOutputLimit(requested int, model *db.Model) int {
+	modelLimit := 0
+	if model != nil {
+		modelLimit = model.MaxOutputTokens
+	}
+	if requested <= 0 {
+		requested = modelLimit
+	}
+	if requested <= 0 {
+		requested = 8192
+	}
+	if modelLimit > 0 && requested > modelLimit {
+		requested = modelLimit
+	}
+	return requested
+}
+
+func conservativeInputTokenBound(rawBody []byte, estimated int, model *db.Model) int {
+	// BPE/tokenizer vocabularies ultimately encode bytes, so the serialized
+	// request byte length plus provider framing is a conservative upper bound
+	// for text requests. This intentionally prices cache reads as uncached at
+	// admission; settlement applies provider-reported cache discounts.
+	bound := len(rawBody) + 512
+	if estimated > bound {
+		bound = estimated
+	}
+	if model != nil && model.ContextWindow > 0 && bound > model.ContextWindow {
+		bound = model.ContextWindow
+	}
+	if bound < 1 {
+		return 1
+	}
+	return bound
+}
+
+func (h *ProxyHandler) reserveGeneration(
+	ctx context.Context,
+	key *db.VirtualKey,
+	model *db.Model,
+	requestID string,
+	inputUpperBound int,
+	requestedOutput int,
+) (*db.BudgetReservation, int, error) {
+	rules, err := pricingRulesForModel(model)
+	if err != nil {
+		return nil, 0, err
+	}
+	usage := pricing.Usage{InputTokens: int64(inputUpperBound), OutputTokens: int64(requestedOutput)}
+	quote, err := rules.Quote(usage)
+	if err != nil {
+		return nil, 0, err
+	}
+	reserve := func(amount money.NanoUSD) (*db.BudgetReservation, error) {
+		return h.db.ReserveBudget(ctx, db.ReserveBudgetRequest{
+			RequestID:     requestID,
+			UserID:        key.UserID,
+			VirtualKeyID:  key.ID,
+			ModelID:       model.ID,
+			Amount:        amount,
+			PriceSnapshot: rules.ID,
+			LeaseDuration: upstreamTotalTimeout + 5*time.Minute,
+		})
+	}
+	reservation, err := reserve(quote.Cost)
+	if err == nil {
+		return reservation, requestedOutput, nil
+	}
+	var budgetErr *db.BudgetExceededError
+	if !errors.As(err, &budgetErr) {
+		return nil, 0, err
+	}
+	allowed, maxErr := rules.MaxOutputTokens(
+		pricing.Usage{InputTokens: int64(inputUpperBound)},
+		int64(requestedOutput),
+		budgetErr.Available,
+	)
+	if maxErr != nil {
+		return nil, 0, maxErr
+	}
+	if allowed < 1 {
+		return nil, 0, budgetErr
+	}
+	usage.OutputTokens = allowed
+	reduced, quoteErr := rules.Quote(usage)
+	if quoteErr != nil {
+		return nil, 0, quoteErr
+	}
+	reservation, err = reserve(reduced.Cost)
+	if err != nil {
+		return nil, 0, err
+	}
+	return reservation, int(allowed), nil
+}
+
+func (h *ProxyHandler) writeReservationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, db.ErrBudgetExceeded) {
+		h.writeError(w, http.StatusPaymentRequired, err.Error(), "budget_exceeded")
+		return
+	}
+	h.serviceUnavailableResponse(w, "budget admission failed", err)
+}
+
+func rewriteOpenAIOutputLimit(raw []byte, limit int) ([]byte, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	if _, present := payload["max_completion_tokens"]; present {
+		payload["max_completion_tokens"] = limit
+		delete(payload, "max_tokens")
+	} else {
+		payload["max_tokens"] = limit
+	}
+	return json.Marshal(payload)
 }
 
 // normalizeLangCode reduces a language value to a clean ISO-639-1 primary
@@ -2154,6 +2272,8 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		h.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found or inactive", modelName), "invalid_request_error")
 		return
 	}
+	requestID := correlationID(r)
+	reservationID := ""
 
 	// Entitlement is checked HERE, like every other billable route. This handler
 	// used to skip CheckLimit entirely, so a tenant who had exhausted their plan
@@ -2178,7 +2298,8 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	// failure — the provider produced nothing.
 	saveTranscriptionFailure := func(status int, msg string, started time.Time) {
 		h.saveRequestLog(db.RequestLog{
-			ID:             "log-" + uuid.New().String(),
+			ID:             requestID,
+			ReservationID:  reservationID,
 			VirtualKeyID:   key.ID,
 			UserID:         key.UserID,
 			ModelID:        targetModel.ID,
@@ -2279,8 +2400,37 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	}
 
 	startTime := time.Now()
+	// Audio providers do not expose usage before inference. Reserve a
+	// conservative duration ceiling derived from the accepted upload size at
+	// 8 kbit/s, with a one-minute minimum. Settlement uses reported duration
+	// and can only debit up to this authorized amount.
+	maxDurationMillis := uploadedBytes
+	if maxDurationMillis < 60_000 {
+		maxDurationMillis = 60_000
+	}
+	reservedCost, err := money.MulDivCeil(maxDurationMillis, targetModel.PricePerMinuteNano, 60_000)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "Invalid transcription pricing: "+err.Error(), "invalid_request_error")
+		return
+	}
+	audioReservation, err := h.db.ReserveBudget(r.Context(), db.ReserveBudgetRequest{
+		RequestID:     requestID,
+		UserID:        key.UserID,
+		VirtualKeyID:  key.ID,
+		ModelID:       targetModel.ID,
+		Amount:        reservedCost,
+		PriceSnapshot: fmt.Sprintf("audio:%s:%d", targetModel.ID, targetModel.PricePerMinuteNano),
+		LeaseDuration: upstreamTotalTimeout + 5*time.Minute,
+	})
+	if err != nil {
+		h.writeReservationError(w, err)
+		return
+	}
+	reservationID = audioReservation.ID
+
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, &requestBody)
 	if err != nil {
+		_ = h.db.ReleaseReservation(context.Background(), reservationID)
 		h.writeError(w, http.StatusInternalServerError, "Failed to create upstream request: "+err.Error(), "api_error")
 		return
 	}
@@ -2354,11 +2504,16 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	cost := (durationSec / 60.0) * targetModel.PricePerMinute
+	durationMillis := int64(math.Ceil(durationSec * 1000))
+	costNano, err := money.MulDivCeil(durationMillis, targetModel.PricePerMinuteNano, 60_000)
+	if err != nil {
+		costNano = reservedCost
+	}
 
 	// Log request and deduct credits
 	logEntry := db.RequestLog{
-		ID:             "log-" + uuid.New().String(),
+		ID:             requestID,
+		ReservationID:  reservationID,
 		VirtualKeyID:   key.ID,
 		UserID:         key.UserID,
 		ModelID:        targetModel.ID,
@@ -2367,7 +2522,8 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		StatusCode:     resp.StatusCode,
 		InputTokens:    int(durationSec),
 		OutputTokens:   len(strings.Fields(textResult)),
-		Cost:           cost,
+		Cost:           costNano.USD(),
+		CostNanoUSD:    costNano,
 		LatencyMS:      latencyMs,
 		ClientApp:      getClientAppName(r),
 		RequestedModel: targetModel.Name,

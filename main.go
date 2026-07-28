@@ -315,6 +315,7 @@ func main() {
 			log.Printf("[RETENTION] REQUEST_LOG_RETENTION_DAYS=%q is not a positive integer; retention pruning disabled", daysStr)
 		}
 	}
+	superviseLoop("budget-reconciler", func() { runBudgetReconciler(database) })
 
 	// DB watchdog: boot-time retry alone is not enough - the external
 	// PostgreSQL can drop MID-RUN (managed-DB restart, idle NAT reset, host
@@ -465,6 +466,21 @@ func runRetentionSweeper(database *db.DB, retention time.Duration) {
 	}
 }
 
+func runBudgetReconciler(database *db.DB) {
+	const interval = 30 * time.Second
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		reconciled, err := database.ReconcileExpiredReservations(ctx, 100)
+		cancel()
+		if err != nil {
+			log.Printf("[BILLING] expired reservation reconciliation failed: %v", err)
+		} else if reconciled > 0 {
+			log.Printf("[BILLING] reconciled %d expired reservation(s)", reconciled)
+		}
+		time.Sleep(interval)
+	}
+}
+
 func connectWithRetry(dsn string, maxAttempts int) (*db.DB, error) {
 	var lastErr error
 	for i := 1; i <= maxAttempts; i++ {
@@ -533,6 +549,7 @@ func registerProxyRoutes(mux *http.ServeMux, proxyWrapper http.Handler) {
 	mux.Handle("/audio/transcriptions", proxyWrapper)
 	mux.Handle("/v1/models", proxyWrapper)
 	mux.Handle("/v1/models/", proxyWrapper)
+	mux.Handle("/v1/muhiyacode/models", proxyWrapper)
 	mux.Handle("/models", proxyWrapper)
 	mux.Handle("/models/", proxyWrapper)
 	mux.Handle("/v1/capabilities", proxyWrapper)

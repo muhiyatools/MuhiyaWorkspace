@@ -30,6 +30,9 @@ const (
 	LimitBudget
 	// LimitSuspended is an inactive account: an operator has to act.
 	LimitSuspended
+	// LimitInfrastructure means the distributed limiter could not make an
+	// authoritative decision. Production fails closed with a retryable 503.
+	LimitInfrastructure
 )
 
 // LimitError carries the classification alongside the human-readable cause.
@@ -110,14 +113,16 @@ func (c *limiterDefsCache) set(userID string, e limiterDefsEntry) {
 }
 
 type RateLimiter struct {
-	mu          sync.RWMutex
-	limiters    map[string]*KeyLimiter
-	db          *db.DB
-	redisClient *redis.Client
-	useRedis    bool
-	scriptMu    sync.RWMutex // guards scriptSHA: read on every request, written on the rare NOSCRIPT-retry path
-	scriptSHA   string
-	defs        *limiterDefsCache
+	mu           sync.RWMutex
+	limiters     map[string]*KeyLimiter
+	db           *db.DB
+	redisClient  *redis.Client
+	useRedis     bool
+	requireRedis bool
+	redisInitErr error
+	scriptMu     sync.RWMutex // guards scriptSHA: read on every request, written on the rare NOSCRIPT-retry path
+	scriptSHA    string
+	defs         *limiterDefsCache
 }
 
 func (rl *RateLimiter) getScriptSHA() string {
@@ -140,6 +145,7 @@ func NewRateLimiter(database *db.DB) *RateLimiter {
 	}
 
 	requireRedis := isTruthy(os.Getenv("REQUIRE_REDIS"))
+	rl.requireRedis = requireRedis
 	redisURL := os.Getenv("REDIS_URL")
 
 	if redisURL != "" {
@@ -154,17 +160,20 @@ func NewRateLimiter(database *db.DB) *RateLimiter {
 				rl.loadScript()
 				log.Println("[LIMITER] Connected to Redis for distributed rate limiting.")
 			} else if requireRedis {
-				log.Fatalf("[LIMITER] REQUIRE_REDIS is set but Redis is unreachable: %v", pingErr)
+				rl.redisInitErr = fmt.Errorf("Redis is unreachable: %w", pingErr)
+				log.Printf("[LIMITER] distributed limiter unavailable; requests will fail closed: %v", rl.redisInitErr)
 			} else {
 				log.Printf("[LIMITER-WARNING] Failed to ping Redis: %v. Falling back to in-memory (single-instance only - rate limits will not synchronize across replicas).", pingErr)
 			}
 		} else if requireRedis {
-			log.Fatalf("[LIMITER] REQUIRE_REDIS is set but REDIS_URL is invalid: %v", err)
+			rl.redisInitErr = fmt.Errorf("REDIS_URL is invalid: %w", err)
+			log.Printf("[LIMITER] distributed limiter unavailable; requests will fail closed: %v", rl.redisInitErr)
 		} else {
 			log.Printf("[LIMITER-WARNING] Failed to parse REDIS_URL %s: %v. Falling back to in-memory.", redisURL, err)
 		}
 	} else if requireRedis {
-		log.Fatalf("[LIMITER] REQUIRE_REDIS is set but REDIS_URL is not configured. Set REDIS_URL, or unset REQUIRE_REDIS for a single-instance deployment (in-memory rate limits do not synchronize across replicas).")
+		rl.redisInitErr = errors.New("REDIS_URL is not configured")
+		log.Printf("[LIMITER] distributed limiter unavailable; requests will fail closed: %v", rl.redisInitErr)
 	}
 
 	go rl.sweepInMemoryLimiters()
@@ -227,6 +236,9 @@ func (rl *RateLimiter) sweepInMemoryLimiters() {
 }
 
 func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
+	if rl.requireRedis && rl.redisInitErr != nil {
+		return &LimitError{Kind: LimitInfrastructure, Err: fmt.Errorf("distributed rate limiter unavailable: %w", rl.redisInitErr)}
+	}
 	// 1-3. User, plan, and budget window DEFINITIONS - cached briefly
 	// (limiterDefsTTL) since they rarely change; spending itself (below) is
 	// always read fresh regardless of this cache.
@@ -270,21 +282,21 @@ func (rl *RateLimiter) CheckLimit(key *db.VirtualKey, promptTokens int) error {
 	budgetExceeded := false
 	var limitErr error
 	for _, w := range windows {
-		if w.BudgetUSD > 0 {
-			spending, err := rl.db.GetUserSpendingInWindow(user.ID, w.DurationSeconds)
+		if w.BudgetNanoUSD > 0 {
+			spending, err := rl.db.GetUserSpendingNanoInWindow(user.ID, w.DurationSeconds)
 			if err != nil {
 				return fmt.Errorf("failed to calculate window spending: %w", err)
 			}
-			if spending >= w.BudgetUSD {
+			if spending >= w.BudgetNanoUSD {
 				budgetExceeded = true
-				limitErr = fmt.Errorf("budget limit of $%.2f exceeded for window '%s' (current spending: $%.4f)", w.BudgetUSD, w.Name, spending)
+				limitErr = fmt.Errorf("budget limit of $%s exceeded for window '%s' (current spending: $%s)", w.BudgetNanoUSD, w.Name, spending)
 				break
 			}
 		}
 	}
 
 	if budgetExceeded {
-		remainingCredits, err := rl.db.GetRemainingExtraCredits(user.ID)
+		remainingCredits, err := rl.db.GetRemainingExtraNanoUSD(user.ID)
 		if err != nil {
 			return fmt.Errorf("failed to check extra credits: %w", err)
 		}
@@ -404,15 +416,19 @@ func (rl *RateLimiter) checkRedisLimits(keyID string, rpmLimit, tpmLimit, prompt
 		nowMs, oneMinAgoMs, rpmLimit, tpmLimit, promptTokens, reqMember, tokMember, 75,
 	})
 	if err != nil {
-		// A transient Redis failure must not take down all traffic. Fail
-		// open to the per-process in-memory limiter instead of erroring.
-		log.Printf("[LIMITER-WARNING] Redis unavailable, falling back to in-memory limits: %v", err)
+		if rl.requireRedis {
+			return &LimitError{Kind: LimitInfrastructure, Err: fmt.Errorf("distributed rate limiter unavailable: %w", err)}
+		}
+		log.Printf("[LIMITER-WARNING] Redis unavailable, using explicitly permitted single-instance fallback: %v", err)
 		return rl.checkInMemoryLimits(keyID, rpmLimit, tpmLimit, promptTokens)
 	}
 
 	vals, ok := res.([]interface{})
 	if !ok || len(vals) < 3 {
-		log.Printf("[LIMITER-WARNING] Unexpected Redis script result, falling back to in-memory limits")
+		if rl.requireRedis {
+			return &LimitError{Kind: LimitInfrastructure, Err: fmt.Errorf("distributed rate limiter returned a malformed result")}
+		}
+		log.Printf("[LIMITER-WARNING] Unexpected Redis script result; using explicitly permitted single-instance fallback")
 		return rl.checkInMemoryLimits(keyID, rpmLimit, tpmLimit, promptTokens)
 	}
 	code, _ := vals[0].(int64)
@@ -483,32 +499,4 @@ func (rl *RateLimiter) checkInMemoryLimits(keyID string, rpmLimit, tpmLimit, pro
 	}
 
 	return nil
-}
-
-func (rl *RateLimiter) RecordTokens(keyID string, tokens int) {
-	if tokens <= 0 {
-		return
-	}
-
-	if rl.useRedis {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		tpmKey := fmt.Sprintf("ratelimit:tpm:%s", keyID)
-		now := time.Now()
-		rl.redisClient.ZAdd(ctx, tpmKey, redis.Z{
-			Score:  float64(now.UnixMilli()),
-			Member: fmt.Sprintf("%d:%d", now.UnixNano(), tokens),
-		})
-		rl.redisClient.Expire(ctx, tpmKey, 75*time.Second)
-		return
-	}
-
-	kl := rl.getLimiter(keyID)
-	kl.mu.Lock()
-	defer kl.mu.Unlock()
-
-	kl.tokens = append(kl.tokens, tokenRecord{
-		timestamp: time.Now(),
-		tokens:    tokens,
-	})
 }

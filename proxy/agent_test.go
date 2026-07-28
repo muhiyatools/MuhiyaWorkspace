@@ -110,6 +110,10 @@ func TestShouldRunAgentLoopGating(t *testing.T) {
 		return h.shouldRunAgentLoop(r, req, enabled)
 	}
 
+	if mk("MuhiyaChat", true, nil) {
+		t.Fatalf("gateway agent loop must be disabled by default")
+	}
+	t.Setenv("ENABLE_GATEWAY_AGENT_LOOP", "1")
 	if !mk("MuhiyaChat", true, nil) {
 		t.Fatalf("should run for MuhiyaChat streaming with tools configured")
 	}

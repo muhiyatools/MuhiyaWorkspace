@@ -40,6 +40,10 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"019_default_transcription_language.sql",
 		"020_model_media_capabilities.sql",
 		"021_model_muhiyacode_visible.sql",
+		"023_exact_money_foundation.sql",
+		"024_budget_reservation_link.sql",
+		"025_model_pricing_tiers.sql",
+		"026_catalog_v2_metadata.sql",
 	} {
 		found := false
 		for _, n := range names {
@@ -50,6 +54,27 @@ func TestMigrationsEmbedded(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("required migration %s missing from embed (have %v)", required, names)
+		}
+	}
+}
+
+func TestExactMoneyMigrationDefinesReservationAndLedgerAuthority(t *testing.T) {
+	data, err := migrationFS.ReadFile("migrations/023_exact_money_foundation.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(data))
+	for _, required := range []string{
+		"budget_nano_usd", "cost_nano_usd",
+		"input_cost_nano_usd_per_million",
+		"amount_nano_usd", "used_nano_usd",
+		"create table if not exists budget_reservations",
+		"create table if not exists account_ledger",
+		"request_id varchar(100) not null unique",
+		"idempotency_key varchar(255) not null unique",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("exact-money migration missing %q", required)
 		}
 	}
 }

@@ -129,6 +129,25 @@ func detectMediaNeedsAnthropic(messages []AnthropicMessage) mediaNeeds {
 	return needs
 }
 
+// modelMatchesVision reports whether a model can accept image input. It keys on
+// the virtual name OR the provider target model containing a known vision
+// keyword (gpt-4o, claude-3-5-sonnet, vision, gemini, gemma). The operator-set
+// SupportsVision flag is authoritative; the name heuristic is a fallback for
+// pre-flag rows. This is a capability predicate only — it never selects a model.
+func modelMatchesVision(m *db.Model) bool {
+	if m.SupportsVision {
+		return true
+	}
+	nameLower := strings.ToLower(m.Name)
+	targetLower := strings.ToLower(m.TargetModel)
+	for _, kw := range []string{"gpt-4o", "claude-3-5-sonnet", "vision", "-vl", "gemini", "gemma", "pixtral", "llava"} {
+		if strings.Contains(nameLower, kw) || strings.Contains(targetLower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // modelSupportsMediaKind reports whether a model accepts one media kind.
 // Vision keeps its flag-first-with-name-heuristic predicate (modelMatchesVision)
 // for backward compatibility with pre-flag rows; the newer modalities are
@@ -378,13 +397,27 @@ func modelInputModalities(m *db.Model) []string {
 // so the four response shapes can never drift apart.
 func modelCapabilityFields(m *db.Model) map[string]interface{} {
 	return map[string]interface{}{
-		"supports_vision":     m.SupportsVision,
-		"supports_thinking":   m.SupportsThinking,
-		"supports_audio":      m.SupportsAudio,
-		"supports_video":      m.SupportsVideo,
-		"supports_documents":  m.SupportsDocuments,
-		"max_attachment_mb":   m.MaxAttachmentMB,
-		"accepted_mime_types": splitMimeList(m.AcceptedMimeTypes),
-		"input_modalities":    modelInputModalities(m),
+		"supports_vision":              m.SupportsVision,
+		"supports_thinking":            m.SupportsThinking,
+		"supports_audio":               m.SupportsAudio,
+		"supports_video":               m.SupportsVideo,
+		"supports_documents":           m.SupportsDocuments,
+		"max_attachment_mb":            m.MaxAttachmentMB,
+		"accepted_mime_types":          splitMimeList(m.AcceptedMimeTypes),
+		"input_modalities":             modelInputModalities(m),
+		"input_cost_per_million":       m.InputCostPerMillion,
+		"output_cost_per_million":      m.OutputCostPerMillion,
+		"cache_read_cost_per_million":  m.CacheReadCostPerMillion,
+		"cache_write_cost_per_million": m.CacheWriteCostPerMillion,
+		"pricing": map[string]interface{}{
+			"currency":                         "USD",
+			"unit":                             "per_million_tokens",
+			"input_nano_usd_per_million":       m.InputCostNanoPerMillion,
+			"output_nano_usd_per_million":      m.OutputCostNanoPerMillion,
+			"cache_read_nano_usd_per_million":  m.CacheReadCostNanoPerMillion,
+			"cache_write_nano_usd_per_million": m.CacheWriteCostNanoPerMillion,
+			"price_per_minute_nano_usd":        m.PricePerMinuteNano,
+			"tiers":                            m.PricingTiers,
+		},
 	}
 }

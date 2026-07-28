@@ -80,79 +80,6 @@ func TestModelSupportsMedia(t *testing.T) {
 	}
 }
 
-func TestSelectRoute_DocumentRoutesToFlaggedModel(t *testing.T) {
-	models := []db.Model{
-		mdl("deepseek", "deepseek", "deepseek-chat", "simple", 0.14, 0.28),
-		mdl("free-gemma", "openrouter", "google/gemma:free", "none", 0, 0, vision, documentCap),
-	}
-	got, err := selectRoute(models, allActive("openrouter", "deepseek"), "simple", mediaNeeds{Documents: true}, false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.ID != "free-gemma" {
-		t.Fatalf("document request should route to the documents-flagged model, got %q", got.ID)
-	}
-}
-
-func TestSelectRoute_AudioMissing_ErrorNamesCapability(t *testing.T) {
-	models := []db.Model{
-		mdl("deepseek", "deepseek", "deepseek-chat", "simple", 0.14, 0.28),
-		mdl("free-gemma", "openrouter", "google/gemma:free", "none", 0, 0, vision),
-	}
-	_, err := selectRoute(models, allActive("openrouter", "deepseek"), "simple", mediaNeeds{Audio: true}, false)
-	if err == nil {
-		t.Fatal("expected a routing error when no audio-capable model exists")
-	}
-	msg := err.Error()
-	for _, want := range []string{"audio input required", "0 audio-capable", "Audio", "Admin → Models"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("routing error %q missing %q", msg, want)
-		}
-	}
-}
-
-func TestSelectRoute_ImageAndDocumentNeedBoth(t *testing.T) {
-	models := []db.Model{
-		mdl("doc-only", "p", "doc", "simple", 1, 1, documentCap),
-		mdl("both", "p", "both", "none", 2, 2, vision, documentCap),
-	}
-	got, err := selectRoute(models, allActive("p"), "simple", mediaNeeds{Vision: true, Documents: true}, false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.ID != "both" {
-		t.Fatalf("a request needing image+document must route to the model with both flags, got %q", got.ID)
-	}
-}
-
-func TestSelectRoute_AudioKeepsFreeCapableModel(t *testing.T) {
-	// A media need must keep $0 candidates (that is how free capability models
-	// are reached), mirroring the vision behavior.
-	models := []db.Model{
-		mdl("paid-text", "p", "text", "simple", 0.14, 0.28),
-		mdl("free-audio", "p", "aud", "none", 0, 0, audioCap),
-	}
-	got, err := selectRoute(models, allActive("p"), "simple", mediaNeeds{Audio: true}, false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.ID != "free-audio" {
-		t.Fatalf("audio request should reach the free audio model, got %q", got.ID)
-	}
-}
-
-func TestFilterFallbacks_MediaFiltered(t *testing.T) {
-	models := []db.Model{
-		mdl("primary", "p", "a", "simple", 1, 1, documentCap),
-		mdl("alt-doc", "p", "b", "simple", 2, 2, documentCap),
-		mdl("alt-text", "p", "c", "simple", 0.1, 0.1), // cheapest but no documents
-	}
-	fb := filterFallbacks(models, allActive("p"), "primary", mediaNeeds{Documents: true})
-	if len(fb) != 1 || fb[0].ID != "alt-doc" {
-		t.Fatalf("document fallbacks must keep only documents-capable models, got %+v", fb)
-	}
-}
-
 func TestStripUnsupportedMediaParts(t *testing.T) {
 	textOnly := &db.Model{Name: "deepseek-chat", TargetModel: "deepseek-chat"}
 	messages := []OpenAIMessage{
@@ -295,17 +222,5 @@ func TestModelCapabilityFields(t *testing.T) {
 	}
 	if mods := modelCapabilityFields(plain)["input_modalities"].([]string); !reflect.DeepEqual(mods, []string{"text"}) {
 		t.Errorf("plain model modalities = %v, want [text]", mods)
-	}
-}
-
-func TestRoutingDiag_MediaCounts(t *testing.T) {
-	models := []db.Model{
-		mdl("a", "p", "x", "simple", 1, 1, audioCap, documentCap),
-		mdl("b", "p", "y", "simple", 1, 1, videoCap),
-		mdl("c", "p", "z", "simple", 1, 1, documentCap, inactive), // inactive → not counted
-	}
-	d := computeRoutingDiag(models, allActive("p"))
-	if d.audioCapable != 1 || d.videoCapable != 1 || d.documentCapable != 1 {
-		t.Fatalf("media counts wrong: %+v", d)
 	}
 }

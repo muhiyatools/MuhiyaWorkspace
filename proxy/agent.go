@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -42,6 +41,14 @@ var toolStatusLabels = map[string]string{
 // client must not have supplied its own tools, and at least one tool key must
 // be configured.
 func (h *ProxyHandler) shouldRunAgentLoop(r *http.Request, oaiReq *OpenAIRequest, settings ToolSettings) bool {
+	// Keep inference as one client-controlled generation by default. The
+	// historical gateway loop could issue up to five hidden model calls, making
+	// hard budget reservation and cancellation impossible to reason about.
+	// It remains behind an explicit compatibility flag for MuhiyaChat while the
+	// client-side tool loop is the production architecture.
+	if !isTruthy(os.Getenv("ENABLE_GATEWAY_AGENT_LOOP")) {
+		return false
+	}
 	if oaiReq.WebSearch != nil && !*oaiReq.WebSearch {
 		return false
 	}
@@ -52,17 +59,16 @@ func (h *ProxyHandler) shouldRunAgentLoop(r *http.Request, oaiReq *OpenAIRequest
 }
 
 // serveMuhiyaAgent runs the agent loop for an OpenAI-format request. It resolves
-// the model exactly like the normal router, then, if the resolved provider is
+// the model exactly like the normal path, then, if the resolved provider is
 // OpenAI-format, runs the loop. If the provider is Anthropic-format it returns
 // false so the caller can fall back to the standard proxy path.
 func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, oaiReq *OpenAIRequest, key *db.VirtualKey, settings ToolSettings) (handled bool) {
 	thinkingLevel := ResolveThinkingLevel(r, oaiReq.ReasoningEffort)
-	model, provider, complexity, fallbacks, err := h.resolveAgentModel(oaiReq, thinkingLevel)
+	model, provider, complexity, err := h.resolveAgentModel(oaiReq, thinkingLevel)
 	if err != nil {
-		// A routing/availability failure is a 503 (the service momentarily has no
-		// model that can serve this request), not a 500. The error string carries
-		// pool diagnostics + remediation (see selectRoute), and the client maps
-		// routing_unavailable to a friendly, actionable bubble.
+		// An availability failure is a 503, not a 500. The error string carries
+		// an actionable message; the client maps routing_unavailable to a
+		// friendly bubble.
 		h.writeError(w, http.StatusServiceUnavailable, "Routing error: "+err.Error(), "routing_unavailable")
 		return true
 	}
@@ -78,7 +84,7 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		textBuilder.WriteString(GetMessageContentString(m.Content))
 	}
 	promptTokens := estimateTokens(textBuilder.String())
-	if err := h.limiter.CheckLimit(key, promptTokens); err != nil {
+	if err := h.limiter.CheckLimit(key, promptTokens+requestedOpenAIOutput(oaiReq, model)*maxAgentIterations); err != nil {
 		// Parity with the proxy path: this used to answer a bare 429 with no
 		// Retry-After, so a client here could not even back off correctly.
 		h.writeLimitError(w, err)
@@ -86,9 +92,6 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	}
 
 	requestedModel := oaiReq.Model
-	if oaiReq.Model == "muhiya-ai-router" {
-		requestedModel = "muhiya-ai-router"
-	}
 	startTime := time.Now()
 	reqLog := db.RequestLog{
 		ID:             uuid.New().String(),
@@ -143,26 +146,10 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		// turn to turn. The single-search rule is now enforced by declining
 		// a repeat call (below) instead of hiding the tool definition.
 		turn, err := h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, tools, thinkingLevel)
-		// First-turn failover: streamOpenAITurn only returns an error BEFORE any
-		// byte is streamed (build/connect/status>=400), so retrying with the next
-		// candidate is invisible to the client. Once text has streamed, we can't
-		// un-stream, so failover applies to the first turn only. This rescues a
-		// primary that 429s (e.g. a free-tier vision model) without the user
-		// seeing "No response received".
-		for err != nil && iter == 0 && len(fallbacks) > 0 {
-			next := fallbacks[0]
-			fallbacks = fallbacks[1:]
-			np, pErr := h.db.GetProvider(next.ProviderID)
-			if pErr != nil || np == nil || np.Status != "active" {
-				continue
-			}
-			log.Printf("[AGENT-FAILOVER] model %s failed (%v); retrying with %s", model.Name, err, next.Name)
-			model, provider = next, np
-			reqLog.ModelID = model.ID
-			reqLog.ProviderID = provider.ID
-			reqLog.FailoverAttempts++
-			turn, err = h.streamOpenAITurn(r, w, flusher, msgID, model, provider, messages, tools, thinkingLevel)
-		}
+		// Cross-model failover was removed (single-active-model invariant): a
+		// transient upstream failure is reported to the caller rather than
+		// rerouted to a different model, which would silently substitute a
+		// model mid-session and bust the upstream prefix cache.
 		totalInput += turn.usage.PromptTokens
 		totalOutput += turn.usage.CompletionTokens
 		totalCacheRead += turn.usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
@@ -279,11 +266,10 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	if failedWithNoOutput {
 		reqLog.Cost = 0
 	} else {
-		reqLog.Cost = calculateCost(model, totalInput, totalOutput, totalCacheRead, 0)
+		setCalculatedCost(&reqLog, model, totalInput, totalOutput, totalCacheRead, 0)
 	}
 	reqLog.LatencyMS = int(time.Since(startTime).Milliseconds())
 	h.saveRequestLog(reqLog)
-	h.limiter.RecordTokens(reqLog.VirtualKeyID, totalOutput)
 
 	sendMuhiyaMetaChunk(w, &reqLog, model.Name)
 	w.Write([]byte("data: [DONE]\n\n"))
@@ -291,69 +277,30 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	return true
 }
 
-// resolveAgentModel picks the model + provider for the request, honoring the
-// router alias exactly like serveOpenAIClient does.
-func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel string) (*db.Model, *db.Provider, string, []*db.Model, error) {
-	complexity := "direct"
-	var model *db.Model
-	var fallbacks []*db.Model
-	var err error
-
-	if oaiReq.Model == "muhiya-ai-router" {
-		complexity = AnalyzePromptComplexity(oaiReq.Messages)
-		needs := detectMediaNeedsOpenAI(oaiReq.Messages)
-		// minimal/low means "think less" - never route onto a thinking tier.
-		thinkingRequested := ThinkingRequestsReasoning(thinkingLevel) || clientRequestsThinking(oaiReq.Thinking)
-		model, err = h.RouteToModel(complexity, needs, thinkingRequested)
-		if err != nil {
-			return nil, nil, complexity, nil, err
-		}
-		// Failover candidates for the agent loop (free-safe per preferPaid).
-		fallbacks, _ = h.GetFallbackModels(model.ID, needs)
-
-		// Pick the first candidate whose provider is live. RouteToModel already
-		// excludes inactive-provider models, so the primary normally wins; this
-		// also rescues a provider that flipped inactive between the route query
-		// and now, and drops any dead-provider fallbacks from the retry list.
-		chosen, provider, rest := h.firstServableModel(append([]*db.Model{model}, fallbacks...))
-		if chosen == nil {
-			return nil, nil, complexity, nil, fmt.Errorf("no routable model: every candidate is on an inactive provider — activate a provider in Admin → Providers")
-		}
-		return chosen, provider, complexity, rest, nil
+// resolveAgentModel picks the exact model + provider for the request. The
+// automatic model router was removed: the caller selects the concrete model for
+// the session and the gateway forwards to it without cross-model fallback.
+func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel string) (*db.Model, *db.Provider, string, error) {
+	if oaiReq.Model == routerModelDeprecated {
+		return nil, nil, "direct", fmt.Errorf("model '%s' is no longer supported; select a concrete model for the session", oaiReq.Model)
 	}
 
-	// Explicit model selection: no router fallbacks.
-	model, err = h.db.GetModelByName(oaiReq.Model)
+	model, err := h.db.GetModelByName(oaiReq.Model)
 	if err != nil {
-		return nil, nil, complexity, nil, err
+		return nil, nil, "direct", err
 	}
 	if model == nil {
-		return nil, nil, complexity, nil, fmt.Errorf("model '%s' not found or inactive", oaiReq.Model)
+		return nil, nil, "direct", fmt.Errorf("model '%s' not found or inactive", oaiReq.Model)
 	}
 
 	provider, err := h.db.GetProvider(model.ProviderID)
 	if err != nil {
-		return nil, nil, complexity, nil, err
+		return nil, nil, "direct", err
 	}
 	if provider == nil || provider.Status != "active" {
-		return nil, nil, complexity, nil, fmt.Errorf("provider for model '%s' is unavailable", model.Name)
+		return nil, nil, "direct", fmt.Errorf("provider for model '%s' is unavailable", model.Name)
 	}
-	return model, provider, complexity, fallbacks, nil
-}
-
-// firstServableModel returns the first model whose provider loads and is active,
-// that provider, and the remaining candidates (as failover fallbacks, with the
-// chosen model and any skipped dead-provider models removed).
-func (h *ProxyHandler) firstServableModel(candidates []*db.Model) (*db.Model, *db.Provider, []*db.Model) {
-	for idx, m := range candidates {
-		p, err := h.db.GetProvider(m.ProviderID)
-		if err != nil || p == nil || p.Status != "active" {
-			continue
-		}
-		rest := append([]*db.Model{}, candidates[idx+1:]...)
-		return m, p, rest
-	}
-	return nil, nil, nil
+	return model, provider, "direct", nil
 }
 
 // turnResult captures what a single upstream streaming turn produced.

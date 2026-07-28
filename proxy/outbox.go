@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"log"
 	"sync/atomic"
 	"time"
@@ -57,18 +58,27 @@ func (o *logOutbox) retry(entry db.RequestLog) {
 	// time, but by the moment this runs the blip is often already over — and
 	// sleeping first spent a second of the buffer's drain budget to learn
 	// nothing. Only genuine repeat failures pay the ladder.
-	if err := o.db.InsertRequestLog(entry); err == nil {
+	if err := o.persist(entry); err == nil {
 		return
 	}
 	for _, d := range []time.Duration{1 * time.Second, 5 * time.Second, 15 * time.Second, 60 * time.Second} {
 		time.Sleep(d)
-		if err := o.db.InsertRequestLog(entry); err == nil {
+		if err := o.persist(entry); err == nil {
 			log.Printf("[BILLING-RECOVERED] request log %s persisted after retry", entry.ID)
 			return
 		}
 	}
 	BillingLossCount.Add(1)
 	log.Printf("[BILLING-LOSS] CRITICAL: request log %s (key=%s user=%s cost=%.6f) could not be persisted after retries - billing data lost", entry.ID, entry.VirtualKeyID, entry.UserID, entry.Cost)
+}
+
+func (o *logOutbox) persist(entry db.RequestLog) error {
+	if entry.ReservationID == "" {
+		return o.db.InsertRequestLog(entry)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return o.db.SettleReservationAndLog(ctx, entry)
 }
 
 // enqueue is non-blocking: a full buffer means a sustained outage, in which
