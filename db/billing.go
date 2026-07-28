@@ -8,15 +8,18 @@ import (
 )
 
 func windowPeriodStart(planAssignedAt time.Time, durationSeconds int, now time.Time) time.Time {
-	if durationSeconds <= 0 {
+	if durationSeconds <= 0 || planAssignedAt.IsZero() {
+		return planAssignedAt
+	}
+	planAssignedAt = planAssignedAt.UTC()
+	now = now.UTC()
+	if now.Before(planAssignedAt) {
 		return planAssignedAt
 	}
 	duration := time.Duration(durationSeconds) * time.Second
 	elapsed := now.Sub(planAssignedAt)
-	if elapsed < 0 {
-		elapsed = 0
-	}
-	return planAssignedAt.Add(time.Duration(int64(elapsed/duration)) * duration)
+	periods := int64(elapsed / duration)
+	return planAssignedAt.Add(time.Duration(periods) * duration)
 }
 
 func effectiveFloor(periodStart time.Time, usageResetAt sql.NullTime) time.Time {

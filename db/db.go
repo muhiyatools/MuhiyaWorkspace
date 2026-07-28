@@ -725,7 +725,7 @@ func (db *DB) loadUserBudgetSummaries(users []User, userIndexes map[string]int) 
 		JOIN budget_windows bw ON bw.plan_id = u.plan_id AND bw.duration_seconds > 0
 		CROSS JOIN LATERAL (
 			SELECT u.plan_assigned_at +
-				floor(GREATEST(0, extract(epoch FROM (now() - u.plan_assigned_at))) / bw.duration_seconds) *
+				floor(extract(epoch FROM (now() - u.plan_assigned_at)) / bw.duration_seconds) *
 				bw.duration_seconds * interval '1 second' AS period_start
 		) periods
 		ORDER BY u.id, bw.duration_seconds`)
@@ -756,7 +756,9 @@ func (db *DB) loadUserBudgetSummaries(users []User, userIndexes map[string]int) 
 
 func (db *DB) CreateUser(u User) error {
 	if u.PlanAssignedAt.IsZero() {
-		u.PlanAssignedAt = time.Now()
+		u.PlanAssignedAt = time.Now().UTC()
+	} else {
+		u.PlanAssignedAt = u.PlanAssignedAt.UTC()
 	}
 	_, err := db.conn.Exec("INSERT INTO users (id, name, email, plan_id, status, plan_assigned_at) VALUES ($1, $2, $3, $4, $5, $6)", u.ID, u.Name, u.Email, u.PlanID, u.Status, u.PlanAssignedAt)
 	return err
