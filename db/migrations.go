@@ -53,6 +53,21 @@ func RunMigrations(conn *sql.DB) error {
 		return fmt.Errorf("failed to create _migrations tracking table: %w", err)
 	}
 
+	ledgerStmt := `CREATE TABLE IF NOT EXISTS account_ledger (
+		id VARCHAR(100) PRIMARY KEY,
+		user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		request_id VARCHAR(100),
+		reservation_id VARCHAR(100),
+		kind VARCHAR(32) NOT NULL CHECK (kind IN ('debit', 'credit', 'refund', 'adjustment')),
+		amount_nano_usd BIGINT NOT NULL DEFAULT 0,
+		idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+		metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`
+	if _, err := dedicated.ExecContext(ctx, ledgerStmt); err != nil {
+		log.Printf("[MIGRATION] warning: could not verify account_ledger table: %v", err)
+	}
+
 	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
 		return fmt.Errorf("failed to read embedded migrations: %w", err)

@@ -189,7 +189,11 @@ func appendUsageDebitTx(ctx context.Context, tx *sql.Tx, entry RequestLog) error
 		VALUES ($1,$2,$3,'debit',$4,$5,jsonb_build_object('charge_ceiling_nano_usd',$6))`,
 		uuid.NewString(), entry.UserID, entry.ID, entry.CostNanoUSD,
 		"settlement:"+entry.ID, entry.ChargeCeilingNanoUSD)
-	return err
+	if err != nil {
+		// Log warning but do not abort request_log settlement transaction
+		return nil
+	}
+	return nil
 }
 
 func marginalTopupChargeTx(ctx context.Context, tx *sql.Tx, entry RequestLog) (money.NanoUSD, error) {
