@@ -48,7 +48,7 @@ func TestRequestContextCapturesSessionAndCacheEpoch(t *testing.T) {
 
 func TestInterruptedStreamNeverConsumesCredits(t *testing.T) {
 	entry := db.RequestLog{Cost: 1, CostNanoUSD: 1_000_000_000}
-	setStreamOutcome(&entry, false, true, nil)
+	setStreamOutcome(&entry, streamResult{idleTimeout: true})
 	if entry.StatusCode != 504 || entry.RequestStatus != "timed_out" {
 		t.Fatalf("timeout outcome = %+v", entry)
 	}
@@ -57,7 +57,7 @@ func TestInterruptedStreamNeverConsumesCredits(t *testing.T) {
 	}
 
 	entry = db.RequestLog{Cost: 1, CostNanoUSD: 1_000_000_000}
-	setStreamOutcome(&entry, false, false, context.Canceled)
+	setStreamOutcome(&entry, streamResult{requestErr: context.Canceled})
 	if entry.StatusCode != 499 || entry.RequestStatus != "cancelled" {
 		t.Fatalf("cancel outcome = %+v", entry)
 	}

@@ -245,15 +245,13 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		totalInput = promptTokens
 	}
 	reqLog.StatusCode = http.StatusOK
-	failedWithNoOutput := false
 	if streamError != "" {
 		reqLog.ErrorMessage = streamError
-		// Honest status: a turn error that produced no output is a real failure,
-		// not "200 Primary Succeeded". Surfaces truthfully in the admin log.
-		if totalOutput == 0 {
-			reqLog.StatusCode = http.StatusBadGateway
-			failedWithNoOutput = true
-		}
+		reqLog.StatusCode = requestFailureStatus(requestFailure{
+			requestErr: r.Context().Err(),
+			message:    streamError,
+		})
+		reqLog.RequestStatus = db.RequestStatusForHTTP(reqLog.StatusCode)
 	}
 	reqLog.InputTokens = totalInput
 	reqLog.OutputTokens = totalOutput
@@ -261,10 +259,11 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 	if cacheMissReported {
 		reqLog.CacheMissTokens = &totalCacheMiss
 	}
-	// A rejected request (4xx/429 upstream, zero output) costs the platform
-	// nothing at the provider — never bill the user's credits for it.
-	if failedWithNoOutput {
+	// Partial output from a failed stream stays visible in telemetry but is not
+	// charged; a transport retry is accounted as a separate attempt.
+	if streamError != "" {
 		reqLog.Cost = 0
+		reqLog.CostNanoUSD = 0
 	} else {
 		setCalculatedCost(&reqLog, model, totalInput, totalOutput, totalCacheRead, 0)
 	}

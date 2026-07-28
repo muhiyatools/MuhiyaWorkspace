@@ -150,9 +150,8 @@ const routerModelDeprecated = "muhiya-ai-router"
 
 // clientRequestIDHeader is the logical request ID sent by MuhiyaCode. The
 // gateway combines it with the authenticated key and attempt number to derive
-// it as the request_log row ID so one ID ties client turn → gateway attempt →
-// settlement while keeping retries observable and same-attempt replays
-// idempotent. Empty means the gateway generates its own ID.
+// a stable row ID, keeping retries observable and same-attempt replays
+// idempotent.
 const clientRequestIDHeader = "X-Muhiya-Request-ID"
 const clientAttemptHeader = "X-Muhiya-Attempt"
 const clientCacheEpochHeader = "X-Muhiya-Cache-Epoch"
@@ -167,40 +166,47 @@ type requestCorrelation struct {
 // attempt. Replaying the same attempt is idempotent; a transport retry increments
 // X-Muhiya-Attempt and receives a distinct row under the same logical request.
 func requestCorrelationFor(r *http.Request, keyID string) requestCorrelation {
-	attempt := 1
-	if raw := strings.TrimSpace(r.Header.Get(clientAttemptHeader)); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 100 {
-			attempt = parsed
-		} else {
-			log.Printf("[REQUEST] ignored malformed %s header", clientAttemptHeader)
-		}
+	attempt := requestAttemptNumber(r)
+	logicalID := strings.TrimSpace(r.Header.Get(clientRequestIDHeader))
+	if logicalID == "" {
+		return requestCorrelation{LogID: uuid.New().String(), AttemptNumber: attempt}
 	}
-	if id := strings.TrimSpace(r.Header.Get(clientRequestIDHeader)); id != "" {
-		if len(id) <= 100 {
-			valid := true
-			for _, char := range id {
-				if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
-					(char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.') {
-					valid = false
-					break
-				}
-			}
-			if valid {
-				digest := sha256.Sum256([]byte(keyID + "\x00" + id + "\x00" + strconv.Itoa(attempt)))
-				return requestCorrelation{
-					LogID:           fmt.Sprintf("req-%x", digest[:]),
-					ClientRequestID: id,
-					AttemptNumber:   attempt,
-				}
-			}
-		}
+	if !validLogicalRequestID(logicalID) {
 		log.Printf("[REQUEST] ignored malformed %s header", clientRequestIDHeader)
+		return requestCorrelation{LogID: uuid.New().String(), AttemptNumber: attempt}
 	}
-	return requestCorrelation{LogID: uuid.New().String(), AttemptNumber: attempt}
+	digest := sha256.Sum256([]byte(keyID + "\x00" + logicalID + "\x00" + strconv.Itoa(attempt)))
+	return requestCorrelation{
+		LogID:           fmt.Sprintf("req-%x", digest[:]),
+		ClientRequestID: logicalID,
+		AttemptNumber:   attempt,
+	}
 }
 
-func correlationID(r *http.Request) string {
-	return requestCorrelationFor(r, "").LogID
+func requestAttemptNumber(r *http.Request) int {
+	raw := strings.TrimSpace(r.Header.Get(clientAttemptHeader))
+	if raw == "" {
+		return 1
+	}
+	attempt, err := strconv.Atoi(raw)
+	if err != nil || attempt < 1 || attempt > 100 {
+		log.Printf("[REQUEST] ignored malformed %s header", clientAttemptHeader)
+		return 1
+	}
+	return attempt
+}
+
+func validLogicalRequestID(id string) bool {
+	if id == "" || len(id) > 100 {
+		return false
+	}
+	for _, char := range id {
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func requestSessionID(r *http.Request) string {
@@ -1263,7 +1269,11 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.UpstreamProvider = upstreamProvider
 			h.observeProviderAffinity(routeScope, upstreamProvider)
 			setCalculatedCost(&log, model, inputTokens, completionTokens, cacheRead, cacheWrite)
-			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
+			setStreamOutcome(&log, streamResult{
+				normalClose: normalClose,
+				idleTimeout: idleTimedOut(),
+				requestErr:  r.Context().Err(),
+			})
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -1426,7 +1436,11 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 			log.CacheReadTokens = cacheRead
 			log.CacheWriteTokens = usageTracker.CacheWriteTokens
 			setCalculatedCost(&log, model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
-			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
+			setStreamOutcome(&log, streamResult{
+				normalClose: normalClose,
+				idleTimeout: idleTimedOut(),
+				requestErr:  r.Context().Err(),
+			})
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -1557,7 +1571,11 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 			log.OutputTokens = usageTracker.OutputTokens
 			log.CacheReadTokens = usageTracker.CacheReadInputTokens
 			setCalculatedCost(&log, model, usageTracker.InputTokens, usageTracker.OutputTokens, usageTracker.CacheReadInputTokens, 0)
-			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
+			setStreamOutcome(&log, streamResult{
+				normalClose: normalClose,
+				idleTimeout: idleTimedOut(),
+				requestErr:  r.Context().Err(),
+			})
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -1690,7 +1708,11 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 			log.CacheReadTokens = usageTracker.CacheReadInputTokens
 			log.CacheWriteTokens = usageTracker.CacheCreationInputTokens
 			setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens)
-			setStreamOutcome(&log, normalClose, idleTimedOut(), r.Context().Err())
+			setStreamOutcome(&log, streamResult{
+				normalClose: normalClose,
+				idleTimeout: idleTimedOut(),
+				requestErr:  r.Context().Err(),
+			})
 			log.LatencyMS = int(time.Since(startTime).Milliseconds())
 			h.saveRequestLog(log)
 			sendMuhiyaMetaChunk(w, &log, model.Name)
@@ -2051,39 +2073,63 @@ func (h *ProxyHandler) writeError(w http.ResponseWriter, code int, msg string, e
 	_ = json.NewEncoder(w).Encode(errPayload)
 }
 
-func setStreamOutcome(entry *db.RequestLog, normalClose, idleTimedOut bool, requestErr error) {
-	switch {
-	case normalClose:
+type streamResult struct {
+	normalClose bool
+	idleTimeout bool
+	requestErr  error
+}
+
+type requestFailure struct {
+	requestErr  error
+	message     string
+	idleTimeout bool
+}
+
+func setStreamOutcome(entry *db.RequestLog, result streamResult) {
+	if result.normalClose {
 		entry.StatusCode = http.StatusOK
-	case errors.Is(requestErr, context.DeadlineExceeded) || idleTimedOut:
-		entry.StatusCode = http.StatusGatewayTimeout
+		entry.RequestStatus = db.RequestStatusForHTTP(entry.StatusCode)
+		return
+	}
+	entry.StatusCode = requestFailureStatus(requestFailure{
+		requestErr: result.requestErr, idleTimeout: result.idleTimeout,
+	})
+	entry.ErrorMessage = "upstream stream ended before the terminal event"
+	if entry.StatusCode == http.StatusGatewayTimeout {
 		entry.ErrorMessage = "stream timed out before the terminal event"
-	case errors.Is(requestErr, context.Canceled):
-		entry.StatusCode = 499
+	} else if entry.StatusCode == 499 {
 		entry.ErrorMessage = "request cancelled before the terminal event"
-	default:
-		entry.StatusCode = http.StatusBadGateway
-		entry.ErrorMessage = "upstream stream ended before the terminal event"
 	}
 	entry.RequestStatus = db.RequestStatusForHTTP(entry.StatusCode)
-	if !normalClose {
-		// Failed/cancelled attempts remain observable with their token estimates,
-		// but never consume customer credits. A later retry has its own attempt row.
-		entry.Cost = 0
-		entry.CostNanoUSD = 0
+	// Failed/cancelled attempts remain observable with their token estimates,
+	// but never consume customer credits. A later retry has its own attempt row.
+	entry.Cost = 0
+	entry.CostNanoUSD = 0
+}
+
+func requestFailureStatus(failure requestFailure) int {
+	switch {
+	case errors.Is(failure.requestErr, context.DeadlineExceeded),
+		failure.idleTimeout,
+		strings.Contains(strings.ToLower(failure.message), "timeout"),
+		strings.Contains(strings.ToLower(failure.message), "deadline exceeded"):
+		return http.StatusGatewayTimeout
+	case errors.Is(failure.requestErr, context.Canceled):
+		return 499
+	default:
+		return http.StatusBadGateway
 	}
 }
 
 func (h *ProxyHandler) logAndWriteError(w http.ResponseWriter, code int, msg string, errType string, log *db.RequestLog, startTime time.Time) {
 	request := h.getRequest(w)
 	if request != nil {
-		switch {
-		case errors.Is(request.Context().Err(), context.DeadlineExceeded),
-			strings.Contains(strings.ToLower(msg), "timeout"),
-			strings.Contains(strings.ToLower(msg), "deadline exceeded"):
-			code = http.StatusGatewayTimeout
-		case errors.Is(request.Context().Err(), context.Canceled):
-			code = 499
+		classified := requestFailureStatus(requestFailure{
+			requestErr: request.Context().Err(),
+			message:    msg,
+		})
+		if classified != http.StatusBadGateway {
+			code = classified
 		}
 	}
 	log.StatusCode = code
@@ -2665,12 +2711,10 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		status := http.StatusBadGateway
-		if errors.Is(r.Context().Err(), context.Canceled) {
-			status = 499
-		} else if errors.Is(r.Context().Err(), context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
-			status = http.StatusGatewayTimeout
-		}
+		status := requestFailureStatus(requestFailure{
+			requestErr: r.Context().Err(),
+			message:    err.Error(),
+		})
 		saveTranscriptionFailure(status, "connection to upstream failed: "+err.Error(), startTime)
 		h.writeError(w, status, "Connection to upstream failed: "+err.Error(), "api_error")
 		return
