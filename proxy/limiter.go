@@ -135,7 +135,27 @@ type RateLimiter struct {
 	scriptMu     sync.RWMutex // guards scriptSHA: read on every request, written on the rare NOSCRIPT-retry path
 	scriptSHA    string
 	defs         *limiterDefsCache
+	activeMu     sync.Mutex
+	active       map[string]string
 }
+
+const (
+	generationLeaseTTL       = 2 * time.Minute
+	generationLeaseHeartbeat = 30 * time.Second
+	generationPollInterval   = 200 * time.Millisecond
+)
+
+const renewGenerationScript = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0`
+
+const releaseGenerationScript = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0`
 
 func (rl *RateLimiter) getScriptSHA() string {
 	rl.scriptMu.RLock()
@@ -154,6 +174,7 @@ func NewRateLimiter(database *db.DB) *RateLimiter {
 		limiters: make(map[string]*KeyLimiter),
 		db:       database,
 		defs:     &limiterDefsCache{},
+		active:   make(map[string]string),
 	}
 
 	requireRedis := isTruthy(os.Getenv("REQUIRE_REDIS"))
@@ -193,9 +214,120 @@ func NewRateLimiter(database *db.DB) *RateLimiter {
 	return rl
 }
 
+// AcquireGeneration serializes billable generations for one user. This is a
+// short-lived execution lock, not a balance hold: it never changes usage and
+// cannot appear in budget windows. Serializing admission through settlement
+// prevents concurrent requests from spending the same settled balance.
+func (rl *RateLimiter) AcquireGeneration(ctx context.Context, userID, requestID string) (func(), error) {
+	if rl.requireRedis && rl.redisInitErr != nil {
+		return nil, &LimitError{Kind: LimitInfrastructure, Err: fmt.Errorf("generation guard unavailable: %w", rl.redisInitErr)}
+	}
+	if rl.requireRedis {
+		if !rl.useRedis {
+			return nil, &LimitError{Kind: LimitInfrastructure, Err: errors.New("generation guard requires Redis")}
+		}
+	}
+
+	for {
+		var release func()
+		var acquired bool
+		var err error
+		if rl.useRedis {
+			release, acquired, err = rl.tryRedisGeneration(ctx, userID, requestID)
+		} else {
+			release, acquired = rl.tryInMemoryGeneration(userID, requestID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if acquired {
+			return release, nil
+		}
+		timer := time.NewTimer(generationPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (rl *RateLimiter) tryInMemoryGeneration(userID, requestID string) (func(), bool) {
+	rl.activeMu.Lock()
+	if _, exists := rl.active[userID]; exists {
+		rl.activeMu.Unlock()
+		return nil, false
+	}
+	rl.active[userID] = requestID
+	rl.activeMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			rl.activeMu.Lock()
+			if rl.active[userID] == requestID {
+				delete(rl.active, userID)
+			}
+			rl.activeMu.Unlock()
+		})
+	}, true
+}
+
+func (rl *RateLimiter) tryRedisGeneration(ctx context.Context, userID, requestID string) (func(), bool, error) {
+	key := "generation:user:" + userID
+	acquireCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	acquired, err := rl.redisClient.SetNX(acquireCtx, key, requestID, generationLeaseTTL).Result()
+	cancel()
+	if err != nil {
+		return nil, false, &LimitError{Kind: LimitInfrastructure, Err: fmt.Errorf("generation guard unavailable: %w", err)}
+	}
+	if !acquired {
+		return nil, false, nil
+	}
+
+	stop := make(chan struct{})
+	go rl.renewGenerationLease(stop, key, requestID)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stop)
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer releaseCancel()
+			if err := rl.redisClient.Eval(releaseCtx, releaseGenerationScript, []string{key}, requestID).Err(); err != nil {
+				log.Printf("[LIMITER] failed to release generation guard for user %s: %v", userID, err)
+			}
+		})
+	}, true, nil
+}
+
+func (rl *RateLimiter) renewGenerationLease(stop <-chan struct{}, key, requestID string) {
+	ticker := time.NewTicker(generationLeaseHeartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := rl.redisClient.Eval(
+				ctx,
+				renewGenerationScript,
+				[]string{key},
+				requestID,
+				generationLeaseTTL.Milliseconds(),
+			).Err()
+			cancel()
+			if err != nil {
+				log.Printf("[LIMITER] failed to renew generation guard: %v", err)
+			}
+		}
+	}
+}
+
 // InvalidateUser and InvalidateAll let the Admin API make plan/user mutations
 // effective on the very next request instead of waiting for the short
-// definition-cache TTL. Monetary spend and reservation state are never cached.
+// definition-cache TTL. Monetary spend is never cached.
 func (rl *RateLimiter) InvalidateUser(userID string) {
 	rl.defs.delete(userID)
 }

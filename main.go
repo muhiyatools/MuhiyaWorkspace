@@ -315,7 +315,6 @@ func main() {
 			log.Printf("[RETENTION] REQUEST_LOG_RETENTION_DAYS=%q is not a positive integer; retention pruning disabled", daysStr)
 		}
 	}
-	superviseLoop("budget-reconciler", func() { runBudgetReconciler(database) })
 
 	// DB watchdog: boot-time retry alone is not enough - the external
 	// PostgreSQL can drop MID-RUN (managed-DB restart, idle NAT reset, host
@@ -461,21 +460,6 @@ func runRetentionSweeper(database *db.DB, retention time.Duration) {
 			log.Printf("[RETENTION] prune failed: %v", err)
 		} else if n > 0 {
 			log.Printf("[RETENTION] pruned %d request_logs row(s) older than %s", n, retention)
-		}
-		time.Sleep(interval)
-	}
-}
-
-func runBudgetReconciler(database *db.DB) {
-	const interval = 30 * time.Second
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		reconciled, err := database.ReconcileExpiredReservations(ctx, 100)
-		cancel()
-		if err != nil {
-			log.Printf("[BILLING] expired reservation reconciliation failed: %v", err)
-		} else if reconciled > 0 {
-			log.Printf("[BILLING] reconciled %d expired reservation(s)", reconciled)
 		}
 		time.Sleep(interval)
 	}

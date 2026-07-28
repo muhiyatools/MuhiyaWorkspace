@@ -1759,13 +1759,11 @@ document.addEventListener('DOMContentLoaded', () => {
     function loadOperations() {
         fetchJSON('/api/operations?limit=100')
             .then(operations => {
-                renderOperationsReservations(operations?.reservations || []);
                 renderOperationsLedger(operations?.ledger || []);
                 renderUsageResets(operations?.usage_resets || []);
             })
             .catch(err => {
-                renderTableError(document.querySelector('#operations-reservations-table tbody'), 8, err.message);
-                renderTableError(document.querySelector('#operations-ledger-table tbody'), 7, err.message);
+                renderTableError(document.querySelector('#operations-ledger-table tbody'), 6, err.message);
                 renderTableError(document.querySelector('#operations-resets-table tbody'), 5, err.message);
             });
     }
@@ -1781,35 +1779,16 @@ document.addEventListener('DOMContentLoaded', () => {
         return `$${(Number(value || 0) / 1_000_000_000).toFixed(6)}`;
     }
 
-    function renderOperationsReservations(rows) {
-        const tbody = document.querySelector('#operations-reservations-table tbody');
-        if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="8" class="text-muted text-center">No reservations recorded.</td></tr>';
-            return;
-        }
-        tbody.innerHTML = rows.map(row => `<tr>
-            <td>${escapeHtml(operationTimestamp(row.created_at))}</td>
-            <td><code>${escapeHtml(row.request_id)}</code></td>
-            <td><code>${escapeHtml(row.user_id)}</code></td>
-            <td>${escapeHtml(row.model_id || '—')}</td>
-            <td>${nanoUSD(row.amount_nano_usd)}</td>
-            <td>${nanoUSD(row.settled_nano_usd)}</td>
-            <td><span class="operations-status status-${escapeHtml(row.status)}">${escapeHtml(row.status)}</span></td>
-            <td>${escapeHtml(operationTimestamp(row.lease_expires_at))}</td>
-        </tr>`).join('');
-    }
-
     function renderOperationsLedger(rows) {
         const tbody = document.querySelector('#operations-ledger-table tbody');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center">No ledger entries recorded.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center">No ledger entries recorded.</td></tr>';
             return;
         }
         tbody.innerHTML = rows.map(row => `<tr>
             <td>${escapeHtml(operationTimestamp(row.created_at))}</td>
             <td><code>${escapeHtml(row.user_id)}</code></td>
             <td><code>${escapeHtml(row.request_id || '—')}</code></td>
-            <td><code>${escapeHtml(row.reservation_id || '—')}</code></td>
             <td>${escapeHtml(row.kind)}</td>
             <td>${nanoUSD(row.amount_nano_usd)}</td>
             <td><code>${escapeHtml(row.idempotency_key)}</code></td>

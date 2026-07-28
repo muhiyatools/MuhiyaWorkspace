@@ -1,7 +1,7 @@
 // Package pricing evaluates immutable, exact token-price snapshots.
 //
 // A request is priced from one RuleSet chosen before admission. The same
-// snapshot must be used for reservation and settlement; callers must not reload
+// snapshot must be used for admission and settlement; callers must not reload
 // mutable model prices between those two operations.
 package pricing
 

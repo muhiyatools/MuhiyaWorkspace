@@ -190,17 +190,19 @@ type RequestLog struct {
 	// token count. It is nil for rows logged before feature 007 or by upstreams
 	// that do not report it, in which case the dashboard hit-rate falls back to
 	// the input_tokens-based approximation.
-	CacheMissTokens  *int64        `json:"cache_miss_tokens,omitempty"`
-	Cost             float64       `json:"cost"`
-	CostNanoUSD      money.NanoUSD `json:"cost_nano_usd"`
-	ReservationID    string        `json:"reservation_id,omitempty"`
-	LatencyMS        int           `json:"latency_ms"`
-	ErrorMessage     string        `json:"error_message"`
-	ClientApp        string        `json:"client_app"`
-	RequestedModel   string        `json:"requested_model"`
-	Complexity       string        `json:"complexity"`
-	ThinkingLevel    string        `json:"thinking_level"`
-	FailoverAttempts int           `json:"failover_attempts"`
+	CacheMissTokens *int64        `json:"cache_miss_tokens,omitempty"`
+	Cost            float64       `json:"cost"`
+	CostNanoUSD     money.NanoUSD `json:"cost_nano_usd"`
+	// ChargeCeilingNanoUSD is an ephemeral admission-time cap. Completed
+	// request logs remain the sole source of budget-window usage.
+	ChargeCeilingNanoUSD money.NanoUSD `json:"-"`
+	LatencyMS            int           `json:"latency_ms"`
+	ErrorMessage         string        `json:"error_message"`
+	ClientApp            string        `json:"client_app"`
+	RequestedModel       string        `json:"requested_model"`
+	Complexity           string        `json:"complexity"`
+	ThinkingLevel        string        `json:"thinking_level"`
+	FailoverAttempts     int           `json:"failover_attempts"`
 	// UsageEstimated is true when the upstream disconnected before sending
 	// its usage payload and InputTokens/OutputTokens/Cost were computed from
 	// the local word-count heuristic instead of provider-reported numbers.
@@ -238,7 +240,6 @@ type AccountLedgerEntry struct {
 	ID             string        `json:"id"`
 	UserID         string        `json:"user_id"`
 	RequestID      string        `json:"request_id"`
-	ReservationID  string        `json:"reservation_id"`
 	Kind           string        `json:"kind"`
 	AmountNanoUSD  money.NanoUSD `json:"amount_nano_usd"`
 	IdempotencyKey string        `json:"idempotency_key"`
@@ -785,9 +786,6 @@ func (db *DB) UpdateUser(u User) error {
 		WHERE id = $5`, u.Name, u.Email, u.PlanID, u.Status, u.ID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM user_window_charge_state WHERE user_id = $1", u.ID); err != nil {
-		return err
-	}
 	return tx.Commit()
 }
 
@@ -896,14 +894,6 @@ func (db *DB) UpdatePlan(p Plan) error {
 		return sql.ErrNoRows
 	}
 
-	// Charge-watermark rows use a logical window ID without a foreign key.
-	// Remove them before replacing plan windows so legacy IDs cannot suppress
-	// future top-up charges or accumulate forever.
-	_, err = tx.Exec(`DELETE FROM user_window_charge_state
-		WHERE window_id IN (SELECT id FROM budget_windows WHERE plan_id = $1)`, p.ID)
-	if err != nil {
-		return err
-	}
 	_, err = tx.Exec("DELETE FROM budget_windows WHERE plan_id = $1", p.ID)
 	if err != nil {
 		return err
@@ -1685,17 +1675,7 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 		return fmt.Errorf("refusing to insert request log %s: %w", log.ID, err)
 	}
 
-	err := insertRequestLog(db.conn, log)
-
-	if err == nil && log.StatusCode >= 200 && log.StatusCode < 300 && log.CostNanoUSD > 0 {
-		if derr := db.DeductExtraNanoIfExceeded(log.UserID, log.CostNanoUSD); derr != nil {
-			// F2: never swallow a credit-deduction failure — the billing row is
-			// already committed, so a lost deduction is a revenue leak. Surface it
-			// with request context for the ops log / alerting.
-			logCreditFailure(log.UserID, log.Cost, derr)
-		}
-	}
-	return err
+	return insertRequestLog(db.conn, log)
 }
 
 type requestLogExecer interface {
@@ -1703,7 +1683,7 @@ type requestLogExecer interface {
 }
 
 func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
-	var modelID, providerID, upstream, reservationID any
+	var modelID, providerID, upstream any
 	if entry.ModelID != "" {
 		modelID = entry.ModelID
 	}
@@ -1713,27 +1693,17 @@ func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
 	if entry.UpstreamProvider != "" {
 		upstream = entry.UpstreamProvider
 	}
-	if entry.ReservationID != "" {
-		reservationID = entry.ReservationID
-	}
 	_, err := exec.Exec(`INSERT INTO request_logs (
 		id, virtual_key_id, user_id, model_id, provider_id, request_path, status_code,
 		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_miss_tokens,
-		cost, cost_nano_usd, reservation_id, latency_ms, error_message, created_at, client_app,
+		cost, cost_nano_usd, latency_ms, error_message, created_at, client_app,
 		requested_model, complexity, failover_attempts, thinking_level, usage_estimated, upstream_provider
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)`,
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
 		entry.ID, entry.VirtualKeyID, entry.UserID, modelID, providerID, entry.RequestPath, entry.StatusCode,
 		entry.InputTokens, entry.OutputTokens, entry.CacheReadTokens, entry.CacheWriteTokens, entry.CacheMissTokens,
-		entry.Cost, entry.CostNanoUSD, reservationID, entry.LatencyMS, entry.ErrorMessage, entry.CreatedAt, entry.ClientApp,
+		entry.Cost, entry.CostNanoUSD, entry.LatencyMS, entry.ErrorMessage, entry.CreatedAt, entry.ClientApp,
 		entry.RequestedModel, entry.Complexity, entry.FailoverAttempts, entry.ThinkingLevel, entry.UsageEstimated, upstream)
 	return err
-}
-
-// logCreditFailure surfaces a (no-longer-swallowed) credit-deduction error (F2).
-// It uses the package-level standard logger because inside InsertRequestLog the
-// identifier `log` is shadowed by the RequestLog parameter.
-func logCreditFailure(userID string, costUSD float64, err error) {
-	log.Printf("[BILLING] credit deduction failed for user %s (cost %.6f): %v", userID, costUSD, err)
 }
 
 func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string) ([]RequestLog, error) {
@@ -1766,7 +1736,7 @@ func (db *DB) ListRequestLogsPage(query RequestLogQuery) (RequestLogPage, error)
 		SELECT request_logs.id, COALESCE(request_logs.virtual_key_id, ''), COALESCE(request_logs.user_id, ''), COALESCE(users.name, ''), COALESCE(models.name, request_logs.model_id, ''), COALESCE(request_logs.provider_id, ''), request_logs.request_path, request_logs.status_code,
 		       request_logs.input_tokens, request_logs.output_tokens, request_logs.cache_read_tokens, request_logs.cache_write_tokens, request_logs.cost, request_logs.cost_nano_usd, request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
 		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, ''), COALESCE(request_logs.usage_estimated, FALSE),
-		       COALESCE(request_logs.upstream_provider, ''), COALESCE(request_logs.reservation_id, '')
+		       COALESCE(request_logs.upstream_provider, '')
 		FROM request_logs
 		LEFT JOIN models ON request_logs.model_id = models.id
 		LEFT JOIN users ON request_logs.user_id = users.id
@@ -1784,7 +1754,7 @@ func (db *DB) ListRequestLogsPage(query RequestLogQuery) (RequestLogPage, error)
 		var r RequestLog
 		err := rows.Scan(&r.ID, &r.VirtualKeyID, &r.UserID, &r.OwnerName, &r.ModelID, &r.ProviderID, &r.RequestPath, &r.StatusCode,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.Cost, &r.CostNanoUSD, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
-			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider, &r.ReservationID)
+			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider)
 		if err != nil {
 			return RequestLogPage{}, err
 		}
@@ -1874,86 +1844,6 @@ func (db *DB) GetUserSpendingToday(userID string) (float64, error) {
 		userID,
 	).Scan(&total)
 	return money.NanoUSD(total).USD(), err
-}
-
-// DeductExtraCreditsIfExceeded charges a user's top-up credits for the over-budget
-// portion of a just-billed request, atomically and exactly once (findings F1/F7).
-// The whole operation — spend read, overage computation, and credit deduction —
-// runs in ONE transaction under a per-user advisory lock, so concurrent 2xx
-// requests for the same user serialize instead of racing. Each budget window keeps
-// a charge watermark (migration 010): the amount charged is the increase in
-// over-budget spend since the last charge, so a replay or a concurrent double-read
-// charges nothing. plan_assigned_at is read once (finding F6) and every window's
-// period start derives from it via windowPeriodStart. The math lives in billing.go
-// as pure, unit-tested functions.
-func (db *DB) DeductExtraCreditsIfExceeded(userID string, costUSD float64) error {
-	exact, err := money.FromUSD(costUSD)
-	if err != nil {
-		return err
-	}
-	return db.DeductExtraNanoIfExceeded(userID, exact)
-}
-
-func (db *DB) DeductExtraNanoIfExceeded(userID string, cost money.NanoUSD) error {
-	if cost <= 0 {
-		return nil
-	}
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Serialize all credit accounting for this user; the lock releases on
-	// commit/rollback. hashtext maps the id into the advisory-lock key space.
-	if _, err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext($1))", userID); err != nil {
-		return err
-	}
-
-	var planID string
-	var planAssignedAt time.Time
-	var usageResetAt sql.NullTime
-	if err := tx.QueryRow("SELECT plan_id, plan_assigned_at, usage_reset_at FROM users WHERE id = $1", userID).Scan(&planID, &planAssignedAt, &usageResetAt); err != nil {
-		return err
-	}
-	windows, err := listBudgetWindowsByPlanTx(tx, planID)
-	if err != nil {
-		return err
-	}
-
-	now := time.Now()
-	var maxCharge money.NanoUSD
-	for _, w := range windows {
-		if w.BudgetNanoUSD <= 0 {
-			continue
-		}
-		floor := effectiveFloor(windowPeriodStart(planAssignedAt, w.DurationSeconds, now), usageResetAt)
-		currentSpend, err := spendNanoInWindowTx(tx, userID, floor)
-		if err != nil {
-			return err
-		}
-		lastBilled, err := loadChargeWatermarkNano(tx, userID, w.ID, currentSpend, cost)
-		if err != nil {
-			return err
-		}
-		charge, newWatermark := overageChargeNano(currentSpend, w.BudgetNanoUSD, lastBilled)
-		if charge > maxCharge {
-			maxCharge = charge
-		}
-		if err := saveChargeWatermarkNano(tx, userID, w.ID, newWatermark); err != nil {
-			return err
-		}
-	}
-
-	// Charge the single worst window's marginal overage — unchanged semantics:
-	// overlapping windows (e.g. 5h and monthly) count the same spend, so summing
-	// them would double-charge.
-	if maxCharge > 0 {
-		if err := deductNanoFromTopupsTx(context.Background(), tx, userID, maxCharge); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }
 
 // ListUserTopups returns a user's top-ups for the ADMIN view, newest first. Unlike

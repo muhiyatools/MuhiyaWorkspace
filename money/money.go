@@ -1,5 +1,5 @@
 // Package money provides the exact monetary arithmetic used by admission,
-// pricing, reservations, and settlement. One USD is represented as one billion
+// pricing and settled usage. One USD is represented as one billion
 // nano-USD so sub-cent token prices remain exact without binary floating point.
 package money
 

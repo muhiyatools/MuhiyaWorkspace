@@ -43,7 +43,7 @@ var toolStatusLabels = map[string]string{
 func (h *ProxyHandler) shouldRunAgentLoop(r *http.Request, oaiReq *OpenAIRequest, settings ToolSettings) bool {
 	// Keep inference as one client-controlled generation by default. The
 	// historical gateway loop could issue up to five hidden model calls, making
-	// hard budget reservation and cancellation impossible to reason about.
+	// request cost and cancellation impossible to reason about.
 	// It remains behind an explicit compatibility flag for MuhiyaChat while the
 	// client-side tool loop is the production architecture.
 	if !isTruthy(os.Getenv("ENABLE_GATEWAY_AGENT_LOOP")) {

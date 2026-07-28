@@ -8,16 +8,16 @@
 
 The gateway was not suffering from one isolated Admin UI problem. Its most damaging defect was a repeated PostgreSQL protocol misuse: several functions executed a second statement on a transaction/connection while a prior `Rows` result remained open. With PostgreSQL/libpq this can fail the second query, abort a transaction, or return incomplete Admin data. The pattern existed in settlement overage calculation, user listing, plan listing, and dashboard statistics.
 
-The settlement instance was the highest-severity failure. `SettleReservationAndLog` called `marginalTopupChargeTx`; that function iterated budget-window rows and queried request spending inside the iteration on the same transaction. A failure occurred before the request-log insert, ledger debit, and reservation settlement. This directly explains the supplied schema state in which reservations existed while the new account ledger had no corresponding entries and recent requests were absent from request logs.
+The settlement instance was the highest-severity failure. The former reservation path could fail before the request-log insert, ledger debit, and authorization closure. This directly explained the supplied schema state in which authorizations existed while the account ledger had no corresponding entries and recent requests were absent from request logs. The reservation architecture has now been removed completely by migration 029.
 
-The Admin UI also represented an older architecture. It fetched only the newest 100 logs, filtered them in the browser, displayed time without date, retained an automatic-router screen after automatic routing had been removed, and did not expose budget reservations, account ledger entries, reset history, model catalog metadata, or model pricing tiers.
+The Admin UI also represented an older architecture. It fetched only the newest 100 logs, filtered them in the browser, displayed time without date, retained an automatic-router screen after automatic routing had been removed, and did not expose account ledger entries, reset history, model catalog metadata, or model pricing tiers.
 
 This remediation unifies those surfaces:
 
-- Request settlement, logging, top-up charging, ledger insertion, and reservation closure now complete atomically without nested result-set queries.
+- Completed-usage logging, top-up charging, and ledger insertion now complete atomically without nested result-set queries or monetary holds.
 - Admin request logs have a count/page API, bounded inputs, stable ordering, server-side filters, pagination controls, and full timestamps.
 - User/plan/dashboard queries fully consume and close result sets before dependent queries. User-list hydration is bulk-loaded instead of issuing several round trips per user.
-- Billing operations are visible in the Admin UI: reservations, ledger entries, and usage resets.
+- Billing operations are visible in the Admin UI: completed-usage ledger entries and usage resets.
 - Model base data, catalog metadata, cache contract, and pricing tiers save in one transaction and are editable in the Admin UI.
 - The obsolete automatic-routing Admin screen and controls are removed; migration 027 normalizes all legacy routing tiers to `none`.
 - Budget and rate-limit admission failures are now recorded as zero-cost request-log rows.
@@ -31,18 +31,16 @@ flowchart TD
     C[Client request] --> A[Virtual-key authentication]
     A --> M[Resolve explicitly requested model]
     M --> L[Redis RPM/TPM admission]
-    L --> Q[Exact price quote]
-    Q --> B[PostgreSQL budget reservation]
-    B --> U[Upstream provider]
+    L --> G[Per-user active-generation guard]
+    G --> Q[Affordable output-token ceiling]
+    Q --> U[Upstream provider]
     U --> S[Stream or collect response]
-    S --> X[Atomic settlement transaction]
+    S --> X[Atomic completed-usage transaction]
     X --> R[Request log]
     X --> G[Account ledger]
     X --> T[Top-up deduction]
-    X --> Z[Reservation settled]
     R --> UI[Paginated Admin audit UI]
     G --> UI
-    Z --> UI
 ```
 
 ## Schema-to-code integration map
@@ -50,11 +48,10 @@ flowchart TD
 | Schema authority | Runtime writer/reader | Admin exposure | Status after remediation |
 |---|---|---|---|
 | `users` | `db/db.go`, `proxy/limiter.go` | Users tab | Wired; mutations invalidate limiter definitions |
-| `plans`, `budget_windows` | `db/db.go`, `db/reservations.go` | Plans tab | Wired; validation and stale-watermark cleanup added |
-| `user_topups` | `db/db.go`, `db/reservations.go` | User top-up modal | Wired; exact nano-USD settlement remains authoritative |
+| `plans`, `budget_windows` | `db/db.go`, `db/billing_atomic.go` | Plans tab | Wired; settled request logs are the usage authority |
+| `user_topups` | `db/db.go`, `db/billing_atomic.go` | User top-up modal | Wired; exact nano-USD settlement remains authoritative |
 | `usage_resets` | `db/billing.go` | Billing Operations tab | Wired; nonexistent user reset now returns 404 |
-| `budget_reservations` | `db/reservations.go` | Billing Operations tab | Wired and observable |
-| `account_ledger` | `db/reservations.go` | Billing Operations tab | Wired and observable |
+| `account_ledger` | `db/billing_atomic.go` | Billing Operations tab | Wired and observable |
 | `request_logs` | `db/db.go`, `proxy/handler.go` | Request Logs tab | Paginated, searchable, full timestamp |
 | `model_catalog_metadata` | `db/db.go`, `proxy/catalog.go` | Model modal | Transactionally wired |
 | `model_pricing_tiers` | `db/db.go`, `pricing/pricing.go` | Model modal | Transactionally wired |
@@ -67,13 +64,13 @@ flowchart TD
 
 - **Severity:** Critical
 - **Category:** Billing integrity / PostgreSQL correctness
-- **Affected component:** `db/reservations.go:marginalTopupChargeTx`, called by `SettleReservationAndLog`
+- **Affected component:** Former `db/reservations.go` settlement path
 - **Root cause:** A spending query was executed inside a loop while budget-window `Rows` remained active on the same transaction.
-- **Impact:** Successful provider requests could remain as open reservations, never appear in request logs, never create ledger entries, and never deduct top-ups. The in-memory outbox repeatedly retried the same invalid transaction shape.
-- **Fix:** Budget-window limits are fully loaded and closed by `budgetWindowLimitsTx`; spending queries run only afterward through `successfulSpendSinceTx`.
+- **Impact:** Successful provider requests could remain unlogged, never create ledger entries, and never deduct top-ups. Stranded authorizations could also make an account appear out of credits without any completed usage.
+- **Fix:** The reservation subsystem, reconciler, schema, Admin surface, and request-log links were removed. `SettleUsageAndLog` atomically records completed usage and top-up/ledger changes under a brief per-user transaction lock.
 - **Complexity:** Medium
 - **Priority:** P0
-- **Verification:** Reservation integration tests plus full Go test suite.
+- **Verification:** Atomic-billing, migration-removal, active-generation-guard, and full Go suites.
 
 ### F-02 — User, plan, and dashboard endpoints returned errors or partial data
 
@@ -108,13 +105,13 @@ flowchart TD
 - **Complexity:** Low
 - **Priority:** P0
 
-### F-05 — New billing tables were operationally invisible
+### F-05 — Billing operations were operationally invisible
 
 - **Severity:** High
 - **Category:** Observability
-- **Affected component:** `budget_reservations`, `account_ledger`, `usage_resets`; Admin API/UI
+- **Affected component:** `account_ledger`, `usage_resets`; Admin API/UI
 - **Root cause:** Migrations added backend authorities but no Admin endpoints or views.
-- **Impact:** Operators could not distinguish reserved, settled, released, or expired requests; verify ledger idempotency; or audit resets.
+- **Impact:** Operators could not verify completed-usage ledger idempotency or audit resets.
 - **Fix:** `db/admin_operations.go`, `/api/operations`, and Billing Operations UI tables.
 - **Complexity:** Medium
 - **Priority:** P0
@@ -146,7 +143,7 @@ flowchart TD
 - **Severity:** High
 - **Category:** Request accounting / supportability
 - **Affected component:** `proxy/handler.go`
-- **Root cause:** Logging began only after successful admission/reservation.
+- **Root cause:** Logging began only after successful admission.
 - **Impact:** A user could report repeated 402/429/503 responses while the Admin log showed no requests.
 - **Fix:** Chat, Anthropic, and transcription admission failures create zero-cost rows with the request ID, model, client, token estimate, status, and cause.
 - **Complexity:** Medium
@@ -159,18 +156,18 @@ flowchart TD
 - **Affected component:** `proxy/limiter.go:limiterDefsCache`, Admin mutation handlers
 - **Root cause:** Definition caching had only TTL expiration and no invalidation hook.
 - **Impact:** Plan reassignment and RPM/TPM edits could use stale definitions for several seconds.
-- **Fix:** `RateLimiter.InvalidateUser/InvalidateAll` are connected to user, plan, and budget mutation handlers. Spend and reservation state continue to bypass this cache.
+- **Fix:** `RateLimiter.InvalidateUser/InvalidateAll` are connected to user, plan, and budget mutation handlers. Settled spend always bypasses this cache.
 - **Complexity:** Medium
 - **Priority:** P1
 
-### F-10 — Plan replacement left stale charge-watermark state
+### F-10 — Legacy charge-watermark state outlived its billing design
 
 - **Severity:** High
 - **Category:** Top-up correctness
-- **Affected component:** `db/db.go:UpdatePlan`, `user_window_charge_state`
+- **Affected component:** Former `user_window_charge_state`
 - **Root cause:** Plan updates deleted/recreated budget-window IDs, while legacy watermark rows had no window foreign key.
 - **Impact:** Stale watermarks could suppress or distort later top-up charging and grow indefinitely.
-- **Fix:** Watermarks for replaced windows are removed in the same plan transaction. User plan changes clear that user’s watermark state and reset the usage floor.
+- **Fix:** Migration 029 removes the obsolete watermark table. Completed request logs and atomic marginal-overage settlement no longer require a persistent watermark.
 - **Complexity:** Medium
 - **Priority:** P1
 
@@ -242,7 +239,7 @@ flowchart TD
 
 ## PostgreSQL and Redis reliability assessment
 
-PostgreSQL is the monetary authority. Exact nano-USD columns, per-user advisory locks, request-unique reservations, ledger idempotency keys, and settlement transactions are the correct foundation. The remediation preserves this authority and adds indexes for stable request-log ordering and operations views. Statement, lock, and connect timeouts in `main.go:postgresSafetyParams` prevent indefinite pool starvation.
+PostgreSQL is the monetary authority. Exact nano-USD columns, settled request logs, brief per-user advisory transaction locks, ledger idempotency keys, and completed-usage transactions are the foundation. There is no pending monetary state. Statement, lock, and connect timeouts in `main.go:postgresSafetyParams` prevent indefinite pool starvation.
 
 Redis is correctly limited to throughput enforcement and MiniMax/OpenRouter affinity. It does not own balances. RPM/TPM enforcement uses a single Lua script, so prune/count/admit/write is atomic. Production now fails closed when distributed limiting is unavailable. Provider affinity remains optional because losing affinity affects cache efficiency, not billing authority.
 
@@ -252,7 +249,7 @@ These are deployment properties, not disconnected code:
 
 1. `REDIS_URL`, `DATABASE_URL`, `ADMIN_PASSWORD`, and a stable `PROVIDER_KEY_ENCRYPTION_KEY` must be supplied in Elest.io.
 2. Existing plaintext provider keys remain rollout-compatible when encryption is unset, but public launch should set the key and rotate provider credentials.
-3. The in-memory immediate retry queue is not durable across process death. Runtime completions still settle actual usage atomically, but an authorization abandoned by a hard gateway crash is now released after its lease rather than charged at its worst-case ceiling. This deliberately favors correct customer balances and session availability over recovering unknowable provider spend. Migration 028 releases authorizations stranded by the pre-027 settlement defect. Exact crash-time provider cost reconciliation would require a provider usage API.
+3. The in-memory immediate retry queue is not durable across process death. Runtime completions settle actual usage atomically; exact crash-time provider cost reconciliation would require a durable outbox or provider usage API. The Redis active-generation key is non-monetary and expires automatically after a hard crash.
 4. Offset pagination satisfies full history navigation. At very large log volumes, the next evolution should be cursor/keyset pagination using the new `(created_at, id)` index.
 
 ## Validation performed
@@ -262,13 +259,13 @@ These are deployment properties, not disconnected code:
 - `node --check static/app.js`
 - `git diff --check`
 - Added DB-free tests for parameterized request-log filters, MiniMax catalog/cache defaults, malformed cache contracts, and plan-window validation.
-- Existing reservation, exact-money, cache-regression, limiter, relay-billing, catalog, and wire-golden suites continue to pass.
+- Existing exact-money, cache-regression, limiter, relay-billing, catalog, and wire-golden suites continue to pass.
 
 ## Production verification checklist
 
 - [ ] `/health` reports `status=ok`, migration count includes migration 027, and `billing_loss=0`.
 - [ ] Redis startup log reports distributed limiter connected; with Redis intentionally unavailable, inference fails closed.
-- [ ] Create one low-cost request and verify one settled reservation, one request log, and one debit ledger entry share request/reservation identifiers.
+- [ ] Create one low-cost request and verify one request log and one debit ledger entry share the request identifier.
 - [ ] Trigger a budget denial and verify a 402 zero-cost request-log row.
 - [ ] Trigger RPM denial and verify a 429 zero-cost request-log row.
 - [ ] Change a user’s plan and verify the next request uses new RPM/TPM values.
@@ -276,8 +273,8 @@ These are deployment properties, not disconnected code:
 - [ ] Add, expire, and soft-delete top-ups; verify remaining balance changes immediately.
 - [ ] Save a MiniMax model with a cache contract and >512k tier; reload the modal and `/v1/muhiyacode/models` and verify identical metadata.
 - [ ] Traverse log pages, apply search/status/model filters, and verify full dates.
-- [ ] Restart the process with an active authorization and verify it is released after lease expiry without creating fake usage.
+- [ ] Restart the process during a request and verify the non-monetary Redis generation guard expires without creating fake usage.
 
 ## Definition of done
 
-The gateway is ready for public launch when all production checklist items pass against the Elest.io PostgreSQL and Redis instances, `billing_loss` remains zero under restart/fault testing, every successful generation produces a settled reservation/log/ledger chain, all denials are visible, Admin mutations take effect on the next request, and the Admin UI can read and modify every schema-backed product feature without hidden legacy routing behavior.
+The gateway is ready for public launch when all production checklist items pass against the Elest.io PostgreSQL and Redis instances, `billing_loss` remains zero under restart/fault testing, every successful generation produces an actual-usage request-log/ledger chain, all denials are visible, Admin mutations take effect on the next request, and the Admin UI can read and modify every schema-backed product feature without hidden legacy routing behavior.

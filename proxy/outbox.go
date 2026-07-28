@@ -73,12 +73,12 @@ func (o *logOutbox) retry(entry db.RequestLog) {
 }
 
 func (o *logOutbox) persist(entry db.RequestLog) error {
-	if entry.ReservationID == "" {
+	if entry.ChargeCeilingNanoUSD <= 0 {
 		return o.db.InsertRequestLog(entry)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return o.db.SettleReservationAndLog(ctx, entry)
+	return o.db.SettleUsageAndLog(ctx, entry)
 }
 
 // enqueue is non-blocking: a full buffer means a sustained outage, in which

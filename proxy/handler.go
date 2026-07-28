@@ -208,9 +208,9 @@ func (h *ProxyHandler) serviceUnavailableResponse(w http.ResponseWriter, context
 // billing history (see outbox.go).
 func (h *ProxyHandler) saveRequestLog(entry db.RequestLog) {
 	var err error
-	if entry.ReservationID != "" {
+	if entry.ChargeCeilingNanoUSD > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err = h.db.SettleReservationAndLog(ctx, entry)
+		err = h.db.SettleUsageAndLog(ctx, entry)
 		cancel()
 	} else {
 		err = h.db.InsertRequestLog(entry)
@@ -574,16 +574,6 @@ func (h *ProxyHandler) handleUsage(w http.ResponseWriter, key *db.VirtualKey) {
 		h.internalErrorResponse(w, "database error", err)
 		return
 	}
-	pending, err := h.db.PendingBudgetNano(context.Background(), user.ID)
-	if err != nil {
-		h.internalErrorResponse(w, "database error", err)
-		return
-	}
-	available, err := h.db.AvailableBudgetNano(context.Background(), user.ID)
-	if err != nil {
-		h.internalErrorResponse(w, "database error", err)
-		return
-	}
 	planName := user.PlanID
 	if plan, planErr := h.db.GetPlan(user.PlanID); planErr == nil && plan != nil && plan.Name != "" {
 		planName = plan.Name
@@ -608,8 +598,6 @@ func (h *ProxyHandler) handleUsage(w http.ResponseWriter, key *db.VirtualKey) {
 		"credits": map[string]interface{}{
 			"extra_total":     user.ExtraCredits,
 			"extra_remaining": user.RemainingExtraCredits,
-			"pending_usd":     pending.USD(),
-			"available_usd":   available.USD(),
 		},
 		"spend": map[string]interface{}{"today_usd": today},
 	}
@@ -751,6 +739,17 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		h.writeLimitError(w, err)
 		return
 	}
+	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, requestID)
+	if err != nil {
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: targetModel, provider: provider,
+			requestID: requestID, requestedModel: oaiReq.Model,
+			inputTokens: promptTokens, status: http.StatusServiceUnavailable, err: err,
+		})
+		h.serviceUnavailableResponse(w, "generation guard failed", err)
+		return
+	}
+	defer releaseGeneration()
 
 	var targetURL string
 	var useAnthropicUpstream bool
@@ -769,26 +768,23 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	resolvedProvider := *provider
 	resolvedProvider.BaseURL = targetURL
 
-	reservation, allowedOutput, err := h.reserveGeneration(
-		r.Context(),
-		key,
-		targetModel,
-		requestID,
-		conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
-		requestedOutput,
-	)
+	allowedOutput, chargeCeiling, err := h.affordableGeneration(r.Context(), generationQuoteRequest{
+		userID:          key.UserID,
+		model:           targetModel,
+		inputUpperBound: conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
+		requestedOutput: requestedOutput,
+	})
 	if err != nil {
 		h.saveAdmissionFailure(admissionFailure{
 			request: r, key: key, model: targetModel, provider: provider,
 			requestID: requestID, requestedModel: oaiReq.Model,
-			inputTokens: promptTokens, status: reservationErrorStatus(err), err: err,
+			inputTokens: promptTokens, status: budgetErrorStatus(err), err: err,
 		})
-		h.writeReservationError(w, err)
+		h.writeBudgetError(w, err)
 		return
 	}
 	bodyBytes, err = rewriteOpenAIOutputLimit(bodyBytes, allowedOutput)
 	if err != nil {
-		_ = h.db.ReleaseReservation(context.Background(), reservation.ID)
 		h.writeError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error(), "invalid_request_error")
 		return
 	}
@@ -800,19 +796,19 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 
 	startTime := time.Now()
 	reqLog := db.RequestLog{
-		ID:             requestID,
-		VirtualKeyID:   key.ID,
-		UserID:         key.UserID,
-		ModelID:        targetModel.ID,
-		ProviderID:     provider.ID,
-		ReservationID:  reservation.ID,
-		RequestPath:    r.URL.Path,
-		InputTokens:    promptTokens,
-		ClientApp:      getClientAppName(r),
-		RequestedModel: oaiReq.Model,
-		Complexity:     "direct",
-		ThinkingLevel:  thinkingLevel,
-		CreatedAt:      startTime,
+		ID:                   requestID,
+		VirtualKeyID:         key.ID,
+		UserID:               key.UserID,
+		ModelID:              targetModel.ID,
+		ProviderID:           provider.ID,
+		ChargeCeilingNanoUSD: chargeCeiling,
+		RequestPath:          r.URL.Path,
+		InputTokens:          promptTokens,
+		ClientApp:            getClientAppName(r),
+		RequestedModel:       oaiReq.Model,
+		Complexity:           "direct",
+		ThinkingLevel:        thinkingLevel,
+		CreatedAt:            startTime,
 	}
 
 	if useAnthropicUpstream {
@@ -903,6 +899,17 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		h.writeLimitError(w, err)
 		return
 	}
+	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, requestID)
+	if err != nil {
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: targetModel, provider: provider,
+			requestID: requestID, requestedModel: anthReq.Model,
+			inputTokens: promptTokens, status: http.StatusServiceUnavailable, err: err,
+		})
+		h.serviceUnavailableResponse(w, "generation guard failed", err)
+		return
+	}
+	defer releaseGeneration()
 
 	var targetURL string
 	var useAnthropicUpstream bool
@@ -921,21 +928,19 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	resolvedProvider := *provider
 	resolvedProvider.BaseURL = targetURL
 
-	reservation, allowedOutput, err := h.reserveGeneration(
-		r.Context(),
-		key,
-		targetModel,
-		requestID,
-		conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
-		requestedOutput,
-	)
+	allowedOutput, chargeCeiling, err := h.affordableGeneration(r.Context(), generationQuoteRequest{
+		userID:          key.UserID,
+		model:           targetModel,
+		inputUpperBound: conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
+		requestedOutput: requestedOutput,
+	})
 	if err != nil {
 		h.saveAdmissionFailure(admissionFailure{
 			request: r, key: key, model: targetModel, provider: provider,
 			requestID: requestID, requestedModel: anthReq.Model,
-			inputTokens: promptTokens, status: reservationErrorStatus(err), err: err,
+			inputTokens: promptTokens, status: budgetErrorStatus(err), err: err,
 		})
-		h.writeReservationError(w, err)
+		h.writeBudgetError(w, err)
 		return
 	}
 
@@ -945,19 +950,19 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 
 	startTime := time.Now()
 	reqLog := db.RequestLog{
-		ID:             requestID,
-		VirtualKeyID:   key.ID,
-		UserID:         key.UserID,
-		ModelID:        targetModel.ID,
-		ProviderID:     provider.ID,
-		ReservationID:  reservation.ID,
-		RequestPath:    r.URL.Path,
-		InputTokens:    promptTokens,
-		ClientApp:      getClientAppName(r),
-		RequestedModel: anthReq.Model,
-		Complexity:     "direct",
-		ThinkingLevel:  thinkingLevel,
-		CreatedAt:      startTime,
+		ID:                   requestID,
+		VirtualKeyID:         key.ID,
+		UserID:               key.UserID,
+		ModelID:              targetModel.ID,
+		ProviderID:           provider.ID,
+		ChargeCeilingNanoUSD: chargeCeiling,
+		RequestPath:          r.URL.Path,
+		InputTokens:          promptTokens,
+		ClientApp:            getClientAppName(r),
+		RequestedModel:       anthReq.Model,
+		Complexity:           "direct",
+		ThinkingLevel:        thinkingLevel,
+		CreatedAt:            startTime,
 	}
 
 	// Perform proxy
@@ -2175,66 +2180,53 @@ func conservativeInputTokenBound(rawBody []byte, estimated int, model *db.Model)
 	return bound
 }
 
-func (h *ProxyHandler) reserveGeneration(
-	ctx context.Context,
-	key *db.VirtualKey,
-	model *db.Model,
-	requestID string,
-	inputUpperBound int,
-	requestedOutput int,
-) (*db.BudgetReservation, int, error) {
-	rules, err := pricingRulesForModel(model)
+type generationQuoteRequest struct {
+	userID          string
+	model           *db.Model
+	inputUpperBound int
+	requestedOutput int
+}
+
+func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generationQuoteRequest) (int, money.NanoUSD, error) {
+	rules, err := pricingRulesForModel(request.model)
 	if err != nil {
-		return nil, 0, err
+		return 0, 0, err
 	}
-	usage := pricing.Usage{InputTokens: int64(inputUpperBound), OutputTokens: int64(requestedOutput)}
+	usage := pricing.Usage{
+		InputTokens:  int64(request.inputUpperBound),
+		OutputTokens: int64(request.requestedOutput),
+	}
 	quote, err := rules.Quote(usage)
 	if err != nil {
-		return nil, 0, err
+		return 0, 0, err
 	}
-	reserve := func(amount money.NanoUSD) (*db.BudgetReservation, error) {
-		return h.db.ReserveBudget(ctx, db.ReserveBudgetRequest{
-			RequestID:     requestID,
-			UserID:        key.UserID,
-			VirtualKeyID:  key.ID,
-			ModelID:       model.ID,
-			Amount:        amount,
-			PriceSnapshot: rules.ID,
-			LeaseDuration: upstreamTotalTimeout + 5*time.Minute,
-		})
+	available, err := h.db.AvailableBudgetNano(ctx, request.userID)
+	if err != nil {
+		return 0, 0, err
 	}
-	reservation, err := reserve(quote.Cost)
-	if err == nil {
-		return reservation, requestedOutput, nil
-	}
-	var budgetErr *db.BudgetExceededError
-	if !errors.As(err, &budgetErr) {
-		return nil, 0, err
+	if quote.Cost <= available {
+		return request.requestedOutput, quote.Cost, nil
 	}
 	allowed, maxErr := rules.MaxOutputTokens(
-		pricing.Usage{InputTokens: int64(inputUpperBound)},
-		int64(requestedOutput),
-		budgetErr.Available,
+		pricing.Usage{InputTokens: int64(request.inputUpperBound)},
+		int64(request.requestedOutput),
+		available,
 	)
 	if maxErr != nil {
-		return nil, 0, maxErr
+		return 0, 0, maxErr
 	}
 	if allowed < 1 {
-		return nil, 0, budgetErr
+		return 0, 0, &db.BudgetExceededError{Requested: quote.Cost, Available: available}
 	}
 	usage.OutputTokens = allowed
 	reduced, quoteErr := rules.Quote(usage)
 	if quoteErr != nil {
-		return nil, 0, quoteErr
+		return 0, 0, quoteErr
 	}
-	reservation, err = reserve(reduced.Cost)
-	if err != nil {
-		return nil, 0, err
-	}
-	return reservation, int(allowed), nil
+	return int(allowed), reduced.Cost, nil
 }
 
-func (h *ProxyHandler) writeReservationError(w http.ResponseWriter, err error) {
+func (h *ProxyHandler) writeBudgetError(w http.ResponseWriter, err error) {
 	if errors.Is(err, db.ErrBudgetExceeded) {
 		h.writeError(w, http.StatusPaymentRequired, err.Error(), "budget_exceeded")
 		return
@@ -2242,7 +2234,7 @@ func (h *ProxyHandler) writeReservationError(w http.ResponseWriter, err error) {
 	h.serviceUnavailableResponse(w, "budget admission failed", err)
 }
 
-func reservationErrorStatus(err error) int {
+func budgetErrorStatus(err error) int {
 	if errors.Is(err, db.ErrBudgetExceeded) {
 		return http.StatusPaymentRequired
 	}
@@ -2343,7 +2335,6 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		return
 	}
 	requestID := correlationID(r)
-	reservationID := ""
 
 	// Entitlement is checked HERE, like every other billable route. This handler
 	// used to skip CheckLimit entirely, so a tenant who had exhausted their plan
@@ -2362,6 +2353,19 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		h.writeLimitError(w, err)
 		return
 	}
+	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, requestID)
+	if err != nil {
+		h.saveRequestLog(db.RequestLog{
+			ID: requestID, VirtualKeyID: key.ID, UserID: key.UserID,
+			ModelID: targetModel.ID, ProviderID: targetModel.ProviderID,
+			RequestPath: r.URL.Path, StatusCode: http.StatusServiceUnavailable,
+			ErrorMessage: err.Error(), ClientApp: getClientAppName(r),
+			RequestedModel: modelName, Complexity: "admission", CreatedAt: time.Now().UTC(),
+		})
+		h.serviceUnavailableResponse(w, "generation guard failed", err)
+		return
+	}
+	defer releaseGeneration()
 
 	// Retrieve provider
 	provider, err := h.db.GetProvider(targetModel.ProviderID)
@@ -2376,7 +2380,6 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	saveTranscriptionFailure := func(status int, msg string, started time.Time) {
 		h.saveRequestLog(db.RequestLog{
 			ID:             requestID,
-			ReservationID:  reservationID,
 			VirtualKeyID:   key.ID,
 			UserID:         key.UserID,
 			ModelID:        targetModel.ID,
@@ -2477,38 +2480,33 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	}
 
 	startTime := time.Now()
-	// Audio providers do not expose usage before inference. Reserve a
-	// conservative duration ceiling derived from the accepted upload size at
-	// 8 kbit/s, with a one-minute minimum. Settlement uses reported duration
-	// and can only debit up to this authorized amount.
+	// Audio providers do not expose usage before inference. Derive a
+	// conservative duration ceiling from the accepted upload size at 8 kbit/s,
+	// with a one-minute minimum. Completed usage is capped at this amount.
 	maxDurationMillis := uploadedBytes
 	if maxDurationMillis < 60_000 {
 		maxDurationMillis = 60_000
 	}
-	reservedCost, err := money.MulDivCeil(maxDurationMillis, targetModel.PricePerMinuteNano, 60_000)
+	chargeCeiling, err := money.MulDivCeil(maxDurationMillis, targetModel.PricePerMinuteNano, 60_000)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid transcription pricing: "+err.Error(), "invalid_request_error")
 		return
 	}
-	audioReservation, err := h.db.ReserveBudget(r.Context(), db.ReserveBudgetRequest{
-		RequestID:     requestID,
-		UserID:        key.UserID,
-		VirtualKeyID:  key.ID,
-		ModelID:       targetModel.ID,
-		Amount:        reservedCost,
-		PriceSnapshot: fmt.Sprintf("audio:%s:%d", targetModel.ID, targetModel.PricePerMinuteNano),
-		LeaseDuration: upstreamTotalTimeout + 5*time.Minute,
-	})
+	available, err := h.db.AvailableBudgetNano(r.Context(), key.UserID)
 	if err != nil {
-		saveTranscriptionFailure(reservationErrorStatus(err), err.Error(), startTime)
-		h.writeReservationError(w, err)
+		saveTranscriptionFailure(budgetErrorStatus(err), err.Error(), startTime)
+		h.writeBudgetError(w, err)
 		return
 	}
-	reservationID = audioReservation.ID
+	if chargeCeiling > available {
+		err = &db.BudgetExceededError{Requested: chargeCeiling, Available: available}
+		saveTranscriptionFailure(http.StatusPaymentRequired, err.Error(), startTime)
+		h.writeBudgetError(w, err)
+		return
+	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, &requestBody)
 	if err != nil {
-		_ = h.db.ReleaseReservation(context.Background(), reservationID)
 		h.writeError(w, http.StatusInternalServerError, "Failed to create upstream request: "+err.Error(), "api_error")
 		return
 	}
@@ -2585,28 +2583,28 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	durationMillis := int64(math.Ceil(durationSec * 1000))
 	costNano, err := money.MulDivCeil(durationMillis, targetModel.PricePerMinuteNano, 60_000)
 	if err != nil {
-		costNano = reservedCost
+		costNano = chargeCeiling
 	}
 
 	// Log request and deduct credits
 	logEntry := db.RequestLog{
-		ID:             requestID,
-		ReservationID:  reservationID,
-		VirtualKeyID:   key.ID,
-		UserID:         key.UserID,
-		ModelID:        targetModel.ID,
-		ProviderID:     targetModel.ProviderID,
-		RequestPath:    "/v1/audio/transcriptions",
-		StatusCode:     resp.StatusCode,
-		InputTokens:    int(durationSec),
-		OutputTokens:   len(strings.Fields(textResult)),
-		Cost:           costNano.USD(),
-		CostNanoUSD:    costNano,
-		LatencyMS:      latencyMs,
-		ClientApp:      getClientAppName(r),
-		RequestedModel: targetModel.Name,
-		Complexity:     "direct",
-		CreatedAt:      time.Now(),
+		ID:                   requestID,
+		ChargeCeilingNanoUSD: chargeCeiling,
+		VirtualKeyID:         key.ID,
+		UserID:               key.UserID,
+		ModelID:              targetModel.ID,
+		ProviderID:           targetModel.ProviderID,
+		RequestPath:          "/v1/audio/transcriptions",
+		StatusCode:           resp.StatusCode,
+		InputTokens:          int(durationSec),
+		OutputTokens:         len(strings.Fields(textResult)),
+		Cost:                 costNano.USD(),
+		CostNanoUSD:          costNano,
+		LatencyMS:            latencyMs,
+		ClientApp:            getClientAppName(r),
+		RequestedModel:       targetModel.Name,
+		Complexity:           "direct",
+		CreatedAt:            time.Now(),
 	}
 
 	h.saveRequestLog(logEntry)

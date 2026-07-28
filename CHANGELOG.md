@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Removed monetary budget reservations and their reconciler, schema links, and Admin UI. Budget windows now use completed request logs only; affordable output limits are calculated before inference, per-user generations queue behind a non-monetary Redis guard, and actual usage/top-up/ledger writes settle atomically.
 - Added idempotent user top-ups (migration `013_topup_idempotency.sql`): `user_topups.idem_key` + partial unique index; `CreateUserTopup` uses `ON CONFLICT DO NOTHING`, so a retried or gift-card-driven top-up can never double-credit. Ordinary admin top-ups (no key) are unaffected.
 - Added an optional scoped service credential (`SERVICE_USERNAME`/`SERVICE_PASSWORD`) accepted only for the platform's `/api/{users,keys,logs,stats,plans,settings,health}` endpoints, never the HTML admin panel. Backward-compatible: unset ⇒ behaviour unchanged; the human admin credential still works everywhere.
 - Added `docs/INTEGRATION.md` (gateway↔platform seam contract, single-sources-of-truth, drift-risk notes) and `docs/PRODUCTION.md` (migration order 010→013, required env, deploy, E2E staging matrix, owner checklist).

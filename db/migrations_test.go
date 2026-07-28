@@ -45,6 +45,8 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"025_model_pricing_tiers.sql",
 		"026_catalog_v2_metadata.sql",
 		"027_disable_automatic_model_routing.sql",
+		"028_release_stranded_authorizations.sql",
+		"029_remove_budget_reservations.sql",
 	} {
 		found := false
 		for _, n := range names {
@@ -59,7 +61,25 @@ func TestMigrationsEmbedded(t *testing.T) {
 	}
 }
 
-func TestExactMoneyMigrationDefinesReservationAndLedgerAuthority(t *testing.T) {
+func TestReservationRemovalMigrationDropsAllRuntimeState(t *testing.T) {
+	data, err := migrationFS.ReadFile("migrations/029_remove_budget_reservations.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(data))
+	for _, required := range []string{
+		"drop table if exists budget_reservations",
+		"alter table request_logs drop column if exists reservation_id",
+		"alter table account_ledger drop column if exists reservation_id",
+		"drop table if exists user_window_charge_state",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("reservation-removal migration missing %q", required)
+		}
+	}
+}
+
+func TestExactMoneyMigrationDefinesLedgerAuthority(t *testing.T) {
 	data, err := migrationFS.ReadFile("migrations/023_exact_money_foundation.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -69,9 +89,7 @@ func TestExactMoneyMigrationDefinesReservationAndLedgerAuthority(t *testing.T) {
 		"budget_nano_usd", "cost_nano_usd",
 		"input_cost_nano_usd_per_million",
 		"amount_nano_usd", "used_nano_usd",
-		"create table if not exists budget_reservations",
 		"create table if not exists account_ledger",
-		"request_id varchar(100) not null unique",
 		"idempotency_key varchar(255) not null unique",
 	} {
 		if !strings.Contains(sql, required) {
