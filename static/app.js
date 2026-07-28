@@ -150,7 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 plans: "Configure plans and define budget window parameters inline",
                 providers: "Manage connection keys and model mapping configurations",
                 logs: "Audit live API request headers, latencies, and token spendings",
-                operations: "Inspect billing admission, settlement, ledger, and usage reset integrity",
+                operations: "Inspect completed usage, ledger, and usage reset integrity",
                 settings: "Customize global gateway variables and system settings"
             };
             pageSubtitle.innerText = subtitles[tab] || "";
@@ -1837,13 +1837,15 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('log-page-prev')?.addEventListener('click', () => loadLogs(state.logPage - 1));
     document.getElementById('log-page-next')?.addEventListener('click', () => loadLogs(state.logPage + 1));
 
-    // Real-time auto-refresh: polls active tab stats/logs every 5 seconds
+    // Poll only the visible live-data tab so background tabs do not add load.
     setInterval(() => {
         const activeTab = document.querySelector('.nav-item.active');
         if (!activeTab) return;
         const tab = activeTab.getAttribute('data-tab');
         if (tab === 'dashboard') {
             loadDashboardStats();
+        } else if (tab === 'users') {
+            loadUsers();
         } else if (tab === 'logs') {
             loadLogs();
         } else if (tab === 'operations') {

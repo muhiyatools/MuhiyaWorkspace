@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gateway/db"
 	"gateway/money"
@@ -2163,11 +2164,10 @@ func boundedOutputLimit(requested int, model *db.Model) int {
 }
 
 func conservativeInputTokenBound(rawBody []byte, estimated int, model *db.Model) int {
-	// BPE/tokenizer vocabularies ultimately encode bytes, so the serialized
-	// request byte length plus provider framing is a conservative upper bound
-	// for text requests. This intentionally prices cache reads as uncached at
-	// admission; settlement applies provider-reported cache discounts.
-	bound := len(rawBody) + 512
+	// Pricing every serialized byte as a token rejected affordable coding
+	// sessions before inference. JSON/code averages several ASCII bytes per
+	// token; non-ASCII text is priced more conservatively per rune.
+	bound := serializedTokenEstimate(rawBody) + 512
 	if estimated > bound {
 		bound = estimated
 	}
@@ -2178,6 +2178,22 @@ func conservativeInputTokenBound(rawBody []byte, estimated int, model *db.Model)
 		return 1
 	}
 	return bound
+}
+
+func serializedTokenEstimate(rawBody []byte) int {
+	asciiBytes := 0
+	nonASCII := 0
+	for len(rawBody) > 0 {
+		if rawBody[0] < utf8.RuneSelf {
+			asciiBytes++
+			rawBody = rawBody[1:]
+			continue
+		}
+		_, size := utf8.DecodeRune(rawBody)
+		nonASCII++
+		rawBody = rawBody[size:]
+	}
+	return (asciiBytes+2)/3 + nonASCII*2
 }
 
 type generationQuoteRequest struct {
