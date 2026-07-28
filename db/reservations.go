@@ -55,6 +55,11 @@ type BudgetReservation struct {
 	UpdatedAt      time.Time
 }
 
+type budgetWindowLimit struct {
+	durationSeconds int
+	budget          money.NanoUSD
+}
+
 // ReserveBudget is the authoritative pre-upstream admission gate. It serializes
 // requests per user and counts both committed spend and live reservations, so
 // concurrent generations cannot each consume the same remaining dollars.
@@ -179,30 +184,21 @@ func availableBudgetNanoTx(ctx context.Context, tx *sql.Tx, userID string, now t
 		return 0, err
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT duration_seconds, budget_nano_usd
-		FROM budget_windows WHERE plan_id = $1 AND budget_nano_usd > 0`, planID)
+	windows, err := budgetWindowLimitsTx(ctx, tx, planID)
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-
+	if len(windows) == 0 {
+		return money.NanoUSD(math.MaxInt64), nil
+	}
 	available := money.NanoUSD(math.MaxInt64)
-	hasWindow := false
-	for rows.Next() {
-		hasWindow = true
-		var duration int
-		var budget int64
-		if err := rows.Scan(&duration, &budget); err != nil {
+	for _, window := range windows {
+		floor := effectiveFloor(windowPeriodStart(assigned, window.durationSeconds, now), reset)
+		spent, err := successfulSpendSinceTx(ctx, tx, userID, floor)
+		if err != nil {
 			return 0, err
 		}
-		floor := effectiveFloor(windowPeriodStart(assigned, duration, now), reset)
-		var spent int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_nano_usd), 0)
-			FROM request_logs WHERE user_id = $1 AND created_at >= $2
-			AND status_code >= 200 AND status_code < 300`, userID, floor).Scan(&spent); err != nil {
-			return 0, err
-		}
-		candidate := money.NanoUSD(budget) - money.NanoUSD(spent) - money.NanoUSD(reserved) + money.NanoUSD(topups)
+		candidate := window.budget - spent - money.NanoUSD(reserved) + money.NanoUSD(topups)
 		if candidate < 0 {
 			candidate = 0
 		}
@@ -210,13 +206,33 @@ func availableBudgetNanoTx(ctx context.Context, tx *sql.Tx, userID string, now t
 			available = candidate
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	if !hasWindow {
-		return money.NanoUSD(math.MaxInt64), nil
-	}
 	return available, nil
+}
+
+func budgetWindowLimitsTx(ctx context.Context, tx *sql.Tx, planID string) ([]budgetWindowLimit, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT duration_seconds, budget_nano_usd
+		FROM budget_windows WHERE plan_id = $1 AND budget_nano_usd > 0`, planID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var windows []budgetWindowLimit
+	for rows.Next() {
+		var window budgetWindowLimit
+		if err := rows.Scan(&window.durationSeconds, &window.budget); err != nil {
+			return nil, err
+		}
+		windows = append(windows, window)
+	}
+	return windows, rows.Err()
+}
+
+func successfulSpendSinceTx(ctx context.Context, tx *sql.Tx, userID string, floor time.Time) (money.NanoUSD, error) {
+	var spent money.NanoUSD
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_nano_usd), 0)
+		FROM request_logs WHERE user_id = $1 AND created_at >= $2
+		AND status_code >= 200 AND status_code < 300`, userID, floor).Scan(&spent)
+	return spent, err
 }
 
 // SettleReservationAndLog atomically writes usage, consumes top-ups when the
