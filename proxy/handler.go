@@ -729,7 +729,13 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	requestedOutput := requestedOpenAIOutput(&oaiReq, targetModel)
+	requestID := correlationID(r)
 	if err := h.limiter.CheckLimit(key, promptTokens+requestedOutput); err != nil {
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: targetModel, provider: provider,
+			requestID: requestID, requestedModel: oaiReq.Model,
+			inputTokens: promptTokens, status: http.StatusTooManyRequests, err: err,
+		})
 		h.writeLimitError(w, err)
 		return
 	}
@@ -751,7 +757,6 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 	resolvedProvider := *provider
 	resolvedProvider.BaseURL = targetURL
 
-	requestID := correlationID(r)
 	reservation, allowedOutput, err := h.reserveGeneration(
 		r.Context(),
 		key,
@@ -761,6 +766,11 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		requestedOutput,
 	)
 	if err != nil {
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: targetModel, provider: provider,
+			requestID: requestID, requestedModel: oaiReq.Model,
+			inputTokens: promptTokens, status: reservationErrorStatus(err), err: err,
+		})
 		h.writeReservationError(w, err)
 		return
 	}
@@ -871,7 +881,13 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	}
 	promptTokens := estimateTokens(textBuilder.String())
 	requestedOutput := boundedOutputLimit(anthReq.MaxTokens, targetModel)
+	requestID := correlationID(r)
 	if err := h.limiter.CheckLimit(key, promptTokens+requestedOutput); err != nil {
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: targetModel, provider: provider,
+			requestID: requestID, requestedModel: anthReq.Model,
+			inputTokens: promptTokens, status: http.StatusTooManyRequests, err: err,
+		})
 		h.writeLimitError(w, err)
 		return
 	}
@@ -893,7 +909,6 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 	resolvedProvider := *provider
 	resolvedProvider.BaseURL = targetURL
 
-	requestID := correlationID(r)
 	reservation, allowedOutput, err := h.reserveGeneration(
 		r.Context(),
 		key,
@@ -903,6 +918,11 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		requestedOutput,
 	)
 	if err != nil {
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: targetModel, provider: provider,
+			requestID: requestID, requestedModel: anthReq.Model,
+			inputTokens: promptTokens, status: reservationErrorStatus(err), err: err,
+		})
 		h.writeReservationError(w, err)
 		return
 	}
@@ -2210,6 +2230,44 @@ func (h *ProxyHandler) writeReservationError(w http.ResponseWriter, err error) {
 	h.serviceUnavailableResponse(w, "budget admission failed", err)
 }
 
+func reservationErrorStatus(err error) int {
+	if errors.Is(err, db.ErrBudgetExceeded) {
+		return http.StatusPaymentRequired
+	}
+	return http.StatusServiceUnavailable
+}
+
+type admissionFailure struct {
+	request        *http.Request
+	key            *db.VirtualKey
+	model          *db.Model
+	provider       *db.Provider
+	requestID      string
+	requestedModel string
+	inputTokens    int
+	status         int
+	err            error
+}
+
+func (h *ProxyHandler) saveAdmissionFailure(failure admissionFailure) {
+	entry := db.RequestLog{
+		ID:             failure.requestID,
+		VirtualKeyID:   failure.key.ID,
+		UserID:         failure.key.UserID,
+		ModelID:        failure.model.ID,
+		ProviderID:     failure.provider.ID,
+		RequestPath:    failure.request.URL.Path,
+		StatusCode:     failure.status,
+		InputTokens:    failure.inputTokens,
+		ErrorMessage:   failure.err.Error(),
+		ClientApp:      getClientAppName(failure.request),
+		RequestedModel: failure.requestedModel,
+		Complexity:     "admission",
+		CreatedAt:      time.Now().UTC(),
+	}
+	h.saveRequestLog(entry)
+}
+
 func rewriteOpenAIOutputLimit(raw []byte, limit int) ([]byte, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -2282,6 +2340,13 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 	// (Account suspension is enforced earlier, in authenticateVirtualKey, so it
 	// cannot be missed by a handler again.)
 	if err := h.limiter.CheckLimit(key, estimateTokens(modelName)); err != nil {
+		h.saveRequestLog(db.RequestLog{
+			ID: requestID, VirtualKeyID: key.ID, UserID: key.UserID,
+			ModelID: targetModel.ID, ProviderID: targetModel.ProviderID,
+			RequestPath: r.URL.Path, StatusCode: http.StatusTooManyRequests,
+			ErrorMessage: err.Error(), ClientApp: getClientAppName(r),
+			RequestedModel: modelName, Complexity: "admission", CreatedAt: time.Now().UTC(),
+		})
 		h.writeLimitError(w, err)
 		return
 	}
@@ -2423,6 +2488,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		LeaseDuration: upstreamTotalTimeout + 5*time.Minute,
 	})
 	if err != nil {
+		saveTranscriptionFailure(reservationErrorStatus(err), err.Error(), startTime)
 		h.writeReservationError(w, err)
 		return
 	}

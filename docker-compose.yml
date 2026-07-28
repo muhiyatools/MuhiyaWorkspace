@@ -18,7 +18,9 @@ services:
       # of silently exposing the admin dashboard with a guessable password.
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - DEV_MODE=${DEV_MODE:-}
-      - REQUIRE_REDIS=${REQUIRE_REDIS:-}
+      # Production defaults to fail-closed distributed limits. Set explicitly
+      # to false only for a single-instance local development deployment.
+      - REQUIRE_REDIS=${REQUIRE_REDIS:-true}
       - PROVIDER_KEY_ENCRYPTION_KEY=${PROVIDER_KEY_ENCRYPTION_KEY:-}
       # HMAC key for the stable, opaque per-user upstream identifier (DeepSeek
       # user_id). Unset => identity injection is DISABLED (safe default) and all

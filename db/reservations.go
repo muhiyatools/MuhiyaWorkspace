@@ -41,18 +41,18 @@ type ReserveBudgetRequest struct {
 }
 
 type BudgetReservation struct {
-	ID             string
-	RequestID      string
-	UserID         string
-	VirtualKeyID   string
-	ModelID        string
-	Amount         money.NanoUSD
-	Settled        money.NanoUSD
-	Status         string
-	PriceSnapshot  string
-	LeaseExpiresAt time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             string        `json:"id"`
+	RequestID      string        `json:"request_id"`
+	UserID         string        `json:"user_id"`
+	VirtualKeyID   string        `json:"virtual_key_id"`
+	ModelID        string        `json:"model_id"`
+	Amount         money.NanoUSD `json:"amount_nano_usd"`
+	Settled        money.NanoUSD `json:"settled_nano_usd"`
+	Status         string        `json:"status"`
+	PriceSnapshot  string        `json:"price_snapshot_id"`
+	LeaseExpiresAt time.Time     `json:"lease_expires_at"`
+	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      time.Time     `json:"updated_at"`
 }
 
 type budgetWindowLimit struct {
@@ -340,33 +340,24 @@ func marginalTopupChargeTx(ctx context.Context, tx *sql.Tx, userID string, cost 
 		Scan(&planID, &assigned, &reset); err != nil {
 		return 0, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT duration_seconds, budget_nano_usd
-		FROM budget_windows WHERE plan_id = $1 AND budget_nano_usd > 0`, planID)
+	windows, err := budgetWindowLimitsTx(ctx, tx, planID)
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
 	var maximum money.NanoUSD
-	for rows.Next() {
-		var duration int
-		var budget int64
-		if err := rows.Scan(&duration, &budget); err != nil {
+	for _, window := range windows {
+		floor := effectiveFloor(windowPeriodStart(assigned, window.durationSeconds, at), reset)
+		spent, err := successfulSpendSinceTx(ctx, tx, userID, floor)
+		if err != nil {
 			return 0, err
 		}
-		floor := effectiveFloor(windowPeriodStart(assigned, duration, at), reset)
-		var spent int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_nano_usd), 0)
-			FROM request_logs WHERE user_id = $1 AND created_at >= $2
-			AND status_code >= 200 AND status_code < 300`, userID, floor).Scan(&spent); err != nil {
-			return 0, err
-		}
-		before := money.Max(0, money.NanoUSD(spent)-money.NanoUSD(budget))
-		after := money.Max(0, money.NanoUSD(spent)+cost-money.NanoUSD(budget))
+		before := money.Max(0, spent-window.budget)
+		after := money.Max(0, spent+cost-window.budget)
 		if delta := after - before; delta > maximum {
 			maximum = delta
 		}
 	}
-	return maximum, rows.Err()
+	return maximum, nil
 }
 
 func deductNanoFromTopupsTx(ctx context.Context, tx *sql.Tx, userID string, amount money.NanoUSD) error {

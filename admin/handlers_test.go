@@ -229,7 +229,7 @@ func TestValidateModelShape(t *testing.T) {
 		return db.Model{
 			Name:                 "deepseek-v4-flash",
 			TargetModel:          "deepseek/deepseek-chat",
-			RoutingTier:          "simple",
+			RoutingTier:          "none",
 			InputCostPerMillion:  0.14,
 			OutputCostPerMillion: 0.28,
 		}
@@ -247,7 +247,6 @@ func TestValidateModelShape(t *testing.T) {
 		{"leading dash", func(m *db.Model) { m.Name = "-x" }, http.StatusBadRequest},
 		{"slug ok", func(m *db.Model) { m.Name = "qwen3.5-9b:free" }, 0},
 		{"missing target", func(m *db.Model) { m.TargetModel = "" }, http.StatusBadRequest},
-		{"bad tier", func(m *db.Model) { m.RoutingTier = "extreme" }, http.StatusBadRequest},
 		{"empty tier ok", func(m *db.Model) { m.RoutingTier = "" }, 0},
 		{"negative input price", func(m *db.Model) { m.InputCostPerMillion = -1 }, http.StatusBadRequest},
 		{"negative per-minute", func(m *db.Model) { m.PricePerMinute = -0.01 }, http.StatusBadRequest},
@@ -358,7 +357,6 @@ func TestHandleModelsRejectsBadShapePreDB(t *testing.T) {
 		{"empty name", `{"target_model":"x","routing_tier":"simple"}`},
 		{"uppercase name", `{"name":"BadName","target_model":"x"}`},
 		{"missing target", `{"name":"good-name"}`},
-		{"bad tier", `{"name":"good-name","target_model":"x","routing_tier":"extreme"}`},
 		{"negative price", `{"name":"good-name","target_model":"x","input_cost_per_million":-1}`},
 	}
 	for _, tc := range cases {

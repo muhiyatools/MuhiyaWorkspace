@@ -43,8 +43,8 @@
                 <a href="#" class="nav-item" data-tab="logs">
                     <i class="fa-solid fa-terminal"></i> <span>Request Logs</span>
                 </a>
-                <a href="#" class="nav-item" data-tab="router">
-                    <i class="fa-solid fa-route"></i> <span>AI Router</span>
+                <a href="#" class="nav-item" data-tab="operations">
+                    <i class="fa-solid fa-receipt"></i> <span>Billing Operations</span>
                 </a>
                 <a href="#" class="nav-item" data-tab="settings">
                     <i class="fa-solid fa-sliders"></i> <span>Settings</span>
@@ -310,7 +310,6 @@
                                     <th>Output Cost / 1M</th>
                                     <th>Cache Read / 1M</th>
                                     <th>Cache Write / 1M</th>
-                                    <th>Routing Tier</th>
                                     <th>Status</th>
                                     <th>Actions</th>
                                 </tr>
@@ -353,7 +352,7 @@
                     <table id="logs-table">
                         <thead>
                             <tr>
-                                <th>Time</th>
+                                <th>Date &amp; time</th>
                                 <th>Virtual Key</th>
                                 <th>Owner User</th>
                                 <th>Client App</th>
@@ -371,6 +370,24 @@
                             <!-- Populated dynamically -->
                         </tbody>
                     </table>
+                </div>
+                <div class="log-pagination" id="log-pagination" aria-label="Request log pagination">
+                    <div class="log-page-summary" id="log-page-summary">No records</div>
+                    <div class="log-page-controls">
+                        <label for="log-page-size">Rows</label>
+                        <select id="log-page-size">
+                            <option value="25">25</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary btn-sm" id="log-page-prev">
+                            <i class="fa-solid fa-chevron-left"></i> Previous
+                        </button>
+                        <span id="log-page-label">Page 1 of 1</span>
+                        <button type="button" class="btn btn-secondary btn-sm" id="log-page-next">
+                            Next <i class="fa-solid fa-chevron-right"></i>
+                        </button>
+                    </div>
                 </div>
             </section>
 
@@ -395,79 +412,42 @@
                 </div>
             </section>
  
-            <!-- TAB: AI Router -->
-            <section id="tab-router" class="tab-content">
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon req"><i class="fa-solid fa-route"></i></div>
-                        <div class="stat-info">
-                            <span class="stat-label">Router Requests</span>
-                            <span class="stat-value" id="router-stat-requests">0</span>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon cost"><i class="fa-solid fa-piggy-bank"></i></div>
-                        <div class="stat-info">
-                            <span class="stat-label">Credit Savings (USD)</span>
-                            <span class="stat-value" id="router-stat-savings">$0.00</span>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon status"><i class="fa-solid fa-percent"></i></div>
-                        <div class="stat-info">
-                            <span class="stat-label">Router Success Rate</span>
-                            <span class="stat-value" id="router-stat-success">100.0%</span>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon latency"><i class="fa-solid fa-shield-heart"></i></div>
-                        <div class="stat-info">
-                            <span class="stat-label">Failover Recoveries</span>
-                            <span class="stat-value" id="router-stat-failovers">0</span>
-                        </div>
+            <!-- TAB: Billing Operations -->
+            <section id="tab-operations" class="tab-content">
+                <div class="section-actions">
+                    <div>
+                        <h2>Billing Operations</h2>
+                        <p class="text-muted">Live admission, settlement, ledger, and reset state.</p>
                     </div>
                 </div>
-
-                <!-- Simplified Dynamic Tier Configurations Panel -->
-                <div class="chart-container" style="margin-top: 2rem;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                        <h3><i class="fa-solid fa-sliders"></i> Active Routing Tiers Configuration</h3>
-                        <span class="text-muted" style="font-size: 0.8rem;">Models are evaluated and sorted by cost (cheaper first) per tier</span>
-                    </div>
-                    <div class="router-tiers-grid">
-                        <!-- Simple Tier Card -->
-                        <div class="tier-column-card simple">
-                            <div class="tier-column-header">
-                                <span class="tier-badge simple">SIMPLE TIER</span>
-                                <p class="tier-column-desc">Quick conversational requests and short prompts.</p>
-                            </div>
-                            <div class="tier-models-list" id="tier-list-simple">
-                                <!-- Populated dynamically -->
-                            </div>
+                <div class="operations-stack">
+                    <article class="operations-panel">
+                        <div class="operations-heading"><h3>Budget reservations</h3><span>Admission through settlement</span></div>
+                        <div class="table-container">
+                            <table id="operations-reservations-table">
+                                <thead><tr><th>Created</th><th>Request</th><th>User</th><th>Model</th><th>Reserved</th><th>Settled</th><th>Status</th><th>Lease</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
                         </div>
-
-                        <!-- Medium Tier Card -->
-                        <div class="tier-column-card medium">
-                            <div class="tier-column-header">
-                                <span class="tier-badge medium">MEDIUM TIER</span>
-                                <p class="tier-column-desc">General research, standard lengths, and coding tasks.</p>
-                            </div>
-                            <div class="tier-models-list" id="tier-list-medium">
-                                <!-- Populated dynamically -->
-                            </div>
+                    </article>
+                    <article class="operations-panel">
+                        <div class="operations-heading"><h3>Account ledger</h3><span>Immutable settlement debits</span></div>
+                        <div class="table-container">
+                            <table id="operations-ledger-table">
+                                <thead><tr><th>Created</th><th>User</th><th>Request</th><th>Reservation</th><th>Kind</th><th>Amount</th><th>Idempotency key</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
                         </div>
-
-                        <!-- Hard Tier Card -->
-                        <div class="tier-column-card hard">
-                            <div class="tier-column-header">
-                                <span class="tier-badge hard">HARD TIER</span>
-                                <p class="tier-column-desc">Complex programming, deep reasoning, or very long prompts.</p>
-                            </div>
-                            <div class="tier-models-list" id="tier-list-hard">
-                                <!-- Populated dynamically -->
-                            </div>
+                    </article>
+                    <article class="operations-panel">
+                        <div class="operations-heading"><h3>Usage reset history</h3><span>Administrative audit trail</span></div>
+                        <div class="table-container">
+                            <table id="operations-resets-table">
+                                <thead><tr><th>Created</th><th>Scope</th><th>User</th><th>Note</th><th>Reset ID</th></tr></thead>
+                                <tbody></tbody>
+                            </table>
                         </div>
-                    </div>
+                    </article>
                 </div>
             </section>
         </main>
@@ -734,15 +714,64 @@
                     <label for="model-description">Description</label>
                     <textarea id="model-description" placeholder="Brief model description..." rows="2" style="background:#09090b; border:1px solid var(--panel-border); border-radius:6px; padding:0.65rem 0.85rem; color:#fff; font-family:var(--font-body); font-size:0.85rem; outline:none; transition:var(--transition); resize:vertical;"></textarea>
                 </div>
-                <div class="form-group">
-                    <label for="model-routing-tier">Router Routing Tier</label>
-                    <select id="model-routing-tier" required>
-                        <option value="none">None / Direct Only</option>
-                        <option value="simple">Simple</option>
-                        <option value="medium">Medium</option>
-                        <option value="hard">Hard</option>
-                    </select>
-                </div>
+                <fieldset class="model-catalog-fieldset">
+                    <legend>MuhiyaCode catalog contract</legend>
+                    <div class="form-group-row">
+                        <div class="form-group">
+                            <label for="model-provider-family">Provider family</label>
+                            <input type="text" id="model-provider-family" placeholder="minimax-openrouter">
+                        </div>
+                        <div class="form-group">
+                            <label for="model-adapter-version">Adapter version</label>
+                            <input type="text" id="model-adapter-version" value="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="model-compatibility-epoch">Compatibility epoch</label>
+                            <input type="number" min="1" id="model-compatibility-epoch" value="1">
+                        </div>
+                    </div>
+                    <div class="form-group-row">
+                        <div class="form-group">
+                            <label for="model-health">Catalog health</label>
+                            <select id="model-health">
+                                <option value="healthy">Healthy</option>
+                                <option value="degraded">Degraded</option>
+                                <option value="unavailable">Unavailable</option>
+                                <option value="unknown">Unknown</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="model-tags">Tags (comma-separated)</label>
+                            <input type="text" id="model-tags" placeholder="muhiyacode, coding">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-supported-parameters">Supported parameters (comma-separated)</label>
+                        <input type="text" id="model-supported-parameters" placeholder="model, messages, stream, tools, tool_choice, max_tokens">
+                    </div>
+                    <div class="form-group">
+                        <label for="model-cache-contract">Cache contract (JSON)</label>
+                        <textarea id="model-cache-contract" rows="3" spellcheck="false" placeholder='{"prefix_order":"system-tools-history-tail","supports_prompt_cache":true}'></textarea>
+                    </div>
+                    <div class="form-group-row">
+                        <div class="form-group">
+                            <label for="model-deprecated-at">Deprecated after (optional)</label>
+                            <input type="datetime-local" id="model-deprecated-at">
+                        </div>
+                        <div class="form-group">
+                            <label for="model-deprecation-message">Deprecation message</label>
+                            <input type="text" id="model-deprecation-message" placeholder="Replacement model and migration date">
+                        </div>
+                    </div>
+                </fieldset>
+                <fieldset class="model-catalog-fieldset">
+                    <legend>Long-context pricing tiers</legend>
+                    <p class="text-muted model-tier-help">Each tier replaces all four base rates when input tokens exceed its threshold.</p>
+                    <div id="model-pricing-tiers"></div>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-add-pricing-tier">
+                        <i class="fa-solid fa-plus"></i> Add pricing tier
+                    </button>
+                </fieldset>
                 <div class="form-group" id="model-status-group" style="display: none;">
                     <label for="model-status">Model Status</label>
                     <select id="model-status">

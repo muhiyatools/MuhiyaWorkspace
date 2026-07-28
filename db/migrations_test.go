@@ -44,6 +44,7 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"024_budget_reservation_link.sql",
 		"025_model_pricing_tiers.sql",
 		"026_catalog_v2_metadata.sql",
+		"027_disable_automatic_model_routing.sql",
 	} {
 		found := false
 		for _, n := range names {

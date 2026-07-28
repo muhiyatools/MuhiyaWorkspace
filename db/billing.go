@@ -53,8 +53,16 @@ func (db *DB) ResetUserUsage(userID, note string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec("UPDATE users SET usage_reset_at = now() WHERE id = $1", userID); err != nil {
+	updateResult, err := tx.Exec("UPDATE users SET usage_reset_at = now() WHERE id = $1", userID)
+	if err != nil {
 		return err
+	}
+	affected, err := updateResult.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
 	}
 	if _, err := tx.Exec(
 		"INSERT INTO usage_resets (id, scope, user_id, note) VALUES ($1, 'user', $2, $3)",

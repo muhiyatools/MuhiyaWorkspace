@@ -3,8 +3,10 @@ package admin
 import (
 	"bytes"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -18,11 +20,17 @@ import (
 )
 
 type AdminAPI struct {
-	db *db.DB
+	db         *db.DB
+	limitCache limitCacheInvalidator
 }
 
-func RegisterRoutes(mux *http.ServeMux, database *db.DB) {
-	api := &AdminAPI{db: database}
+type limitCacheInvalidator interface {
+	InvalidateUser(userID string)
+	InvalidateAll()
+}
+
+func RegisterRoutes(mux *http.ServeMux, database *db.DB, limits limitCacheInvalidator) {
+	api := &AdminAPI{db: database, limitCache: limits}
 
 	mux.HandleFunc("/api/stats", api.handleStats)
 	mux.HandleFunc("/api/users", api.handleUsers)
@@ -36,6 +44,7 @@ func RegisterRoutes(mux *http.ServeMux, database *db.DB) {
 	mux.HandleFunc("/api/coverage", api.handleCoverage)
 	mux.HandleFunc("/api/settings", api.handleSettings)
 	mux.HandleFunc("/api/logs", api.handleLogs)
+	mux.HandleFunc("/api/operations", api.handleOperations)
 	mux.HandleFunc("/api/users/topups", api.handleUserTopups)
 	mux.HandleFunc("/api/users/reset-usage", api.handleResetUsage)
 }
@@ -72,6 +81,10 @@ func (api *AdminAPI) handleResetUsage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.ResetUserUsage(body.UserID, body.Note); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				api.errorResponse(w, http.StatusNotFound, "User not found")
+				return
+			}
 			api.dbErrorResponse(w, err)
 			return
 		}
@@ -88,7 +101,7 @@ func (api *AdminAPI) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := api.db.GetDashboardStats()
 	if err != nil {
-		api.errorResponse(w, http.StatusInternalServerError, err.Error())
+		api.dbErrorResponse(w, err)
 		return
 	}
 	api.jsonResponse(w, http.StatusOK, stats)
@@ -157,6 +170,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateUser(u.ID)
 		api.jsonResponse(w, http.StatusCreated, u)
 
 	case http.MethodPut:
@@ -208,6 +222,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateUser(u.ID)
 		api.jsonResponse(w, http.StatusOK, u)
 
 	case http.MethodDelete:
@@ -220,6 +235,7 @@ func (api *AdminAPI) handleUsers(w http.ResponseWriter, r *http.Request) {
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateUser(id)
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
 
 	default:
@@ -247,12 +263,17 @@ func (api *AdminAPI) handlePlans(w http.ResponseWriter, r *http.Request) {
 		if p.ID == "" {
 			p.ID = "plan-" + generateRandomString(8)
 		}
+		if message := validatePlan(p); message != "" {
+			api.errorResponse(w, http.StatusBadRequest, message)
+			return
+		}
 		p.CreatedAt = time.Now()
 
 		if err := api.db.CreatePlan(p); err != nil {
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateAllLimits()
 		api.jsonResponse(w, http.StatusCreated, p)
 
 	case http.MethodPut:
@@ -265,10 +286,19 @@ func (api *AdminAPI) handlePlans(w http.ResponseWriter, r *http.Request) {
 			api.errorResponse(w, http.StatusBadRequest, "Plan ID is required")
 			return
 		}
+		if message := validatePlan(p); message != "" {
+			api.errorResponse(w, http.StatusBadRequest, message)
+			return
+		}
 		if err := api.db.UpdatePlan(p); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				api.errorResponse(w, http.StatusNotFound, "Plan not found")
+				return
+			}
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateAllLimits()
 		api.jsonResponse(w, http.StatusOK, p)
 
 	case http.MethodDelete:
@@ -278,13 +308,65 @@ func (api *AdminAPI) handlePlans(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.DeletePlan(id); err != nil {
-			api.dbErrorResponse(w, err)
+			switch {
+			case errors.Is(err, db.ErrPlanInUse):
+				api.errorResponse(w, http.StatusConflict, "Plan is assigned to users. Reassign those users before deleting it.")
+			case errors.Is(err, sql.ErrNoRows):
+				api.errorResponse(w, http.StatusNotFound, "Plan not found")
+			default:
+				api.dbErrorResponse(w, err)
+			}
 			return
 		}
+		api.invalidateAllLimits()
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
 
 	default:
 		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func validatePlan(plan db.Plan) string {
+	if !validID(plan.ID) {
+		return "Invalid plan ID"
+	}
+	if !validName(plan.Name) {
+		return "Invalid plan name"
+	}
+	if plan.RPMLimit < 0 || plan.TPMLimit < 0 {
+		return "RPM and TPM limits cannot be negative"
+	}
+	seenDurations := make(map[int]bool, len(plan.BudgetWindows))
+	for _, window := range plan.BudgetWindows {
+		if window.ID != "" && !validID(window.ID) {
+			return "Invalid budget window ID"
+		}
+		if !validName(window.Name) {
+			return "Every budget window requires a valid name"
+		}
+		if window.DurationSeconds <= 0 {
+			return "Budget window duration must be greater than zero"
+		}
+		if window.BudgetUSD < 0 || window.BudgetNanoUSD < 0 {
+			return "Budget window amount cannot be negative"
+		}
+		if seenDurations[window.DurationSeconds] {
+			return "Budget windows cannot use duplicate durations"
+		}
+		seenDurations[window.DurationSeconds] = true
+	}
+	return ""
+}
+
+func (api *AdminAPI) invalidateUser(userID string) {
+	if api.limitCache != nil {
+		api.limitCache.InvalidateUser(userID)
+	}
+}
+
+func (api *AdminAPI) invalidateAllLimits() {
+	if api.limitCache != nil {
+		api.limitCache.InvalidateAll()
 	}
 }
 
@@ -321,6 +403,7 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateAllLimits()
 		api.jsonResponse(w, http.StatusCreated, bw)
 
 	case http.MethodPut:
@@ -337,6 +420,7 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateAllLimits()
 		api.jsonResponse(w, http.StatusOK, bw)
 
 	case http.MethodDelete:
@@ -349,6 +433,7 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 			api.dbErrorResponse(w, err)
 			return
 		}
+		api.invalidateAllLimits()
 		api.jsonResponse(w, http.StatusOK, map[string]string{"message": "deleted"})
 
 	default:
@@ -590,15 +675,14 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 // --- Models Handler ---
 
 var modelNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]*$`)
-var validRoutingTiers = map[string]bool{"simple": true, "medium": true, "hard": true, "none": true}
 
 // validateModel enforces the invariants an operator can otherwise violate by
 // hand: a routable slug name, no duplicate names, a real provider, a target
-// model, a known tier, and non-negative numbers. It returns a non-zero errCode
+// model, and non-negative numbers. It returns a non-zero errCode
 // (with message) to reject, or a list of non-blocking warnings that the admin
 // UI surfaces as a toast (e.g. "$0 and active", "provider inactive"). selfID is
 // the row being updated (excluded from the duplicate check); "" on create.
-// validateModelShape holds the DB-free invariants (name format, target, tier,
+// validateModelShape holds the DB-free invariants (name format, target,
 // non-negative numbers) so they are unit-testable without a database. Returns a
 // non-zero errCode with message on rejection.
 func validateModelShape(m *db.Model) (errCode int, errMsg string) {
@@ -611,13 +695,6 @@ func validateModelShape(m *db.Model) (errCode int, errMsg string) {
 	}
 	if strings.TrimSpace(m.TargetModel) == "" {
 		return http.StatusBadRequest, "Target model (the upstream provider model id) is required."
-	}
-	tier := m.RoutingTier
-	if tier == "" {
-		tier = "none"
-	}
-	if !validRoutingTiers[tier] {
-		return http.StatusBadRequest, "Routing tier must be one of: simple, medium, hard, none."
 	}
 	if m.InputCostPerMillion < 0 || m.OutputCostPerMillion < 0 ||
 		m.CacheReadCostPerMillion < 0 || m.CacheWriteCostPerMillion < 0 || m.PricePerMinute < 0 {
@@ -660,10 +737,6 @@ func (api *AdminAPI) validateModel(m *db.Model, selfID string) (warnings []strin
 		return nil, code, msg
 	}
 	name := strings.TrimSpace(m.Name)
-	tier := m.RoutingTier
-	if tier == "" {
-		tier = "none"
-	}
 
 	// Duplicate name (case-insensitive), excluding the row being updated.
 	all, err := api.db.ListModels()
@@ -688,10 +761,7 @@ func (api *AdminAPI) validateModel(m *db.Model, selfID string) (warnings []strin
 	// Non-blocking warnings — the model saves, but the operator is told why it
 	// might not behave as expected.
 	if m.Status == "active" && !m.Transcribe && m.InputCostPerMillion == 0 && m.OutputCostPerMillion == 0 {
-		warnings = append(warnings, "This model is $0 and active — free-tier rate limits may apply. It is kept out of default text routing (used only for vision/fallback).")
-	}
-	if tier == "none" && !m.Transcribe {
-		warnings = append(warnings, "Routing tier is 'none' — this model is reachable only via capability/fallback routing, not a primary tier match.")
+		warnings = append(warnings, "This model is $0 and active — upstream free-tier rate limits may apply.")
 	}
 	if prov.Status != "active" {
 		warnings = append(warnings, "Provider '"+m.ProviderID+"' is inactive — this model cannot serve traffic until the provider is activated.")
@@ -718,9 +788,7 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 		if m.ID == "" {
 			m.ID = "model-" + generateRandomString(8)
 		}
-		if m.RoutingTier == "" {
-			m.RoutingTier = "none"
-		}
+		m.RoutingTier = "none"
 		// Honor an explicit status if the form sent one; default to active so the
 		// common "add and use immediately" flow stays frictionless.
 		if m.Status == "" {
@@ -734,6 +802,10 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.CreateModel(m); err != nil {
+			if errors.Is(err, db.ErrInvalidModelConfig) {
+				api.errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			api.dbErrorResponse(w, err)
 			return
 		}
@@ -775,9 +847,7 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 		// Identity/creation are immutable via update.
 		merged.ID = existing.ID
 		merged.CreatedAt = existing.CreatedAt
-		if merged.RoutingTier == "" {
-			merged.RoutingTier = "none"
-		}
+		merged.RoutingTier = "none"
 		if merged.Status == "" {
 			merged.Status = existing.Status
 		}
@@ -788,6 +858,10 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := api.db.UpdateModel(merged); err != nil {
+			if errors.Is(err, db.ErrInvalidModelConfig) {
+				api.errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			api.dbErrorResponse(w, err)
 			return
 		}
@@ -1231,28 +1305,68 @@ func (api *AdminAPI) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 50
-	offset := 0
+	limit := positiveQueryInt(r, "limit", 50, 200)
+	offset := nonnegativeQueryInt(r, "offset", 0, 1_000_000_000)
 	userID := r.URL.Query().Get("user_id")
 	keyID := r.URL.Query().Get("virtual_key_id")
-
-	if lStr := r.URL.Query().Get("limit"); lStr != "" {
-		if val, err := strconv.Atoi(lStr); err == nil {
-			limit = val
+	if r.URL.Query().Has("page") || r.URL.Query().Has("page_size") {
+		page := positiveQueryInt(r, "page", 1, 1_000_000)
+		pageSize := positiveQueryInt(r, "page_size", 50, 200)
+		status := r.URL.Query().Get("status")
+		if status != "" && status != "all" && status != "success" && status != "error" {
+			api.errorResponse(w, http.StatusBadRequest, "status must be all, success, or error")
+			return
 		}
-	}
-	if oStr := r.URL.Query().Get("offset"); oStr != "" {
-		if val, err := strconv.Atoi(oStr); err == nil {
-			offset = val
+		logPage, err := api.db.ListRequestLogsPage(db.RequestLogQuery{
+			Limit: pageSize, Offset: (page - 1) * pageSize,
+			UserID: userID, KeyID: keyID,
+			Search: strings.TrimSpace(r.URL.Query().Get("search")),
+			Status: status, ModelID: r.URL.Query().Get("model"),
+		})
+		if err != nil {
+			api.dbErrorResponse(w, err)
+			return
 		}
+		api.jsonResponse(w, http.StatusOK, logPage)
+		return
 	}
-
 	list, err := api.db.ListRequestLogs(limit, offset, userID, keyID)
 	if err != nil {
-		api.errorResponse(w, http.StatusInternalServerError, err.Error())
+		api.dbErrorResponse(w, err)
 		return
 	}
 	api.jsonResponse(w, http.StatusOK, list)
+}
+
+func (api *AdminAPI) handleOperations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		api.errorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	operations, err := api.db.ListAdminOperations(positiveQueryInt(r, "limit", 100, 200))
+	if err != nil {
+		api.dbErrorResponse(w, err)
+		return
+	}
+	api.jsonResponse(w, http.StatusOK, operations)
+}
+
+func positiveQueryInt(r *http.Request, name string, fallback, maximum int) int {
+	raw := r.URL.Query().Get(name)
+	parsed, err := strconv.Atoi(raw)
+	if raw == "" || err != nil || parsed < 1 || parsed > maximum {
+		return fallback
+	}
+	return parsed
+}
+
+func nonnegativeQueryInt(r *http.Request, name string, fallback, maximum int) int {
+	raw := r.URL.Query().Get(name)
+	parsed, err := strconv.Atoi(raw)
+	if raw == "" || err != nil || parsed < 0 || parsed > maximum {
+		return fallback
+	}
+	return parsed
 }
 
 // --- Helpers ---

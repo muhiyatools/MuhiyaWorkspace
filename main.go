@@ -229,7 +229,7 @@ func main() {
 
 	// Instantiate actual sub-routers now that DB is connected
 	apiMux := http.NewServeMux()
-	admin.RegisterRoutes(apiMux, database)
+	admin.RegisterRoutes(apiMux, database, limiter)
 	apiMuxHandler = serviceOrAdminAuth(adminUser, adminPass, svcUser, svcPass, apiMux)
 
 	adminMux := http.NewServeMux()

@@ -15,7 +15,7 @@ INSERT INTO models (
     2.19, 
     0.14, 
     0.55, 
-    'active', 
+    'inactive',
     'none', 
     'llm', 
     0.0, 

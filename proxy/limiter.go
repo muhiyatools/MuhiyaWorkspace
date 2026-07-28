@@ -112,6 +112,18 @@ func (c *limiterDefsCache) set(userID string, e limiterDefsEntry) {
 	c.entries[userID] = e
 }
 
+func (c *limiterDefsCache) delete(userID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, userID)
+}
+
+func (c *limiterDefsCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]limiterDefsEntry)
+}
+
 type RateLimiter struct {
 	mu           sync.RWMutex
 	limiters     map[string]*KeyLimiter
@@ -179,6 +191,17 @@ func NewRateLimiter(database *db.DB) *RateLimiter {
 	go rl.sweepInMemoryLimiters()
 
 	return rl
+}
+
+// InvalidateUser and InvalidateAll let the Admin API make plan/user mutations
+// effective on the very next request instead of waiting for the short
+// definition-cache TTL. Monetary spend and reservation state are never cached.
+func (rl *RateLimiter) InvalidateUser(userID string) {
+	rl.defs.delete(userID)
+}
+
+func (rl *RateLimiter) InvalidateAll() {
+	rl.defs.clear()
 }
 
 func isTruthy(v string) bool {

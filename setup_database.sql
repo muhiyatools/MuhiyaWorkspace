@@ -161,9 +161,9 @@ ON CONFLICT (id) DO NOTHING;
 
 -- 4. Providers
 INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) VALUES
-('openai', 'OpenAI', 'mock-openai-key', 'https://api.openai.com/v1', '', 'active'),
-('anthropic', 'Anthropic', 'mock-anthropic-key', '', 'https://api.anthropic.com', 'active'),
-('deepseek', 'DeepSeek', 'mock-deepseek-key', 'https://api.deepseek.com', 'https://api.deepseek.com/anthropic', 'active')
+('openai', 'OpenAI', '', 'https://api.openai.com/v1', '', 'inactive'),
+('anthropic', 'Anthropic', '', '', 'https://api.anthropic.com', 'inactive'),
+('deepseek', 'DeepSeek', '', 'https://api.deepseek.com', 'https://api.deepseek.com/anthropic', 'inactive')
 ON CONFLICT (id) DO NOTHING;
 
 -- 5. Base Models
@@ -174,12 +174,12 @@ INSERT INTO models (
     status, routing_tier, model_type, price_per_minute, transcribe,
     context_window, max_output_tokens, display_name, description, owned_by
 ) VALUES
-('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'active', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai'),
-('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'active', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic'),
-('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek'),
-('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-reasoner', 0.55, 2.19, 0.14, 0.55, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Reasoner', 'DeepSeek reasoning model (R1)', 'deepseek'),
-('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek'),
-('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'active', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai')
+('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai'),
+('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic'),
+('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek'),
+('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-reasoner', 0.55, 2.19, 0.14, 0.55, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Reasoner', 'DeepSeek reasoning model (R1)', 'deepseek'),
+('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek'),
+('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai')
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================

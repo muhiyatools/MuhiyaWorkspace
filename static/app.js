@@ -22,7 +22,11 @@ document.addEventListener('DOMContentLoaded', () => {
         plans: [],
         providers: [],
         models: [],
-        logs: []
+        logs: [],
+        logPage: 1,
+        logPageSize: 50,
+        logTotal: 0,
+        logLoading: false
     };
 
     // --- Networking helpers ---
@@ -51,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
         tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-danger text-center" style="text-align:center;">⚠ Failed to load: ${escapeHtml(message)}</td></tr>`;
     }
 
-    // Same idea for non-table containers (provider cards, router tier lists).
+    // Same idea for non-table containers such as provider cards and banners.
     function renderContainerError(el, message) {
         if (!el) return;
         el.innerHTML = `<div class="text-danger" style="grid-column: 1/-1; text-align: center; padding: 1rem;">⚠ Failed to load: ${escapeHtml(message)}</div>`;
@@ -146,7 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 plans: "Configure plans and define budget window parameters inline",
                 providers: "Manage connection keys and model mapping configurations",
                 logs: "Audit live API request headers, latencies, and token spendings",
-                router: "Monitor and analyze the Muhiya AI Router routing tiers, mappings, and failovers",
+                operations: "Inspect billing admission, settlement, ledger, and usage reset integrity",
                 settings: "Customize global gateway variables and system settings"
             };
             pageSubtitle.innerText = subtitles[tab] || "";
@@ -182,8 +186,8 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'logs':
                 loadLogs();
                 break;
-            case 'router':
-                loadRouterData();
+            case 'operations':
+                loadOperations();
                 break;
             case 'settings':
                 loadSettings();
@@ -270,6 +274,41 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     modelTypeSelect.addEventListener('change', toggleModelTypeFields);
 
+    function splitCSV(value) {
+        return [...new Set(String(value || '').split(',').map(item => item.trim()).filter(Boolean))];
+    }
+
+    function addPricingTierRow(tier = {}) {
+        const row = document.createElement('div');
+        row.className = 'model-pricing-tier-row';
+        const rates = tier.rates || {};
+        const toUSD = value => value === undefined || value === null ? '' : Number(value) / 1_000_000_000;
+        row.innerHTML = `
+            <input class="tier-threshold" type="number" min="0" required placeholder="Input threshold" value="${escapeHtml(tier.min_input_tokens_exclusive ?? '')}">
+            <input class="tier-input-rate" type="number" min="0" step="0.000001" required placeholder="Input $/1M" value="${escapeHtml(toUSD(rates.input_nano_usd_per_million))}">
+            <input class="tier-output-rate" type="number" min="0" step="0.000001" required placeholder="Output $/1M" value="${escapeHtml(toUSD(rates.output_nano_usd_per_million))}">
+            <input class="tier-read-rate" type="number" min="0" step="0.000001" required placeholder="Cache read $/1M" value="${escapeHtml(toUSD(rates.cache_read_nano_usd_per_million))}">
+            <input class="tier-write-rate" type="number" min="0" step="0.000001" required placeholder="Cache write $/1M" value="${escapeHtml(toUSD(rates.cache_write_nano_usd_per_million))}">
+            <button type="button" class="btn btn-secondary btn-sm tier-remove" aria-label="Remove pricing tier"><i class="fa-solid fa-trash"></i></button>
+        `;
+        row.querySelector('.tier-remove').addEventListener('click', () => row.remove());
+        document.getElementById('model-pricing-tiers').appendChild(row);
+    }
+
+    function readPricingTiers() {
+        return [...document.querySelectorAll('.model-pricing-tier-row')].map(row => ({
+            min_input_tokens_exclusive: Number(row.querySelector('.tier-threshold').value),
+            rates: {
+                input_nano_usd_per_million: Math.round(Number(row.querySelector('.tier-input-rate').value) * 1_000_000_000),
+                output_nano_usd_per_million: Math.round(Number(row.querySelector('.tier-output-rate').value) * 1_000_000_000),
+                cache_read_nano_usd_per_million: Math.round(Number(row.querySelector('.tier-read-rate').value) * 1_000_000_000),
+                cache_write_nano_usd_per_million: Math.round(Number(row.querySelector('.tier-write-rate').value) * 1_000_000_000)
+            }
+        })).sort((a, b) => a.min_input_tokens_exclusive - b.min_input_tokens_exclusive);
+    }
+
+    document.getElementById('btn-add-pricing-tier').addEventListener('click', () => addPricingTierRow());
+
     document.getElementById('btn-add-model').addEventListener('click', () => {
         const form = document.getElementById('model-form');
         form.reset();
@@ -287,6 +326,16 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('model-supports-documents').checked = false;
         document.getElementById('model-max-attachment-mb').value = '';
         document.getElementById('model-accepted-mime').value = '';
+        document.getElementById('model-provider-family').value = '';
+        document.getElementById('model-adapter-version').value = '1';
+        document.getElementById('model-compatibility-epoch').value = '1';
+        document.getElementById('model-health').value = 'healthy';
+        document.getElementById('model-tags').value = '';
+        document.getElementById('model-supported-parameters').value = 'model, messages, stream, tools, tool_choice, max_tokens, temperature, top_p';
+        document.getElementById('model-cache-contract').value = '';
+        document.getElementById('model-deprecated-at').value = '';
+        document.getElementById('model-deprecation-message').value = '';
+        document.getElementById('model-pricing-tiers').innerHTML = '';
         toggleModelTypeFields();
         document.getElementById('model-test-btn').style.display = 'none';
         document.getElementById('model-test-result').style.display = 'none';
@@ -432,13 +481,32 @@ document.addEventListener('DOMContentLoaded', () => {
         const readCost = parseFloat(document.getElementById('model-cost-read').value) || 0;
         const writeCost = parseFloat(document.getElementById('model-cost-write').value) || 0;
         const status = document.getElementById('model-status').value || 'active';
-        const routing_tier = document.getElementById('model-routing-tier').value || 'none';
 
         const display_name = document.getElementById('model-display-name').value || '';
         const owned_by = document.getElementById('model-owned-by').value || '';
         const context_window = parseInt(document.getElementById('model-context-window').value) || 0;
         const max_output_tokens = parseInt(document.getElementById('model-max-output-tokens').value) || 0;
         const description = document.getElementById('model-description').value || '';
+        const provider_family = document.getElementById('model-provider-family').value.trim();
+        const adapter_version = document.getElementById('model-adapter-version').value.trim() || '1';
+        const compatibility_epoch = parseInt(document.getElementById('model-compatibility-epoch').value) || 1;
+        const health = document.getElementById('model-health').value || 'unknown';
+        const tags = splitCSV(document.getElementById('model-tags').value);
+        const supported_parameters = splitCSV(document.getElementById('model-supported-parameters').value);
+        const cache_contract = document.getElementById('model-cache-contract').value.trim();
+        const deprecatedAtValue = document.getElementById('model-deprecated-at').value;
+        const deprecated_at = deprecatedAtValue ? new Date(deprecatedAtValue).toISOString() : null;
+        const deprecation_message = document.getElementById('model-deprecation-message').value.trim();
+        const pricing_tiers = readPricingTiers();
+
+        if (cache_contract) {
+            try {
+                JSON.parse(cache_contract);
+            } catch (error) {
+                showToast(`Cache contract is not valid JSON: ${error.message}`, 'error');
+                return;
+            }
+        }
 
         const body = {
             id, name, provider_id, target_model, model_type, price_per_minute, transcribe,
@@ -448,7 +516,7 @@ document.addEventListener('DOMContentLoaded', () => {
             cache_read_cost_per_million: readCost,
             cache_write_cost_per_million: writeCost,
             status,
-            routing_tier,
+            routing_tier: 'none',
             display_name,
             owned_by,
             context_window,
@@ -460,7 +528,17 @@ document.addEventListener('DOMContentLoaded', () => {
             supports_video,
             supports_documents,
             max_attachment_mb,
-            accepted_mime_types
+            accepted_mime_types,
+            provider_family,
+            adapter_version,
+            compatibility_epoch,
+            health,
+            tags,
+            supported_parameters,
+            cache_contract,
+            deprecated_at,
+            deprecation_message,
+            pricing_tiers
         };
 
         const method = id ? 'PUT' : 'POST';
@@ -1101,7 +1179,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 models = models || [];
                 state.models = models;
                 if (!models || models.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="13" class="text-muted text-center" style="text-align: center;">No virtual model mappings configured.</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="12" class="text-muted text-center" style="text-align: center;">No virtual model mappings configured.</td></tr>`;
                     return;
                 }
                 tbody.innerHTML = models.map(m => {
@@ -1138,7 +1216,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${!isTrans ? `$${m.output_cost_per_million.toFixed(4)}` : '-'}</td>
                         <td>${!isTrans ? `$${m.cache_read_cost_per_million.toFixed(4)}` : '-'}</td>
                         <td>${!isTrans ? `$${m.cache_write_cost_per_million.toFixed(4)}` : '-'}</td>
-                        <td><span class="tier-badge ${escapeHtml(m.routing_tier || 'none')}" style="font-size: 11px; padding: 2px 6px;">${m.routing_tier ? escapeHtml(m.routing_tier.toUpperCase()) : 'NONE'}</span></td>
                         <td><span class="status-pill ${m.status === 'active' ? 'active' : 'inactive'}">${escapeHtml(m.status)}</span></td>
                         <td>
                             <button class="btn btn-secondary btn-sm" onclick="editModel('${m.id}')"><i class="fa-solid fa-pen"></i> Edit</button>
@@ -1149,7 +1226,7 @@ document.addEventListener('DOMContentLoaded', () => {
             })
             .catch(err => {
                 console.error('Error loading models:', err);
-                renderTableError(tbody, 13, err.message);
+                renderTableError(tbody, 12, err.message);
             });
     }
 
@@ -1207,13 +1284,28 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-cost-out').value = m.output_cost_per_million;
             document.getElementById('model-cost-read').value = m.cache_read_cost_per_million;
             document.getElementById('model-cost-write').value = m.cache_write_cost_per_million;
-            document.getElementById('model-routing-tier').value = m.routing_tier || 'none';
-
             document.getElementById('model-display-name').value = m.display_name || '';
             document.getElementById('model-owned-by').value = m.owned_by || '';
             document.getElementById('model-context-window').value = m.context_window || '';
             document.getElementById('model-max-output-tokens').value = m.max_output_tokens || '';
             document.getElementById('model-description').value = m.description || '';
+            document.getElementById('model-provider-family').value = m.provider_family || '';
+            document.getElementById('model-adapter-version').value = m.adapter_version || '1';
+            document.getElementById('model-compatibility-epoch').value = m.compatibility_epoch || 1;
+            document.getElementById('model-health').value = m.health || 'unknown';
+            document.getElementById('model-tags').value = (m.tags || []).join(', ');
+            document.getElementById('model-supported-parameters').value = (m.supported_parameters || []).join(', ');
+            document.getElementById('model-cache-contract').value = m.cache_contract || '';
+            document.getElementById('model-deprecation-message').value = m.deprecation_message || '';
+            const deprecatedInput = document.getElementById('model-deprecated-at');
+            if (m.deprecated_at) {
+                const deprecatedDate = new Date(m.deprecated_at);
+                deprecatedInput.value = new Date(deprecatedDate.getTime() - deprecatedDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+            } else {
+                deprecatedInput.value = '';
+            }
+            document.getElementById('model-pricing-tiers').innerHTML = '';
+            (m.pricing_tiers || []).forEach(addPricingTierRow);
 
             document.getElementById('model-status-group').style.display = 'block';
             document.getElementById('model-status').value = m.status;
@@ -1231,80 +1323,72 @@ document.addEventListener('DOMContentLoaded', () => {
             .catch(err => showToast(err.message, 'error'));
     };
 
-    function loadLogs() {
+    let logRequestController = null;
+
+    function loadLogs(page = state.logPage) {
+        if (logRequestController) logRequestController.abort();
+        logRequestController = new AbortController();
+        state.logPage = Math.max(1, page);
+
+        const params = new URLSearchParams({
+            page: String(state.logPage),
+            page_size: String(state.logPageSize)
+        });
+        const search = (document.getElementById('log-search')?.value || '').trim();
+        const status = document.getElementById('log-filter-status')?.value || 'all';
+        const model = document.getElementById('log-filter-model')?.value || 'all';
+        if (search) params.set('search', search);
+        if (status !== 'all') params.set('status', status);
+        if (model !== 'all') params.set('model', model);
+
         Promise.all([
-            fetchJSON('/api/logs?limit=100'),
-            fetchJSON('/api/users')
-        ]).then(([logs, users]) => {
-            logs = logs || [];
-            users = users || [];
-            state.logs = logs;
-            state.users = users;
-
-            // Dynamically populate model filters
-            const modelFilterSelect = document.getElementById('log-filter-model');
-            if (modelFilterSelect) {
-                const currentVal = modelFilterSelect.value;
-                const models = [...new Set(logs.map(l => l.model_id))].filter(Boolean);
-                modelFilterSelect.innerHTML = '<option value="all">All Models</option>' +
-                    models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
-                modelFilterSelect.value = currentVal;
-            }
-
-            filterAndRenderLogs();
+            fetchJSON(`/api/logs?${params.toString()}`, { signal: logRequestController.signal }),
+            state.models.length ? Promise.resolve(state.models) : fetchJSON('/api/models')
+        ]).then(([logPageResponse, models]) => {
+            state.logs = logPageResponse?.items || [];
+            state.logTotal = Number(logPageResponse?.total || 0);
+            state.logPage = Number(logPageResponse?.page || state.logPage);
+            state.logPageSize = Number(logPageResponse?.page_size || state.logPageSize);
+            state.models = models || [];
+            populateLogModelFilter();
+            renderLogs();
+            renderLogPagination();
         }).catch(err => {
+            if (err.name === 'AbortError') return;
             console.error("Error loading logs:", err);
-            const tbody = document.querySelector('#logs-table tbody');
-            renderTableError(tbody, 12, err.message);
+            renderTableError(document.querySelector('#logs-table tbody'), 12, err.message);
         });
     }
 
-    function filterAndRenderLogs() {
-        const search = (document.getElementById('log-search')?.value || '').toLowerCase();
-        const status = document.getElementById('log-filter-status')?.value || 'all';
-        const model = document.getElementById('log-filter-model')?.value || 'all';
+    function populateLogModelFilter() {
+        const select = document.getElementById('log-filter-model');
+        if (!select) return;
+        const selected = select.value;
+        const names = [...new Set((state.models || []).map(model => model.name).filter(Boolean))].sort();
+        select.innerHTML = '<option value="all">All Models</option>' +
+            names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+        select.value = names.includes(selected) ? selected : 'all';
+    }
+
+    function renderLogs() {
         const tbody = document.querySelector('#logs-table tbody');
         if (!tbody) return;
-
-        const filtered = (state.logs || []).filter(l => {
-            const ownerUser = (state.users || []).find(u => u.id === l.user_id);
-            const ownerName = ownerUser ? ownerUser.name.toLowerCase() : '';
-            const app = (l.client_app || '').toLowerCase();
-            const err = (l.error_message || '').toLowerCase();
-            
-            const matchesSearch = 
-                l.virtual_key_id.toLowerCase().includes(search) || 
-                l.request_path.toLowerCase().includes(search) || 
-                l.model_id.toLowerCase().includes(search) ||
-                ownerName.includes(search) ||
-                app.includes(search) ||
-                err.includes(search);
-            
-            const matchesStatus = 
-                status === 'all' || 
-                (status === 'success' && l.status_code >= 200 && l.status_code < 300) || 
-                (status === 'error' && l.status_code >= 400);
-            
-            const matchesModel = 
-                model === 'all' || 
-                l.model_id === model;
-            
-            return matchesSearch && matchesStatus && matchesModel;
-        });
-
-        if (filtered.length === 0) {
+        if (state.logs.length === 0) {
             tbody.innerHTML = `<tr><td colspan="12" class="text-muted text-center" style="text-align: center;">No matching gateway request logs found.</td></tr>`;
             return;
         }
 
-        tbody.innerHTML = filtered.map(l => {
+        tbody.innerHTML = state.logs.map(l => {
             const statusClass = l.status_code >= 200 && l.status_code < 300 ? 'success' : 'error';
-            const timeStr = new Date(l.created_at).toLocaleTimeString();
+            const created = new Date(l.created_at);
+            const timeStr = created.toLocaleString([], {
+                year: 'numeric', month: 'short', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            });
             
-            const ownerUser = (state.users || []).find(u => u.id === l.user_id);
-            const ownerName = ownerUser ? ownerUser.name : 'Unknown User';
+            const ownerName = l.owner_name || l.user_id || 'Deleted user';
 
-            const costFormatted = '$' + l.cost.toFixed(6);
+            const costFormatted = '$' + Number(l.cost || 0).toFixed(6);
             // Prompt caches are per-upstream, so a re-route re-reads the whole
             // conversation at full price. Showing the upstream beside the cache
             // numbers is what makes that correlation readable at a glance:
@@ -1336,7 +1420,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             return `
                 <tr>
-                    <td>${timeStr}</td>
+                    <td><time datetime="${escapeHtml(created.toISOString())}">${escapeHtml(timeStr)}</time></td>
                     <td><small><code>${escapeHtml(l.virtual_key_id)}</code></small></td>
                     <td><strong>${escapeHtml(ownerName)}</strong></td>
                     <td>${clientAppBadge}</td>
@@ -1353,6 +1437,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 </tr>
             `;
         }).join('');
+    }
+
+    function renderLogPagination() {
+        const totalPages = Math.max(1, Math.ceil(state.logTotal / state.logPageSize));
+        const first = state.logTotal === 0 ? 0 : (state.logPage - 1) * state.logPageSize + 1;
+        const last = Math.min(state.logTotal, state.logPage * state.logPageSize);
+        document.getElementById('log-page-summary').textContent =
+            state.logTotal === 0 ? 'No records' : `${first.toLocaleString()}–${last.toLocaleString()} of ${state.logTotal.toLocaleString()} records`;
+        document.getElementById('log-page-label').textContent = `Page ${state.logPage} of ${totalPages}`;
+        document.getElementById('log-page-prev').disabled = state.logPage <= 1;
+        document.getElementById('log-page-next').disabled = state.logPage >= totalPages;
+        document.getElementById('log-page-size').value = String(state.logPageSize);
     }
 
     // --- System Settings ---
@@ -1660,132 +1756,79 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('modal-log-details').classList.add('show');
     };
 
-    function loadRouterData() {
-        const simpleListEl = document.getElementById('tier-list-simple');
-        const mediumListEl = document.getElementById('tier-list-medium');
-        const hardListEl = document.getElementById('tier-list-hard');
-
-        // Fetch active models to populate routing tier columns dynamically
-        fetchJSON('/api/models')
-            .then(models => {
-                models = models || [];
-                state.models = models;
-
-                const simpleList = document.getElementById('tier-list-simple');
-                const mediumList = document.getElementById('tier-list-medium');
-                const hardList = document.getElementById('tier-list-hard');
-                
-                simpleList.innerHTML = '';
-                mediumList.innerHTML = '';
-                hardList.innerHTML = '';
-                
-                let simpleCount = 0;
-                let mediumCount = 0;
-                let hardCount = 0;
-                
-                // Sort models by price (cheapest first) to match routing cost optimization!
-                const activeModels = models.filter(m => m.status === 'active');
-                activeModels.sort((a, b) => {
-                    const costA = a.input_cost_per_million + a.output_cost_per_million;
-                    const costB = b.input_cost_per_million + b.output_cost_per_million;
-                    return costA - costB;
-                });
-                
-                activeModels.forEach(m => {
-                    const costUSD = m.input_cost_per_million + m.output_cost_per_million;
-                    const card = document.createElement('div');
-                    card.className = 'tier-model-item';
-                    card.style = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem;';
-                    card.innerHTML = `
-                        <div style="display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 0.85rem;">
-                            <span>${escapeHtml(m.name)}</span>
-                            <span class="badge" style="background:#27272a; font-size:9px; padding: 2px 4px; border-radius: 4px; text-transform:none;">${escapeHtml(m.provider_id)}</span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; margin-top: 0.4rem; font-size: 0.75rem; color: var(--text-muted);">
-                            <span>In: $${m.input_cost_per_million.toFixed(2)}/1M</span>
-                            <span>Out: $${m.output_cost_per_million.toFixed(2)}/1M</span>
-                        </div>
-                        <div style="font-size: 0.68rem; color: var(--text-muted-dark); margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 3px;">
-                            Target: <code>${escapeHtml(m.target_model)}</code>
-                        </div>
-                    `;
-                    
-                    if (m.routing_tier === 'simple') {
-                        simpleList.appendChild(card);
-                        simpleCount++;
-                    } else if (m.routing_tier === 'medium') {
-                        mediumList.appendChild(card);
-                        mediumCount++;
-                    } else if (m.routing_tier === 'hard') {
-                        hardList.appendChild(card);
-                        hardCount++;
-                    }
-                });
-                
-                if (simpleCount === 0) {
-                    simpleList.innerHTML = '<div class="text-muted text-center" style="padding: 1.5rem; font-size:0.8rem; background:rgba(255,255,255,0.01); border: 1px dashed var(--panel-border); border-radius:8px;">No models assigned to Simple.</div>';
-                }
-                if (mediumCount === 0) {
-                    mediumList.innerHTML = '<div class="text-muted text-center" style="padding: 1.5rem; font-size:0.8rem; background:rgba(255,255,255,0.01); border: 1px dashed var(--panel-border); border-radius:8px;">No models assigned to Medium.</div>';
-                }
-                if (hardCount === 0) {
-                    hardList.innerHTML = '<div class="text-muted text-center" style="padding: 1.5rem; font-size:0.8rem; background:rgba(255,255,255,0.01); border: 1px dashed var(--panel-border); border-radius:8px;">No models assigned to Hard.</div>';
-                }
+    function loadOperations() {
+        fetchJSON('/api/operations?limit=100')
+            .then(operations => {
+                renderOperationsReservations(operations?.reservations || []);
+                renderOperationsLedger(operations?.ledger || []);
+                renderUsageResets(operations?.usage_resets || []);
             })
             .catch(err => {
-                console.error('Failed to load router models:', err);
-                renderContainerError(simpleListEl, err.message);
-                renderContainerError(mediumListEl, err.message);
-                renderContainerError(hardListEl, err.message);
+                renderTableError(document.querySelector('#operations-reservations-table tbody'), 8, err.message);
+                renderTableError(document.querySelector('#operations-ledger-table tbody'), 7, err.message);
+                renderTableError(document.querySelector('#operations-resets-table tbody'), 5, err.message);
             });
+    }
 
-        // Fetch logs to compute statistics and savings
-        fetchJSON('/api/logs?limit=1000')
-            .then(logs => {
-                logs = logs || [];
-                const routerLogs = logs.filter(log => log.requested_model === 'muhiya-ai-router');
-                const totalRequests = routerLogs.length;
-                
-                let successCount = 0;
-                let failoverCount = 0;
-                let totalSavings = 0.0;
-                
-                routerLogs.forEach(log => {
-                    const isSuccess = log.status_code >= 200 && log.status_code < 300;
-                    if (isSuccess) {
-                        successCount++;
-                        
-                        // Compute estimated savings:
-                        // Savings = (Cost if routed to Claude 3.5 Sonnet) - (Actual Cost)
-                        // Claude 3.5 Sonnet costs $3.00/1M input and $15.00/1M output
-                        const inputTokens = log.input_tokens || 0;
-                        const outputTokens = log.output_tokens || 0;
-                        const claudeCost = (inputTokens * 3.00 / 1000000) + (outputTokens * 15.00 / 1000000);
-                        const savings = claudeCost - log.cost;
-                        if (savings > 0) {
-                            totalSavings += savings;
-                        }
-                    }
-                    
-                    if (isSuccess && log.failover_attempts > 0) {
-                        failoverCount++;
-                    }
-                });
+    function operationTimestamp(value) {
+        return new Date(value).toLocaleString([], {
+            year: 'numeric', month: 'short', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+    }
 
-                const successRate = totalRequests > 0 ? (successCount / totalRequests * 100) : 100.0;
-                
-                document.getElementById('router-stat-requests').innerText = totalRequests.toLocaleString();
-                document.getElementById('router-stat-savings').innerText = `$${totalSavings.toFixed(4)}`;
-                document.getElementById('router-stat-success').innerText = `${successRate.toFixed(1)}%`;
-                document.getElementById('router-stat-failovers').innerText = failoverCount.toLocaleString();
-            })
-            .catch(err => {
-                console.error('Failed to load router logs:', err);
-                ['router-stat-requests', 'router-stat-savings', 'router-stat-success', 'router-stat-failovers'].forEach((id) => {
-                    const el = document.getElementById(id);
-                    if (el) el.innerText = 'Error';
-                });
-            });
+    function nanoUSD(value) {
+        return `$${(Number(value || 0) / 1_000_000_000).toFixed(6)}`;
+    }
+
+    function renderOperationsReservations(rows) {
+        const tbody = document.querySelector('#operations-reservations-table tbody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="8" class="text-muted text-center">No reservations recorded.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(row => `<tr>
+            <td>${escapeHtml(operationTimestamp(row.created_at))}</td>
+            <td><code>${escapeHtml(row.request_id)}</code></td>
+            <td><code>${escapeHtml(row.user_id)}</code></td>
+            <td>${escapeHtml(row.model_id || '—')}</td>
+            <td>${nanoUSD(row.amount_nano_usd)}</td>
+            <td>${nanoUSD(row.settled_nano_usd)}</td>
+            <td><span class="operations-status status-${escapeHtml(row.status)}">${escapeHtml(row.status)}</span></td>
+            <td>${escapeHtml(operationTimestamp(row.lease_expires_at))}</td>
+        </tr>`).join('');
+    }
+
+    function renderOperationsLedger(rows) {
+        const tbody = document.querySelector('#operations-ledger-table tbody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center">No ledger entries recorded.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(row => `<tr>
+            <td>${escapeHtml(operationTimestamp(row.created_at))}</td>
+            <td><code>${escapeHtml(row.user_id)}</code></td>
+            <td><code>${escapeHtml(row.request_id || '—')}</code></td>
+            <td><code>${escapeHtml(row.reservation_id || '—')}</code></td>
+            <td>${escapeHtml(row.kind)}</td>
+            <td>${nanoUSD(row.amount_nano_usd)}</td>
+            <td><code>${escapeHtml(row.idempotency_key)}</code></td>
+        </tr>`).join('');
+    }
+
+    function renderUsageResets(rows) {
+        const tbody = document.querySelector('#operations-resets-table tbody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No usage resets recorded.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(row => `<tr>
+            <td>${escapeHtml(operationTimestamp(row.created_at))}</td>
+            <td>${escapeHtml(row.scope)}</td>
+            <td><code>${escapeHtml(row.user_id || 'All users')}</code></td>
+            <td>${escapeHtml(row.note || '—')}</td>
+            <td><code>${escapeHtml(row.id)}</code></td>
+        </tr>`).join('');
     }
 
     // Show the gateway's real reachable origin instead of a hardcoded
@@ -1799,10 +1842,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load initial tab data
     loadTabData('dashboard');
 
-    // Setup request log filters event listeners
-    document.getElementById('log-search')?.addEventListener('input', filterAndRenderLogs);
-    document.getElementById('log-filter-status')?.addEventListener('change', filterAndRenderLogs);
-    document.getElementById('log-filter-model')?.addEventListener('change', filterAndRenderLogs);
+    // Request-log filters are server-side so pagination always spans the full
+    // audit history, not merely the current page.
+    let logSearchTimer = null;
+    document.getElementById('log-search')?.addEventListener('input', () => {
+        clearTimeout(logSearchTimer);
+        logSearchTimer = setTimeout(() => loadLogs(1), 250);
+    });
+    document.getElementById('log-filter-status')?.addEventListener('change', () => loadLogs(1));
+    document.getElementById('log-filter-model')?.addEventListener('change', () => loadLogs(1));
+    document.getElementById('log-page-size')?.addEventListener('change', event => {
+        state.logPageSize = Number(event.target.value) || 50;
+        loadLogs(1);
+    });
+    document.getElementById('log-page-prev')?.addEventListener('click', () => loadLogs(state.logPage - 1));
+    document.getElementById('log-page-next')?.addEventListener('click', () => loadLogs(state.logPage + 1));
 
     // Real-time auto-refresh: polls active tab stats/logs every 5 seconds
     setInterval(() => {
@@ -1813,6 +1867,8 @@ document.addEventListener('DOMContentLoaded', () => {
             loadDashboardStats();
         } else if (tab === 'logs') {
             loadLogs();
+        } else if (tab === 'operations') {
+            loadOperations();
         }
     }, 5000);
 });
