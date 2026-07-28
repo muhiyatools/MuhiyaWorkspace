@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestAffinityScopeIsStableAndFullyScoped(t *testing.T) {
 	base := affinityScope("key-1", "session-1", "record-1")
@@ -21,13 +24,14 @@ func TestAffinityScopeIsStableAndFullyScoped(t *testing.T) {
 
 func TestDisabledAffinityStoreIsSafe(t *testing.T) {
 	store := &routeAffinityStore{}
-	if value, err := store.get(t.Context(), "scope"); err != nil || value != "" {
+	ctx := context.Background()
+	if value, err := store.get(ctx, "scope"); err != nil || value != "" {
 		t.Fatalf("disabled get = %q, %v", value, err)
 	}
-	if err := store.observe(t.Context(), "scope", "provider"); err != nil {
+	if err := store.observe(ctx, "scope", "provider"); err != nil {
 		t.Fatalf("disabled observe: %v", err)
 	}
-	if err := store.clear(t.Context(), "scope"); err != nil {
+	if err := store.clear(ctx, "scope"); err != nil {
 		t.Fatalf("disabled clear: %v", err)
 	}
 }

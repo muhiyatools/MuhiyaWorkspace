@@ -574,6 +574,16 @@ func (h *ProxyHandler) handleUsage(w http.ResponseWriter, key *db.VirtualKey) {
 		h.internalErrorResponse(w, "database error", err)
 		return
 	}
+	pending, err := h.db.PendingBudgetNano(context.Background(), user.ID)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
+	available, err := h.db.AvailableBudgetNano(context.Background(), user.ID)
+	if err != nil {
+		h.internalErrorResponse(w, "database error", err)
+		return
+	}
 	planName := user.PlanID
 	if plan, planErr := h.db.GetPlan(user.PlanID); planErr == nil && plan != nil && plan.Name != "" {
 		planName = plan.Name
@@ -598,6 +608,8 @@ func (h *ProxyHandler) handleUsage(w http.ResponseWriter, key *db.VirtualKey) {
 		"credits": map[string]interface{}{
 			"extra_total":     user.ExtraCredits,
 			"extra_remaining": user.RemainingExtraCredits,
+			"pending_usd":     pending.USD(),
+			"available_usd":   available.USD(),
 		},
 		"spend": map[string]interface{}{"today_usd": today},
 	}

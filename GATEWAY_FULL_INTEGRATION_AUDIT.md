@@ -252,7 +252,7 @@ These are deployment properties, not disconnected code:
 
 1. `REDIS_URL`, `DATABASE_URL`, `ADMIN_PASSWORD`, and a stable `PROVIDER_KEY_ENCRYPTION_KEY` must be supplied in Elest.io.
 2. Existing plaintext provider keys remain rollout-compatible when encryption is unset, but public launch should set the key and rotate provider credentials.
-3. The in-memory immediate retry queue is not durable across process death. Monetary safety is preserved because pre-upstream reservations survive in PostgreSQL and the reconciler conservatively settles expired indeterminate requests. Exact provider usage may be estimated after a hard crash. A future provider-side usage reconciliation API would be required to eliminate that external limitation.
+3. The in-memory immediate retry queue is not durable across process death. Runtime completions still settle actual usage atomically, but an authorization abandoned by a hard gateway crash is now released after its lease rather than charged at its worst-case ceiling. This deliberately favors correct customer balances and session availability over recovering unknowable provider spend. Migration 028 releases authorizations stranded by the pre-027 settlement defect. Exact crash-time provider cost reconciliation would require a provider usage API.
 4. Offset pagination satisfies full history navigation. At very large log volumes, the next evolution should be cursor/keyset pagination using the new `(created_at, id)` index.
 
 ## Validation performed
@@ -276,7 +276,7 @@ These are deployment properties, not disconnected code:
 - [ ] Add, expire, and soft-delete top-ups; verify remaining balance changes immediately.
 - [ ] Save a MiniMax model with a cache contract and >512k tier; reload the modal and `/v1/muhiyacode/models` and verify identical metadata.
 - [ ] Traverse log pages, apply search/status/model filters, and verify full dates.
-- [ ] Restart the process with an active reservation and verify the reconciler closes it after lease expiry.
+- [ ] Restart the process with an active authorization and verify it is released after lease expiry without creating fake usage.
 
 ## Definition of done
 

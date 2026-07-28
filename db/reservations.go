@@ -22,9 +22,14 @@ var (
 type BudgetExceededError struct {
 	Requested money.NanoUSD
 	Available money.NanoUSD
+	Pending   money.NanoUSD
 }
 
 func (e *BudgetExceededError) Error() string {
+	if e.Pending > 0 {
+		return fmt.Sprintf("%s: requested $%s, available $%s; $%s is temporarily authorized by in-flight requests",
+			ErrBudgetExceeded, e.Requested, e.Available, e.Pending)
+	}
 	return fmt.Sprintf("%s: requested $%s, available $%s", ErrBudgetExceeded, e.Requested, e.Available)
 }
 
@@ -99,18 +104,16 @@ func (db *DB) ReserveBudget(ctx context.Context, request ReserveBudgetRequest) (
 	}
 
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE budget_reservations
-		SET status = 'expired', updated_at = $1
-		WHERE user_id = $2 AND status = 'reserved' AND lease_expires_at <= $1`, now, request.UserID); err != nil {
-		return nil, err
-	}
-
 	available, err := availableBudgetNanoTx(ctx, tx, request.UserID, now)
 	if err != nil {
 		return nil, err
 	}
 	if available != money.NanoUSD(math.MaxInt64) && request.Amount > available {
-		return nil, &BudgetExceededError{Requested: request.Amount, Available: available}
+		pending, pendingErr := pendingBudgetNanoTx(ctx, tx, request.UserID)
+		if pendingErr != nil {
+			return nil, pendingErr
+		}
+		return nil, &BudgetExceededError{Requested: request.Amount, Available: available, Pending: pending}
 	}
 
 	reservation := &BudgetReservation{
@@ -174,8 +177,8 @@ func availableBudgetNanoTx(ctx context.Context, tx *sql.Tx, userID string, now t
 
 	var reserved int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(amount_nano_usd), 0)
-		FROM budget_reservations WHERE user_id = $1 AND status = 'reserved' AND lease_expires_at > $2`,
-		userID, now).Scan(&reserved); err != nil {
+		FROM budget_reservations WHERE user_id = $1 AND status = 'reserved'`,
+		userID).Scan(&reserved); err != nil {
 		return 0, err
 	}
 	var topups int64
@@ -207,6 +210,29 @@ func availableBudgetNanoTx(ctx context.Context, tx *sql.Tx, userID string, now t
 		}
 	}
 	return available, nil
+}
+
+// PendingBudgetNano reports money temporarily authorized for requests that are
+// still in flight. It is deliberately separate from settled spend: clients can
+// explain why less budget is currently available without pretending that a
+// worst-case authorization has already been charged.
+func (db *DB) PendingBudgetNano(ctx context.Context, userID string) (money.NanoUSD, error) {
+	return pendingBudgetNanoQuery(ctx, db.conn, userID)
+}
+
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func pendingBudgetNanoQuery(ctx context.Context, queryer queryRower, userID string) (money.NanoUSD, error) {
+	var pending money.NanoUSD
+	err := queryer.QueryRowContext(ctx, `SELECT COALESCE(SUM(amount_nano_usd), 0)
+		FROM budget_reservations WHERE user_id = $1 AND status = 'reserved'`, userID).Scan(&pending)
+	return pending, err
+}
+
+func pendingBudgetNanoTx(ctx context.Context, tx *sql.Tx, userID string) (money.NanoUSD, error) {
+	return pendingBudgetNanoQuery(ctx, tx, userID)
 }
 
 func budgetWindowLimitsTx(ctx context.Context, tx *sql.Tx, planID string) ([]budgetWindowLimit, error) {
@@ -437,60 +463,37 @@ func (db *DB) ExpireReservations(ctx context.Context) (int64, error) {
 	return db.ReconcileExpiredReservations(ctx, 100)
 }
 
-// ReconcileExpiredReservations conservatively settles abandoned reservations
-// at their authorized ceiling. Callers release reservations explicitly when an
-// upstream was never contacted or returned a known zero-cost failure; an
-// expired live reservation therefore represents indeterminate provider usage.
+// ReconcileExpiredReservations releases abandoned authorizations. Charging the
+// maximum authorized amount when exact provider usage is unavailable made a
+// crashed gateway look like real user spend and could lock the next session out.
+// Runtime paths still settle every completed or partial response immediately;
+// this path is only the crash-recovery safety valve after the lease expires.
 func (db *DB) ReconcileExpiredReservations(ctx context.Context, limit int) (int64, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, request_id, user_id,
-		COALESCE(virtual_key_id,''), COALESCE(model_id,''), amount_nano_usd, created_at
+	rows, err := db.conn.QueryContext(ctx, `SELECT id
 		FROM budget_reservations
 		WHERE status = 'reserved' AND lease_expires_at <= now()
 		ORDER BY lease_expires_at ASC LIMIT $1`, limit)
 	if err != nil {
 		return 0, err
 	}
-	type abandoned struct {
-		reservationID, requestID, userID, keyID, modelID string
-		amount                                           money.NanoUSD
-		created                                          time.Time
-	}
-	var pending []abandoned
+	var pending []string
 	for rows.Next() {
-		var item abandoned
-		if err := rows.Scan(&item.reservationID, &item.requestID, &item.userID,
-			&item.keyID, &item.modelID, &item.amount, &item.created); err != nil {
+		var reservationID string
+		if err := rows.Scan(&reservationID); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		pending = append(pending, item)
+		pending = append(pending, reservationID)
 	}
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}
 	var reconciled int64
-	for _, item := range pending {
-		entry := RequestLog{
-			ID:             item.requestID,
-			ReservationID:  item.reservationID,
-			VirtualKeyID:   item.keyID,
-			UserID:         item.userID,
-			ModelID:        item.modelID,
-			RequestPath:    "reconciliation/expired-reservation",
-			StatusCode:     299,
-			CostNanoUSD:    item.amount,
-			Cost:           item.amount.USD(),
-			ErrorMessage:   "provider usage unavailable after process interruption; settled conservatively",
-			ClientApp:      "MuhiyaGateway",
-			RequestedModel: item.modelID,
-			Complexity:     "reconciliation",
-			UsageEstimated: true,
-			CreatedAt:      item.created,
-		}
-		if err := db.SettleReservationAndLog(ctx, entry); err != nil {
+	for _, reservationID := range pending {
+		if err := db.ReleaseReservation(ctx, reservationID); err != nil {
 			if errors.Is(err, ErrReservationClosed) {
 				continue
 			}
