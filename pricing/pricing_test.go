@@ -27,12 +27,17 @@ func testRuleSet(t *testing.T) RuleSet {
 }
 
 func TestQuoteUsesExactCacheBreakdown(t *testing.T) {
-	quote, err := testRuleSet(t).Quote(Usage{
-		InputTokens:      1_000_000,
+	usage, anomaly := NormalizeUsage(ReportedUsage{
+		PromptTokens:     1_000_000,
 		OutputTokens:     100_000,
 		CacheReadTokens:  400_000,
 		CacheWriteTokens: 100_000,
-	})
+	}, PromptInclusive)
+	if anomaly != AnomalyNone {
+		t.Fatalf("unexpected anomaly: %s", anomaly)
+	}
+
+	quote, err := testRuleSet(t).Quote(usage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,11 +50,11 @@ func TestQuoteUsesExactCacheBreakdown(t *testing.T) {
 
 func TestTierBoundaryIsExclusive(t *testing.T) {
 	rules := testRuleSet(t)
-	atBoundary, err := rules.Quote(Usage{InputTokens: 512_000})
+	atBoundary, err := rules.Quote(InputUsage(512_000))
 	if err != nil {
 		t.Fatal(err)
 	}
-	aboveBoundary, err := rules.Quote(Usage{InputTokens: 512_001})
+	aboveBoundary, err := rules.Quote(InputUsage(512_001))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,15 +64,45 @@ func TestTierBoundaryIsExclusive(t *testing.T) {
 	if aboveBoundary.Rates.InputPerMillion != 600_000_000 {
 		t.Fatal("above boundary must use high tier")
 	}
+	if atBoundary.Receipt.TierThreshold != BaseTierThreshold {
+		t.Fatalf("boundary tier threshold = %d, want base", atBoundary.Receipt.TierThreshold)
+	}
+	if aboveBoundary.Receipt.TierThreshold != 512_000 {
+		t.Fatalf("above-boundary tier threshold = %d, want 512000", aboveBoundary.Receipt.TierThreshold)
+	}
+}
+
+// The tier is selected by TOTAL prompt size, not by the uncached remainder.
+// A 600K-token prompt served almost entirely from cache is still a 600K-token
+// prompt as far as the provider's context pricing is concerned.
+func TestTierSelectionUsesTotalPromptNotFreshRemainder(t *testing.T) {
+	rules := testRuleSet(t)
+	usage, anomaly := NormalizeUsage(ReportedUsage{
+		PromptTokens:    600_000,
+		CacheReadTokens: 599_000,
+	}, PromptInclusive)
+	if anomaly != AnomalyNone {
+		t.Fatalf("unexpected anomaly: %s", anomaly)
+	}
+	quote, err := rules.Quote(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quote.Receipt.TierThreshold != 512_000 {
+		t.Fatalf("tier threshold = %d, want the 512000 tier to apply",
+			quote.Receipt.TierThreshold)
+	}
 }
 
 func TestMaxOutputTokensNeverExceedsBudget(t *testing.T) {
 	rules := testRuleSet(t)
-	max, err := rules.MaxOutputTokens(Usage{InputTokens: 1000}, 100_000, money.NanoUSD(10_000_000))
+	max, err := rules.MaxOutputTokens(InputUsage(1000), 100_000, money.NanoUSD(10_000_000))
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed, err := rules.Quote(Usage{InputTokens: 1000, OutputTokens: max})
+	usage := InputUsage(1000)
+	usage.OutputTokens = max
+	allowed, err := rules.Quote(usage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,12 +110,54 @@ func TestMaxOutputTokensNeverExceedsBudget(t *testing.T) {
 		t.Fatalf("allowed quote %s exceeds budget", allowed.Cost)
 	}
 	if max < 100_000 {
-		next, err := rules.Quote(Usage{InputTokens: 1000, OutputTokens: max + 1})
+		usage.OutputTokens = max + 1
+		next, err := rules.Quote(usage)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if next.Cost <= 10_000_000 {
 			t.Fatalf("max output %d was not maximal", max)
 		}
+	}
+}
+
+// The receipt must be self-consistent: its lines are the derivation of its
+// total, and a total that does not equal its parts is not an audit trail.
+func TestReceiptLinesSumToTotal(t *testing.T) {
+	usage, _ := NormalizeUsage(ReportedUsage{
+		PromptTokens:     900_000,
+		OutputTokens:     50_000,
+		CacheReadTokens:  300_000,
+		CacheWriteTokens: 20_000,
+	}, PromptInclusive)
+	quote, err := testRuleSet(t).Quote(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum money.NanoUSD
+	for _, line := range quote.Receipt.Lines {
+		sum += line.Cost
+	}
+	if sum != quote.Receipt.Total {
+		t.Fatalf("lines sum to %d but total is %d", sum, quote.Receipt.Total)
+	}
+	if quote.Receipt.Total != quote.Cost {
+		t.Fatalf("receipt total %d != quote cost %d", quote.Receipt.Total, quote.Cost)
+	}
+	if len(quote.Receipt.Lines) != 4 {
+		t.Fatalf("expected 4 non-zero lines, got %d", len(quote.Receipt.Lines))
+	}
+}
+
+func TestZeroTokenClassesProduceNoLines(t *testing.T) {
+	quote, err := testRuleSet(t).Quote(Usage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quote.Receipt.Lines) != 0 {
+		t.Fatalf("expected no lines, got %d", len(quote.Receipt.Lines))
+	}
+	if quote.Cost != 0 {
+		t.Fatalf("expected zero cost, got %d", quote.Cost)
 	}
 }

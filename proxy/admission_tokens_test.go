@@ -23,7 +23,9 @@ func TestConservativeInputTokenBoundDoesNotPriceBytesAsTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	quote, err := rules.Quote(pricing.Usage{InputTokens: int64(got), OutputTokens: 16_000})
+	usage := pricing.InputUsage(int64(got))
+	usage.OutputTokens = 16_000
+	quote, err := rules.Quote(usage)
 	if err != nil {
 		t.Fatal(err)
 	}

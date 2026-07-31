@@ -159,7 +159,33 @@ func Sub(left, right NanoUSD) (NanoUSD, error) {
 // CostForTokens returns ceil(tokens * rate-per-million / 1_000_000).
 // Ceiling is intentional: no non-zero billable usage rounds down to free.
 func CostForTokens(tokens int64, ratePerMillion NanoUSD) (NanoUSD, error) {
-	return MulDivCeil(tokens, ratePerMillion, PerMillion)
+	return CostForTokensScaled(tokens, ratePerMillion, 1, 1)
+}
+
+// CostForTokensScaled returns ceil(tokens * rate * num / (1_000_000 * den)).
+//
+// The scale is an exact rational so time-of-day pricing ("peak costs 2x")
+// composes over a base rate without floating point. Critically the scale is
+// folded into the SAME ceiling as the token division rather than being applied
+// to the rate first: scaling a rate and then costing it would round twice, and
+// the second rounding would silently overcharge on every request.
+func CostForTokensScaled(tokens int64, ratePerMillion NanoUSD, num, den int64) (NanoUSD, error) {
+	if num < 0 {
+		return 0, ErrNegative
+	}
+	if den <= 0 {
+		return 0, ErrInvalid
+	}
+	if tokens < 0 || ratePerMillion < 0 {
+		return 0, ErrNegative
+	}
+	if tokens == 0 || ratePerMillion == 0 || num == 0 {
+		return 0, nil
+	}
+	numerator := new(big.Int).Mul(big.NewInt(tokens), big.NewInt(int64(ratePerMillion)))
+	numerator.Mul(numerator, big.NewInt(num))
+	denominator := new(big.Int).Mul(big.NewInt(PerMillion), big.NewInt(den))
+	return ceilQuotient(numerator, denominator)
 }
 
 // MulDivCeil returns ceil(units * rate / divisor) with checked intermediate
@@ -175,9 +201,15 @@ func MulDivCeil(units int64, rate NanoUSD, divisor int64) (NanoUSD, error) {
 		return 0, nil
 	}
 	numerator := new(big.Int).Mul(big.NewInt(units), big.NewInt(int64(rate)))
-	divisorBig := big.NewInt(divisor)
+	return ceilQuotient(numerator, big.NewInt(divisor))
+}
+
+// ceilQuotient returns ceil(numerator/denominator) for non-negative inputs,
+// erroring when the result does not fit in NanoUSD. It is the single rounding
+// point shared by every pricing path.
+func ceilQuotient(numerator, denominator *big.Int) (NanoUSD, error) {
 	quotient, remainder := new(big.Int), new(big.Int)
-	quotient.QuoRem(numerator, divisorBig, remainder)
+	quotient.QuoRem(numerator, denominator, remainder)
 	if remainder.Sign() != 0 {
 		quotient.Add(quotient, big.NewInt(1))
 	}

@@ -498,6 +498,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const deprecated_at = deprecatedAtValue ? new Date(deprecatedAtValue).toISOString() : null;
         const deprecation_message = document.getElementById('model-deprecation-message').value.trim();
         const pricing_tiers = readPricingTiers();
+        const prompt_accounting = document.getElementById('model-prompt-accounting').value || 'inclusive';
 
         if (cache_contract) {
             try {
@@ -538,7 +539,8 @@ document.addEventListener('DOMContentLoaded', () => {
             cache_contract,
             deprecated_at,
             deprecation_message,
-            pricing_tiers
+            pricing_tiers,
+            prompt_accounting
         };
 
         const method = id ? 'PUT' : 'POST';
@@ -1284,6 +1286,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-cost-out').value = m.output_cost_per_million;
             document.getElementById('model-cost-read').value = m.cache_read_cost_per_million;
             document.getElementById('model-cost-write').value = m.cache_write_cost_per_million;
+            document.getElementById('model-prompt-accounting').value = m.prompt_accounting || 'inclusive';
             document.getElementById('model-display-name').value = m.display_name || '';
             document.getElementById('model-owned-by').value = m.owned_by || '';
             document.getElementById('model-context-window').value = m.context_window || '';

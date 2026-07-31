@@ -488,6 +488,21 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GET /v1/pricing: the effective price of every visible model right now,
+	// including which time-of-day window is in force and when it next changes.
+	// Authenticated like /models — prices are catalog data, not public.
+	if strings.HasSuffix(r.URL.Path, "/pricing") {
+		if r.Method != http.MethodGet {
+			h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error")
+			return
+		}
+		if _, ok := h.authenticateVirtualKey(w, r); !ok {
+			return
+		}
+		h.handlePricing(w, r)
+		return
+	}
+
 	if strings.HasSuffix(r.URL.Path, "/capabilities") {
 		if r.Method != http.MethodGet {
 			h.writeError(w, http.StatusMethodNotAllowed, "Method not allowed", "invalid_request_error")
@@ -737,6 +752,9 @@ func (h *ProxyHandler) handleGatewayWebSearch(w http.ResponseWriter, _ *http.Req
 // OpenAI Client Routing (Incoming: OpenAI format)
 // ------------------------------------------
 func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request, bodyBytes []byte, key *db.VirtualKey) {
+	// Pin the pricing instant before admission so the quote and the final
+	// charge cannot land on opposite sides of a peak-pricing boundary.
+	r = pinPricedAt(r)
 	var oaiReq OpenAIRequest
 	if err := json.Unmarshal(bodyBytes, &oaiReq); err != nil {
 		// Never log request bodies: they routinely contain user prompts and
@@ -852,6 +870,7 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		model:           targetModel,
 		inputUpperBound: conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
 		requestedOutput: requestedOutput,
+		pricedAt:        pricedAtFrom(r.Context()),
 	})
 	if err != nil {
 		h.saveAdmissionFailure(admissionFailure{
@@ -908,6 +927,9 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 // Anthropic Client Routing (Incoming: Anthropic format)
 // ------------------------------------------
 func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Request, bodyBytes []byte, key *db.VirtualKey) {
+	// Pin the pricing instant before admission so the quote and the final
+	// charge cannot land on opposite sides of a peak-pricing boundary.
+	r = pinPricedAt(r)
 	var anthReq AnthropicRequest
 	if err := json.Unmarshal(bodyBytes, &anthReq); err != nil {
 		// See serveOpenAIClient: never log request bodies.
@@ -1014,6 +1036,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		model:           targetModel,
 		inputUpperBound: conservativeInputTokenBound(bodyBytes, promptTokens, targetModel),
 		requestedOutput: requestedOutput,
+		pricedAt:        pricedAtFrom(r.Context()),
 	})
 	if err != nil {
 		h.saveAdmissionFailure(admissionFailure{
@@ -1262,13 +1285,14 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 				log.CacheMissTokens = finalUsage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 			}
 			log.UsageEstimated = finalUsage == nil
-			log.InputTokens = inputTokens
-			log.OutputTokens = completionTokens
-			log.CacheReadTokens = cacheRead
-			log.CacheWriteTokens = cacheWrite
 			log.UpstreamProvider = upstreamProvider
 			h.observeProviderAffinity(routeScope, upstreamProvider)
-			setCalculatedCost(&log, model, inputTokens, completionTokens, cacheRead, cacheWrite)
+			setCalculatedCost(&log, model, pricing.ReportedUsage{
+				PromptTokens:     int64(inputTokens),
+				OutputTokens:     int64(completionTokens),
+				CacheReadTokens:  int64(cacheRead),
+				CacheWriteTokens: int64(cacheWrite),
+			}, pricedAtFrom(r.Context()))
 			setStreamOutcome(&log, streamResult{
 				normalClose: normalClose,
 				idleTimeout: idleTimedOut(),
@@ -1351,12 +1375,14 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		}
 
 		log.StatusCode = http.StatusOK
-		log.OutputTokens = completionTokens
-		log.CacheReadTokens = cacheRead
-		log.CacheWriteTokens = cacheWrite
 		log.UpstreamProvider = oaiResp.Provider
 		h.observeProviderAffinity(routeScope, oaiResp.Provider)
-		setCalculatedCost(&log, model, log.InputTokens, completionTokens, cacheRead, cacheWrite)
+		setCalculatedCost(&log, model, pricing.ReportedUsage{
+			PromptTokens:     int64(log.InputTokens),
+			OutputTokens:     int64(completionTokens),
+			CacheReadTokens:  int64(cacheRead),
+			CacheWriteTokens: int64(cacheWrite),
+		}, pricedAtFrom(r.Context()))
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
 
@@ -1430,12 +1456,15 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 				return
 			}
 			logged = true
-			log.InputTokens = usageTracker.PromptTokens
-			log.OutputTokens = usageTracker.CompletionTokens
-			cacheRead := usageTracker.CacheReadTokens()
-			log.CacheReadTokens = cacheRead
-			log.CacheWriteTokens = usageTracker.CacheWriteTokens
-			setCalculatedCost(&log, model, usageTracker.PromptTokens, usageTracker.CompletionTokens, cacheRead, usageTracker.CacheWriteTokens)
+			flatWrite, write5m, write1h := usageTracker.CacheWriteTokensByTTL()
+			setCalculatedCost(&log, model, pricing.ReportedUsage{
+				PromptTokens:       int64(usageTracker.PromptTokens),
+				OutputTokens:       int64(usageTracker.CompletionTokens),
+				CacheReadTokens:    int64(usageTracker.CacheReadTokens()),
+				CacheWriteTokens:   int64(flatWrite),
+				CacheWrite5mTokens: int64(write5m),
+				CacheWrite1hTokens: int64(write1h),
+			}, pricedAtFrom(r.Context()))
 			setStreamOutcome(&log, streamResult{
 				normalClose: normalClose,
 				idleTimeout: idleTimedOut(),
@@ -1489,13 +1518,10 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 		translated, _ := json.Marshal(oaiResponse)
 
 		log.StatusCode = http.StatusOK
-		log.InputTokens = oaiResponse.Usage.PromptTokens
-		log.OutputTokens = oaiResponse.Usage.CompletionTokens
-		cacheRead := anthResp.Usage.CacheReadInputTokens
-		cacheWrite := anthResp.Usage.CacheCreationInputTokens
-		log.CacheReadTokens = cacheRead
-		log.CacheWriteTokens = cacheWrite
-		setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
+		// The Anthropic response was translated into OpenAI shape for the
+		// client, but its prompt count is still Anthropic's cache-exclusive
+		// number, so it is priced under this model's own accounting mode.
+		setCalculatedCost(&log, model, anthropicReportedUsage(&anthResp.Usage), pricedAtFrom(r.Context()))
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
 
@@ -1567,10 +1593,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 				return
 			}
 			logged = true
-			log.InputTokens = usageTracker.InputTokens
-			log.OutputTokens = usageTracker.OutputTokens
-			log.CacheReadTokens = usageTracker.CacheReadInputTokens
-			setCalculatedCost(&log, model, usageTracker.InputTokens, usageTracker.OutputTokens, usageTracker.CacheReadInputTokens, 0)
+			setCalculatedCost(&log, model, anthropicReportedUsage(&usageTracker), pricedAtFrom(r.Context()))
 			setStreamOutcome(&log, streamResult{
 				normalClose: normalClose,
 				idleTimeout: idleTimedOut(),
@@ -1624,12 +1647,13 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 		translated, _ := json.Marshal(anthResponse)
 
 		log.StatusCode = http.StatusOK
-		log.InputTokens = oaiResp.Usage.PromptTokens
-		log.OutputTokens = oaiResp.Usage.CompletionTokens
-		cacheRead := oaiResp.Usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
-		log.CacheReadTokens = cacheRead
 		log.CacheMissTokens = oaiResp.Usage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
-		setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, cacheRead, 0)
+		setCalculatedCost(&log, model, pricing.ReportedUsage{
+			PromptTokens:     int64(oaiResp.Usage.PromptTokens),
+			OutputTokens:     int64(oaiResp.Usage.CompletionTokens),
+			CacheReadTokens:  int64(oaiResp.Usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)),
+			CacheWriteTokens: int64(oaiResp.Usage.CacheWriteTokensReported()),
+		}, pricedAtFrom(r.Context()))
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
 
@@ -1703,11 +1727,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 				return
 			}
 			logged = true
-			log.InputTokens = usageTracker.InputTokens
-			log.OutputTokens = usageTracker.OutputTokens
-			log.CacheReadTokens = usageTracker.CacheReadInputTokens
-			log.CacheWriteTokens = usageTracker.CacheCreationInputTokens
-			setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheWriteTokens)
+			setCalculatedCost(&log, model, anthropicReportedUsage(&usageTracker), pricedAtFrom(r.Context()))
 			setStreamOutcome(&log, streamResult{
 				normalClose: normalClose,
 				idleTimeout: idleTimedOut(),
@@ -1758,6 +1778,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 							if cw, ok := usage["cache_creation_input_tokens"].(float64); ok {
 								usageTracker.CacheCreationInputTokens = int(cw)
 							}
+							usageTracker.ApplyCacheCreation(ParseAnthropicCacheCreation(usage))
 						}
 					}
 				}
@@ -1781,13 +1802,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 		_ = json.Unmarshal(respBody, &anthResp)
 
 		log.StatusCode = http.StatusOK
-		log.InputTokens = anthResp.Usage.InputTokens
-		log.OutputTokens = anthResp.Usage.OutputTokens
-		cacheRead := anthResp.Usage.CacheReadInputTokens
-		cacheWrite := anthResp.Usage.CacheCreationInputTokens
-		log.CacheReadTokens = cacheRead
-		log.CacheWriteTokens = cacheWrite
-		setCalculatedCost(&log, model, log.InputTokens, log.OutputTokens, cacheRead, cacheWrite)
+		setCalculatedCost(&log, model, anthropicReportedUsage(&anthResp.Usage), pricedAtFrom(r.Context()))
 		log.LatencyMS = int(time.Since(startTime).Milliseconds())
 		h.saveRequestLog(log)
 
@@ -2214,45 +2229,138 @@ func estimateTokens(text string) int {
 // updated in lockstep if that row is ever repriced. Data-driven tier columns
 // are the durable follow-up; today only M3 is tier-priced.
 func calculateCost(model *db.Model, input, output, cacheRead, cacheWrite int) float64 {
-	cost, err := calculateCostNano(model, input, output, cacheRead, cacheWrite)
+	rules, err := pricingRulesForModel(model)
 	if err != nil {
 		return 0
 	}
-	return cost.USD()
-}
-
-func setCalculatedCost(entry *db.RequestLog, model *db.Model, input, output, cacheRead, cacheWrite int) {
-	cost, err := calculateCostNano(model, input, output, cacheRead, cacheWrite)
-	if err != nil {
-		entry.Cost = 0
-		entry.CostNanoUSD = 0
-		entry.UsageEstimated = true
-		if entry.ErrorMessage != "" {
-			entry.ErrorMessage += "; "
-		}
-		entry.ErrorMessage += "exact pricing failed: " + err.Error()
-		log.Printf("[BILLING-ERROR] exact pricing failed for request %s: %v", entry.ID, err)
-		return
+	accounting := pricing.PromptInclusive
+	if model != nil {
+		accounting = pricing.ParsePromptAccounting(model.PromptAccounting)
 	}
-	entry.CostNanoUSD = cost
-	entry.Cost = cost.USD()
-}
-
-func calculateCostNano(model *db.Model, input, output, cacheRead, cacheWrite int) (money.NanoUSD, error) {
-	rules, err := pricingRulesForModel(model)
-	if err != nil {
-		return 0, err
-	}
-	quote, err := rules.Quote(pricing.Usage{
-		InputTokens:      int64(input),
+	usage, _ := pricing.NormalizeUsage(pricing.ReportedUsage{
+		PromptTokens:     int64(input),
 		OutputTokens:     int64(output),
 		CacheReadTokens:  int64(cacheRead),
 		CacheWriteTokens: int64(cacheWrite),
-	})
+	}, accounting)
+	quote, err := rules.Quote(usage)
 	if err != nil {
-		return 0, err
+		return 0
 	}
-	return quote.Cost, nil
+	return quote.Cost.USD()
+}
+
+// anthropicReportedUsage maps an Anthropic usage payload onto the canonical
+// reported shape, splitting cache creation by requested entry lifetime where
+// the upstream provides that breakdown.
+func anthropicReportedUsage(usage *AnthropicUsage) pricing.ReportedUsage {
+	if usage == nil {
+		return pricing.ReportedUsage{}
+	}
+	reported := pricing.ReportedUsage{
+		PromptTokens:       int64(usage.InputTokens),
+		OutputTokens:       int64(usage.OutputTokens),
+		CacheReadTokens:    int64(usage.CacheReadInputTokens),
+		CacheWrite5mTokens: int64(usage.CacheCreation5mInputTokens),
+		CacheWrite1hTokens: int64(usage.CacheCreation1hInputTokens),
+	}
+	// The flat total covers only what the per-TTL breakdown did not already
+	// account for, so a provider reporting both shapes is not billed twice.
+	remainder := int64(usage.CacheCreationInputTokens) -
+		reported.CacheWrite5mTokens - reported.CacheWrite1hTokens
+	if remainder > 0 {
+		reported.CacheWriteTokens = remainder
+	}
+	return reported
+}
+
+// setCalculatedCost prices a request from the token counts an upstream
+// reported, in that upstream's own accounting convention.
+//
+// This is the single place provider usage becomes money. It used to be four
+// near-identical copies scattered across the streaming and non-streaming
+// OpenAI and Anthropic paths, each assigning token fields by hand — which is
+// exactly how one of them came to feed Anthropic's cache-exclusive token
+// counts into arithmetic that assumed the inclusive convention, billing fresh
+// input at zero. Keeping one funnel keeps that class of bug out.
+func setCalculatedCost(entry *db.RequestLog, model *db.Model, reported pricing.ReportedUsage, pricedAt time.Time) {
+	accounting := pricing.PromptInclusive
+	if model != nil {
+		accounting = pricing.ParsePromptAccounting(model.PromptAccounting)
+	}
+	usage, anomaly := pricing.NormalizeUsage(reported, accounting)
+
+	entry.PromptAccounting = string(accounting)
+	entry.UsageAnomaly = string(anomaly)
+	// The canonical prompt total is recorded rather than the provider's raw
+	// number, so input_tokens means the same thing for every provider and a
+	// dashboard can sum the column without comparing dialects.
+	entry.InputTokens = int(usage.PromptTotalTokens)
+	entry.OutputTokens = int(usage.OutputTokens)
+	entry.CacheReadTokens = int(usage.CacheReadTokens + usage.CacheRead5mTokens)
+	entry.CacheWriteTokens = int(usage.CacheWriteTokens + usage.CacheWrite5mTokens + usage.CacheWrite1hTokens)
+
+	if anomaly != pricing.AnomalyNone {
+		log.Printf("[BILLING-ANOMALY] request %s model %s reported inconsistent usage (%s): %+v",
+			entry.ID, modelName(model), anomaly, reported)
+	}
+
+	rules, err := pricingRulesForModel(model)
+	if err == nil {
+		var quote pricing.Quote
+		quote, err = rules.QuoteAt(usage, pricedAt)
+		if err == nil {
+			applyQuoteToLog(entry, quote)
+			return
+		}
+	}
+
+	entry.Cost = 0
+	entry.CostNanoUSD = 0
+	entry.UsageEstimated = true
+	if entry.ErrorMessage != "" {
+		entry.ErrorMessage += "; "
+	}
+	entry.ErrorMessage += "exact pricing failed: " + err.Error()
+	log.Printf("[BILLING-ERROR] exact pricing failed for request %s: %v", entry.ID, err)
+}
+
+// applyQuoteToLog records both the charge and the derivation that produced it.
+func applyQuoteToLog(entry *db.RequestLog, quote pricing.Quote) {
+	entry.CostNanoUSD = quote.Cost
+	entry.Cost = quote.Cost.USD()
+
+	receipt := quote.Receipt
+	entry.PricingRuleSetID = receipt.RuleSetID
+	entry.PriceWindowID = receipt.WindowID
+	entry.PriceMultiplierNum = receipt.MultiplierNum
+	entry.PriceMultiplierDen = receipt.MultiplierDen
+	if receipt.TierThreshold != pricing.BaseTierThreshold {
+		threshold := receipt.TierThreshold
+		entry.PricingTierThreshold = &threshold
+	} else {
+		entry.PricingTierThreshold = nil
+	}
+	if !receipt.PricedAt.IsZero() {
+		pricedAt := receipt.PricedAt
+		entry.PricedAt = &pricedAt
+	}
+	entry.PricingLines = entry.PricingLines[:0]
+	for _, line := range receipt.Lines {
+		entry.PricingLines = append(entry.PricingLines, db.RequestPriceLine{
+			TokenClass:     string(line.Class),
+			Tokens:         line.Tokens,
+			RatePerMillion: line.RatePerMillion,
+			Cost:           line.Cost,
+		})
+	}
+}
+
+func modelName(model *db.Model) string {
+	if model == nil {
+		return "<unknown>"
+	}
+	return model.Name
 }
 
 func pricingRulesForModel(model *db.Model) (pricing.RuleSet, error) {
@@ -2281,11 +2389,33 @@ func pricingRulesForModel(model *db.Model) (pricing.RuleSet, error) {
 		CacheReadPerMillion:  cacheRead,
 		CacheWritePerMillion: cacheWrite,
 	}
-	canonical := fmt.Sprintf("%s|%d|%d|%d|%d|%v",
-		model.ID, input, output, cacheRead, cacheWrite, model.PricingTiers)
+	base = pricing.OverlayTTLRates(base, model.CacheTTLRates, nil)
+
+	tiers := make([]pricing.Tier, 0, len(model.PricingTiers))
+	for _, tier := range model.PricingTiers {
+		threshold := tier.MinInputTokensExclusive
+		tier.Rates = pricing.OverlayTTLRates(tier.Rates, model.CacheTTLRates, &threshold)
+		tiers = append(tiers, tier)
+	}
+
+	accounting := pricing.ParsePromptAccounting(model.PromptAccounting)
+	// Every input to the resolved price is folded into the snapshot id. A
+	// changed TTL rate, price window or accounting mode must produce a new id,
+	// otherwise two requests billed at genuinely different rates would claim
+	// the same rule set and the audit trail would be a lie.
+	canonical := fmt.Sprintf("%s|%d|%d|%d|%d|%v|%v|%v|%s",
+		model.ID, input, output, cacheRead, cacheWrite,
+		tiers, model.CacheTTLRates, model.PriceWindows, accounting)
 	snapshot := sha256.Sum256([]byte(canonical))
 	ruleID := fmt.Sprintf("pricing:%x", snapshot)
-	return pricing.NewRuleSet(ruleID, base, model.PricingTiers)
+
+	return pricing.New(pricing.Spec{
+		ID:         ruleID,
+		Base:       base,
+		Tiers:      tiers,
+		Windows:    model.PriceWindows,
+		Accounting: accounting,
+	})
 }
 
 func exactRate(exact money.NanoUSD, legacy float64) (money.NanoUSD, error) {
@@ -2360,6 +2490,11 @@ type generationQuoteRequest struct {
 	model           *db.Model
 	inputUpperBound int
 	requestedOutput int
+	// pricedAt pins the instant this request is priced at. Settlement re-uses
+	// it instead of reading the clock, so a request admitted just before a
+	// peak-pricing boundary is billed at the rate it was quoted rather than
+	// at whatever rate happens to be in force when it finishes.
+	pricedAt time.Time
 }
 
 func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generationQuoteRequest) (int, money.NanoUSD, db.BudgetAvailability, error) {
@@ -2367,11 +2502,9 @@ func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generat
 	if err != nil {
 		return 0, 0, db.BudgetAvailability{}, err
 	}
-	usage := pricing.Usage{
-		InputTokens:  int64(request.inputUpperBound),
-		OutputTokens: int64(request.requestedOutput),
-	}
-	quote, err := rules.Quote(usage)
+	usage := pricing.InputUsage(int64(request.inputUpperBound))
+	usage.OutputTokens = int64(request.requestedOutput)
+	quote, err := rules.QuoteAt(usage, request.pricedAt)
 	if err != nil {
 		return 0, 0, db.BudgetAvailability{}, err
 	}
@@ -2383,10 +2516,11 @@ func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generat
 	if quote.Cost <= available {
 		return request.requestedOutput, quote.Cost, availability, nil
 	}
-	allowed, maxErr := rules.MaxOutputTokens(
-		pricing.Usage{InputTokens: int64(request.inputUpperBound)},
+	allowed, maxErr := rules.MaxOutputTokensAt(
+		pricing.InputUsage(int64(request.inputUpperBound)),
 		int64(request.requestedOutput),
 		available,
+		request.pricedAt,
 	)
 	if maxErr != nil {
 		return 0, 0, db.BudgetAvailability{}, maxErr
@@ -2395,7 +2529,7 @@ func (h *ProxyHandler) affordableGeneration(ctx context.Context, request generat
 		return 0, 0, availability, &db.BudgetExceededError{Requested: quote.Cost, Available: available}
 	}
 	usage.OutputTokens = allowed
-	reduced, quoteErr := rules.Quote(usage)
+	reduced, quoteErr := rules.QuoteAt(usage, request.pricedAt)
 	if quoteErr != nil {
 		return 0, 0, db.BudgetAvailability{}, quoteErr
 	}

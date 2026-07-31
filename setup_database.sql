@@ -79,6 +79,12 @@ CREATE TABLE IF NOT EXISTS models (
     display_name VARCHAR(255) DEFAULT '',
     description TEXT DEFAULT '',
     owned_by VARCHAR(100) DEFAULT '',
+    -- Whether this provider's reported prompt token count already includes
+    -- cached tokens. Anthropic reports them separately ('exclusive'); every
+    -- other upstream we speak to folds them in ('inclusive'). Pricing needs
+    -- this to avoid subtracting tokens that were never in the total.
+    prompt_accounting VARCHAR(16) NOT NULL DEFAULT 'inclusive'
+        CHECK (prompt_accounting IN ('inclusive', 'exclusive')),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -102,7 +108,72 @@ CREATE TABLE IF NOT EXISTS request_logs (
     requested_model VARCHAR(255) DEFAULT '',
     complexity VARCHAR(50) DEFAULT '',
     failover_attempts INTEGER DEFAULT 0,
+    -- Pricing provenance: enough to re-derive this charge without the models
+    -- table, which may since have been re-priced. See request_pricing_lines.
+    pricing_rule_set_id VARCHAR(100) NOT NULL DEFAULT '',
+    pricing_tier_threshold BIGINT,
+    price_window_id VARCHAR(100) NOT NULL DEFAULT '',
+    price_multiplier_num BIGINT NOT NULL DEFAULT 1,
+    price_multiplier_den BIGINT NOT NULL DEFAULT 1 CHECK (price_multiplier_den > 0),
+    priced_at TIMESTAMP WITH TIME ZONE,
+    prompt_accounting VARCHAR(16) NOT NULL DEFAULT 'inclusive',
+    usage_anomaly VARCHAR(64) NOT NULL DEFAULT '',
+    upstream_cost_nano_usd BIGINT,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 7a. Per-token-class derivation of every charge. A cost without its
+-- breakdown is recorded but not auditable, so these rows are written in the
+-- same transaction as the request log they belong to.
+CREATE TABLE IF NOT EXISTS request_pricing_lines (
+    request_log_id VARCHAR(100) NOT NULL REFERENCES request_logs(id) ON DELETE CASCADE,
+    token_class VARCHAR(32) NOT NULL,
+    tokens BIGINT NOT NULL CHECK (tokens >= 0),
+    rate_nano_usd_per_million BIGINT NOT NULL CHECK (rate_nano_usd_per_million >= 0),
+    cost_nano_usd BIGINT NOT NULL CHECK (cost_nano_usd >= 0),
+    PRIMARY KEY (request_log_id, token_class),
+    CHECK (token_class IN (
+        'input_fresh', 'output',
+        'cache_read', 'cache_read_5m',
+        'cache_write', 'cache_write_5m', 'cache_write_1h'
+    ))
+);
+
+-- 7b. Cache rates that vary by requested entry lifetime. A NULL rate inherits
+-- from the model (or its context tier), so a model with no rows here prices
+-- exactly as it would without this table.
+CREATE TABLE IF NOT EXISTS model_cache_ttl_rates (
+    id VARCHAR(100) PRIMARY KEY,
+    model_id VARCHAR(100) NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    min_input_tokens_exclusive BIGINT,
+    ttl VARCHAR(16) NOT NULL CHECK (ttl IN ('5m', '1h', 'default')),
+    cache_read_nano_usd_per_million BIGINT,
+    cache_write_nano_usd_per_million BIGINT,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 7c. Time-of-day price scaling (peak/off-peak). The multiplier is an exact
+-- rational so "2x" is exactly 2x. Boundaries are UTC minutes-of-day;
+-- start > end wraps midnight. Exactly one window applies to a request.
+CREATE TABLE IF NOT EXISTS model_price_windows (
+    id VARCHAR(100) PRIMARY KEY,
+    model_id VARCHAR(100) NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    label VARCHAR(64) NOT NULL DEFAULT '',
+    start_minute_utc INTEGER NOT NULL CHECK (start_minute_utc >= 0 AND start_minute_utc < 1440),
+    end_minute_utc INTEGER NOT NULL CHECK (end_minute_utc >= 0 AND end_minute_utc <= 1440),
+    weekday_mask INTEGER NOT NULL DEFAULT 127 CHECK (weekday_mask >= 1 AND weekday_mask <= 127),
+    multiplier_num BIGINT NOT NULL CHECK (multiplier_num >= 0),
+    multiplier_den BIGINT NOT NULL DEFAULT 1 CHECK (multiplier_den > 0),
+    applies_to TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    effective_from TIMESTAMP WITH TIME ZONE,
+    effective_until TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (start_minute_utc <> end_minute_utc)
 );
 
 -- 8. System Settings
@@ -176,10 +247,9 @@ ON CONFLICT (id) DO NOTHING;
 -- automatically by the models AFTER INSERT trigger; no companion insert is
 -- needed here.
 --
--- model-qwen-flash is marked muhiyacode_visible=true to match its own
--- status='active' (the same rule 021's backfill applied to every
--- pre-existing row) — flip it to false in the admin panel if this model is
--- intended for MuhiyaChat only, not the coding agent.
+-- model-qwen-flash is marked muhiyacode_visible=false: it is intended for
+-- MuhiyaChat only, not the coding agent (explicit operator decision —
+-- do not default it to true on a future re-seed).
 INSERT INTO models (
     id, name, provider_id, target_model,
     input_cost_per_million, output_cost_per_million,
@@ -193,7 +263,7 @@ INSERT INTO models (
 ('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek', false),
 ('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-reasoner', 0.55, 2.19, 0.14, 0.55, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Reasoner', 'DeepSeek reasoning model (R1)', 'deepseek', false),
 ('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek', false),
-('model-qwen-flash', 'qwen3.7-flash', 'qwen', 'qwen-2.5-flash', 0.05, 0.10, 0.02, 0.05, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'Qwen 3.7 Flash', 'Alibaba Qwen Flash model', 'qwen', true),
+('model-qwen-flash', 'qwen3.7-flash', 'qwen', 'qwen-2.5-flash', 0.05, 0.10, 0.02, 0.05, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'Qwen 3.7 Flash', 'Alibaba Qwen Flash model', 'qwen', false),
 ('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai', false)
 ON CONFLICT (id) DO NOTHING;
 

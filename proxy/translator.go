@@ -89,6 +89,26 @@ type OpenAIUsage struct {
 	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
 	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
 	CacheWriteTokens      int `json:"-"` // internal tracking
+	// Cache writes split by requested entry lifetime, for upstreams that
+	// price a five-minute write differently from a one-hour one. Internal
+	// tracking only; zero when the upstream sends just a flat total.
+	CacheWrite5mTokens int `json:"-"`
+	CacheWrite1hTokens int `json:"-"`
+}
+
+// CacheWriteTokensByTTL splits reported cache-write tokens by entry lifetime.
+// The flat total covers only what the per-lifetime breakdown did not already
+// account for, so an upstream reporting both shapes is not billed twice.
+func (u *OpenAIUsage) CacheWriteTokensByTTL() (flat, fiveMinute, oneHour int) {
+	if u == nil {
+		return 0, 0, 0
+	}
+	fiveMinute, oneHour = u.CacheWrite5mTokens, u.CacheWrite1hTokens
+	flat = u.CacheWriteTokensReported() - fiveMinute - oneHour
+	if flat < 0 {
+		flat = 0
+	}
+	return flat, fiveMinute, oneHour
 }
 
 // CacheWriteTokensReported returns cache-write (creation) tokens the upstream
@@ -319,6 +339,46 @@ type AnthropicUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	// Cache writes priced by requested entry lifetime. Anthropic reports
+	// these under a nested cache_creation object alongside the flat total
+	// above; they are unmarshalled separately (see AnthropicCacheCreation)
+	// and are zero for upstreams that only send the flat number.
+	CacheCreation5mInputTokens int `json:"-"`
+	CacheCreation1hInputTokens int `json:"-"`
+}
+
+// AnthropicCacheCreation is the per-lifetime breakdown of cache-write tokens.
+// A five-minute ephemeral write and a one-hour write are priced differently,
+// so collapsing them into one number loses the information pricing needs.
+type AnthropicCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+}
+
+// ApplyCacheCreation folds a parsed breakdown into the usage totals.
+func (u *AnthropicUsage) ApplyCacheCreation(breakdown *AnthropicCacheCreation) {
+	if u == nil || breakdown == nil {
+		return
+	}
+	u.CacheCreation5mInputTokens = breakdown.Ephemeral5mInputTokens
+	u.CacheCreation1hInputTokens = breakdown.Ephemeral1hInputTokens
+}
+
+// ParseAnthropicCacheCreation reads the nested cache_creation object from a
+// decoded usage map, returning nil when the upstream did not send one.
+func ParseAnthropicCacheCreation(usage map[string]interface{}) *AnthropicCacheCreation {
+	nested, ok := usage["cache_creation"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	breakdown := &AnthropicCacheCreation{}
+	if value, ok := nested["ephemeral_5m_input_tokens"].(float64); ok {
+		breakdown.Ephemeral5mInputTokens = int(value)
+	}
+	if value, ok := nested["ephemeral_1h_input_tokens"].(float64); ok {
+		breakdown.Ephemeral1hInputTokens = int(value)
+	}
+	return breakdown
 }
 
 type AnthropicResponse struct {
@@ -942,6 +1002,14 @@ func TranslateAnthropicChunkToOpenAI(line string, msgID string, virtualModel str
 				}
 				if cacheWrite, ok := usage["cache_creation_input_tokens"].(float64); ok {
 					usageTracker.CacheWriteTokens = int(cacheWrite)
+				}
+				if breakdown := ParseAnthropicCacheCreation(usage); breakdown != nil {
+					usageTracker.CacheWrite5mTokens = breakdown.Ephemeral5mInputTokens
+					usageTracker.CacheWrite1hTokens = breakdown.Ephemeral1hInputTokens
+					if usageTracker.CacheWriteTokens == 0 {
+						usageTracker.CacheWriteTokens = breakdown.Ephemeral5mInputTokens +
+							breakdown.Ephemeral1hInputTokens
+					}
 				}
 			}
 		}

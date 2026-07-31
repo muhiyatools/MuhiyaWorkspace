@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gateway/db"
+	"gateway/pricing"
 	"github.com/google/uuid"
 )
 
@@ -265,7 +266,11 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		reqLog.Cost = 0
 		reqLog.CostNanoUSD = 0
 	} else {
-		setCalculatedCost(&reqLog, model, totalInput, totalOutput, totalCacheRead, 0)
+		setCalculatedCost(&reqLog, model, pricing.ReportedUsage{
+			PromptTokens:    int64(totalInput),
+			OutputTokens:    int64(totalOutput),
+			CacheReadTokens: int64(totalCacheRead),
+		}, pricedAtFrom(r.Context()))
 	}
 	reqLog.LatencyMS = int(time.Since(startTime).Milliseconds())
 	h.saveRequestLog(reqLog)

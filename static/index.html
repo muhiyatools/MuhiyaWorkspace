@@ -672,6 +672,19 @@
                         <input type="number" step="0.0001" id="model-cost-write" required placeholder="3.75">
                     </div>
                 </div>
+                <div class="form-group">
+                    <label for="model-prompt-accounting">Prompt Token Accounting</label>
+                    <select id="model-prompt-accounting">
+                        <option value="inclusive">Inclusive &mdash; prompt count includes cached tokens (OpenAI, DeepSeek, OpenRouter)</option>
+                        <option value="exclusive">Exclusive &mdash; prompt count excludes cached tokens (Anthropic)</option>
+                    </select>
+                    <small style="color:#a1a1aa; display:block; margin-top:0.35rem; line-height:1.5;">
+                        How this upstream reports prompt tokens. Anthropic reports
+                        <code>input_tokens</code> without the cached ones; everyone else folds them in.
+                        Setting this wrong bills fresh input tokens at zero on every cache hit,
+                        so leave it on the default unless you know the provider's convention.
+                    </small>
+                </div>
                 <div class="form-group-row">
                     <div class="form-group">
                         <label for="model-display-name">Display Name</label>

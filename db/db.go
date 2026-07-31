@@ -122,6 +122,15 @@ type Model struct {
 	PricePerMinute               float64        `json:"price_per_minute"`
 	PricePerMinuteNano           money.NanoUSD  `json:"price_per_minute_nano_usd"`
 	PricingTiers                 []pricing.Tier `json:"pricing_tiers,omitempty"`
+	// CacheTTLRates prices cache entries by requested lifetime; PriceWindows
+	// scales rates by time of day. Both are empty for most models, in which
+	// case pricing resolves exactly as it did before they existed.
+	CacheTTLRates []pricing.TTLRate `json:"cache_ttl_rates,omitempty"`
+	PriceWindows  []pricing.Window  `json:"price_windows,omitempty"`
+	// PromptAccounting says whether this provider's reported prompt token
+	// count already includes cached tokens. Getting it wrong bills fresh
+	// input at zero, so it is stored per model rather than guessed.
+	PromptAccounting string `json:"prompt_accounting,omitempty"`
 	CatalogRecordID              string         `json:"catalog_record_id,omitempty"`
 	Tags                         []string       `json:"tags,omitempty"`
 	ProviderFamily               string         `json:"provider_family,omitempty"`
@@ -226,7 +235,34 @@ type RequestLog struct {
 	BudgetWindowID        string     `json:"budget_window_id,omitempty"`
 	BudgetWindowStartedAt *time.Time `json:"budget_window_started_at,omitempty"`
 	BudgetWindowResetAt   *time.Time `json:"budget_window_reset_at,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
+
+	// Pricing provenance. Together with PricingLines these make a charge
+	// reproducible: the cost can be re-derived from this row alone, without
+	// consulting the models table, which may since have been re-priced.
+	PricingRuleSetID     string           `json:"pricing_rule_set_id,omitempty"`
+	PricingTierThreshold *int64           `json:"pricing_tier_threshold,omitempty"`
+	PriceWindowID        string           `json:"price_window_id,omitempty"`
+	PriceMultiplierNum   int64            `json:"price_multiplier_num,omitempty"`
+	PriceMultiplierDen   int64            `json:"price_multiplier_den,omitempty"`
+	PricedAt             *time.Time       `json:"priced_at,omitempty"`
+	PromptAccounting     string           `json:"prompt_accounting,omitempty"`
+	PricingLines         []RequestPriceLine `json:"pricing_lines,omitempty"`
+	// UsageAnomaly is set when the upstream's own token numbers were
+	// internally inconsistent and had to be clamped.
+	UsageAnomaly string `json:"usage_anomaly,omitempty"`
+	// UpstreamCostNanoUSD is the provider's own reported cost where it gives
+	// one. Divergence from CostNanoUSD means our catalog price has drifted.
+	UpstreamCostNanoUSD *money.NanoUSD `json:"upstream_cost_nano_usd,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// RequestPriceLine is one token class's contribution to a request's charge.
+type RequestPriceLine struct {
+	TokenClass     string        `json:"token_class"`
+	Tokens         int64         `json:"tokens"`
+	RatePerMillion money.NanoUSD `json:"rate_nano_usd_per_million"`
+	Cost           money.NanoUSD `json:"cost_nano_usd"`
 }
 
 func RequestStatusForHTTP(statusCode int) string {
@@ -1242,7 +1278,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
 		FROM models
 		WHERE status = 'active' AND (name = $1 OR id = $1 OR lower(display_name) = lower($1))
 		ORDER BY (name = $1) DESC, (id = $1) DESC
@@ -1253,7 +1289,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
 			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.PromptAccounting)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1264,6 +1300,9 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		return nil, err
 	}
 	if err := db.attachCatalogMetadata(&m); err != nil {
+		return nil, err
+	}
+	if err := db.attachPricingExtras([]*Model{&m}); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -1279,7 +1318,7 @@ func (db *DB) GetModel(id string) (*Model, error) {
 		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion,
@@ -1287,7 +1326,7 @@ func (db *DB) GetModel(id string) (*Model, error) {
 			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
 			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.PromptAccounting)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1298,6 +1337,9 @@ func (db *DB) GetModel(id string) (*Model, error) {
 		return nil, err
 	}
 	if err := db.attachCatalogMetadata(&m); err != nil {
+		return nil, err
+	}
+	if err := db.attachPricingExtras([]*Model{&m}); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -1312,7 +1354,7 @@ func (db *DB) ListModels() ([]Model, error) {
 		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE)
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1328,7 +1370,7 @@ func (db *DB) ListModels() ([]Model, error) {
 			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
 			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.PromptAccounting)
 		if err != nil {
 			return nil, err
 		}
@@ -1340,6 +1382,7 @@ func (db *DB) ListModels() ([]Model, error) {
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	pointers := make([]*Model, 0, len(list))
 	for i := range list {
 		if err := db.attachPricingTiers(&list[i]); err != nil {
 			return nil, err
@@ -1347,6 +1390,10 @@ func (db *DB) ListModels() ([]Model, error) {
 		if err := db.attachCatalogMetadata(&list[i]); err != nil {
 			return nil, err
 		}
+		pointers = append(pointers, &list[i])
+	}
+	if err := db.attachPricingExtras(pointers); err != nil {
+		return nil, err
 	}
 	return list, nil
 }
@@ -1377,6 +1424,127 @@ func (db *DB) attachPricingTiers(model *Model) error {
 		model.PricingTiers = append(model.PricingTiers, tier)
 	}
 	return rows.Err()
+}
+
+// attachPricingExtras loads cache-TTL rates and time-of-day price windows for
+// a whole model set in two queries rather than two per model: these run on
+// every catalog refresh, and a per-model round trip here would be paid on a
+// hot path for tables that are empty for almost every model.
+func (db *DB) attachPricingExtras(models []*Model) error {
+	if len(models) == 0 {
+		return nil
+	}
+	byID := make(map[string]*Model, len(models))
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		model.CacheTTLRates = nil
+		model.PriceWindows = nil
+		byID[model.ID] = model
+		ids = append(ids, model.ID)
+	}
+	if err := db.loadCacheTTLRates(byID, ids); err != nil {
+		return err
+	}
+	return db.loadPriceWindows(byID, ids)
+}
+
+func (db *DB) loadCacheTTLRates(byID map[string]*Model, ids []string) error {
+	rows, err := db.conn.Query(`SELECT model_id, min_input_tokens_exclusive, ttl,
+		cache_read_nano_usd_per_million, cache_write_nano_usd_per_million
+		FROM model_cache_ttl_rates
+		WHERE model_id = ANY($1) AND enabled = TRUE
+		ORDER BY model_id, min_input_tokens_exclusive NULLS FIRST, ttl`, pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var modelID string
+		var threshold sql.NullInt64
+		var rate pricing.TTLRate
+		var read, write sql.NullInt64
+		if err := rows.Scan(&modelID, &threshold, &rate.TTL, &read, &write); err != nil {
+			return err
+		}
+		if threshold.Valid {
+			value := threshold.Int64
+			rate.MinInputTokensExclusive = &value
+		}
+		if read.Valid {
+			value := money.NanoUSD(read.Int64)
+			rate.CacheReadPerMillion = &value
+		}
+		if write.Valid {
+			value := money.NanoUSD(write.Int64)
+			rate.CacheWritePerMillion = &value
+		}
+		if model, ok := byID[modelID]; ok && pricing.ValidTTL(rate.TTL) {
+			model.CacheTTLRates = append(model.CacheTTLRates, rate)
+		}
+	}
+	return rows.Err()
+}
+
+func (db *DB) loadPriceWindows(byID map[string]*Model, ids []string) error {
+	rows, err := db.conn.Query(`SELECT model_id, id, label, start_minute_utc, end_minute_utc,
+		weekday_mask, multiplier_num, multiplier_den, applies_to, priority,
+		effective_from, effective_until
+		FROM model_price_windows
+		WHERE model_id = ANY($1) AND enabled = TRUE
+		ORDER BY model_id, priority DESC, id`, pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var modelID, appliesTo string
+		var window pricing.Window
+		var from, until sql.NullTime
+		if err := rows.Scan(&modelID, &window.ID, &window.Label,
+			&window.StartMinuteUTC, &window.EndMinuteUTC, &window.WeekdayMask,
+			&window.MultiplierNum, &window.MultiplierDen, &appliesTo,
+			&window.Priority, &from, &until); err != nil {
+			return err
+		}
+		window.AppliesTo = parseTokenClasses(appliesTo)
+		if from.Valid {
+			value := from.Time
+			window.EffectiveFrom = &value
+		}
+		if until.Valid {
+			value := until.Time
+			window.EffectiveUntil = &value
+		}
+		model, ok := byID[modelID]
+		if !ok {
+			continue
+		}
+		// A malformed row must not take the whole catalog down with it: skip
+		// it loudly and keep serving the model at its unscaled rates, which
+		// is the conservative direction (no surprise multiplier).
+		if err := window.Validate(); err != nil {
+			log.Printf("[PRICING] ignoring invalid price window %s on model %s: %v",
+				window.ID, modelID, err)
+			continue
+		}
+		model.PriceWindows = append(model.PriceWindows, window)
+	}
+	return rows.Err()
+}
+
+func parseTokenClasses(raw string) []pricing.TokenClass {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var classes []pricing.TokenClass
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			classes = append(classes, pricing.TokenClass(part))
+		}
+	}
+	return classes
 }
 
 func (db *DB) attachCatalogMetadata(model *Model) error {
@@ -1456,6 +1624,22 @@ func applyModelCatalogDefaults(model *Model) error {
 	}
 	if model.PricingRuleSetID == "" {
 		model.PricingRuleSetID = "pricing:" + model.ID
+	}
+	// Default the accounting mode from the provider family rather than leaving
+	// it blank: an unset mode would be read as inclusive, which for an
+	// Anthropic model silently bills its fresh input tokens at zero.
+	if model.PromptAccounting == "" {
+		if strings.EqualFold(model.ProviderFamily, "anthropic") {
+			model.PromptAccounting = string(pricing.PromptExclusive)
+		} else {
+			model.PromptAccounting = string(pricing.PromptInclusive)
+		}
+	}
+	if !pricing.ParsePromptAccounting(model.PromptAccounting).Valid() ||
+		(model.PromptAccounting != string(pricing.PromptInclusive) &&
+			model.PromptAccounting != string(pricing.PromptExclusive)) {
+		return fmt.Errorf("%w: invalid prompt accounting %q",
+			ErrInvalidModelConfig, model.PromptAccounting)
 	}
 	if len(model.SupportedParameters) == 0 {
 		model.SupportedParameters = []string{
@@ -1561,15 +1745,15 @@ func (db *DB) CreateModel(m Model) error {
 		routing_tier, model_type, price_per_minute, price_per_minute_nano_usd, transcribe, context_window, max_output_tokens,
 		display_name, description, owned_by, supports_vision, supports_thinking,
 		supports_audio, supports_video, supports_documents, max_attachment_mb, accepted_mime_types,
-		muhiyacode_visible
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)`,
+		muhiyacode_visible, prompt_accounting
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
 		m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
 		m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.PricePerMinuteNano, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
 		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision, m.SupportsThinking,
 		m.SupportsAudio, m.SupportsVideo, m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes,
-		m.MuhiyaCodeVisible)
+		m.MuhiyaCodeVisible, m.PromptAccounting)
 	if err != nil {
 		return err
 	}
@@ -1607,14 +1791,15 @@ func (db *DB) UpdateModel(m Model) error {
 		price_per_minute_nano_usd = $16, transcribe = $17, context_window = $18, max_output_tokens = $19,
 		display_name = $20, description = $21, owned_by = $22, supports_vision = $23,
 		supports_thinking = $24, supports_audio = $25, supports_video = $26, supports_documents = $27,
-		max_attachment_mb = $28, accepted_mime_types = $29, muhiyacode_visible = $30 WHERE id = $31`,
+		max_attachment_mb = $28, accepted_mime_types = $29, muhiyacode_visible = $30, prompt_accounting = $31 WHERE id = $32`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
 		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
 		m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
 		m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.PricePerMinuteNano,
 		m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
 		m.OwnedBy, m.SupportsVision, m.SupportsThinking, m.SupportsAudio, m.SupportsVideo,
-		m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes, m.MuhiyaCodeVisible, m.ID)
+		m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes, m.MuhiyaCodeVisible,
+		m.PromptAccounting, m.ID)
 	if err != nil {
 		return err
 	}
@@ -1718,7 +1903,17 @@ func (db *DB) InsertRequestLog(log RequestLog) error {
 		return fmt.Errorf("refusing to insert request log %s: %w", log.ID, err)
 	}
 
-	return insertRequestLog(db.conn, log)
+	// The log row and its pricing lines are written together: a charge whose
+	// derivation is missing is not auditable, so the two must never diverge.
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertRequestLog(tx, log); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type requestLogExecer interface {
@@ -1745,25 +1940,84 @@ func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
 	if entry.RequestStatus == "" {
 		entry.RequestStatus = RequestStatusForHTTP(entry.StatusCode)
 	}
-	_, err := exec.Exec(`INSERT INTO request_logs (
+	if entry.PriceMultiplierNum <= 0 && entry.PriceMultiplierDen <= 0 {
+		entry.PriceMultiplierNum, entry.PriceMultiplierDen = 1, 1
+	}
+	if entry.PriceMultiplierDen <= 0 {
+		entry.PriceMultiplierDen = 1
+	}
+	if entry.PromptAccounting == "" {
+		entry.PromptAccounting = string(pricing.PromptInclusive)
+	}
+	result, err := exec.Exec(`INSERT INTO request_logs (
 		id, virtual_key_id, user_id, session_id, client_request_id, attempt_number,
 		model_id, provider_id, request_path, status_code, request_status, streamed, cache_epoch,
 		input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_miss_tokens,
 		cost, cost_nano_usd, latency_ms, error_message, created_at, client_app,
 		requested_model, complexity, failover_attempts, thinking_level, usage_estimated, upstream_provider,
-		budget_window_id, budget_window_started_at, budget_window_reset_at
+		budget_window_id, budget_window_started_at, budget_window_reset_at,
+		pricing_rule_set_id, pricing_tier_threshold, price_window_id,
+		price_multiplier_num, price_multiplier_den, priced_at, prompt_accounting,
+		usage_anomaly, upstream_cost_nano_usd
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
 		$14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-		$25, $26, $27, $28, $29, $30, $31, $32, $33
+		$25, $26, $27, $28, $29, $30, $31, $32, $33,
+		$34, $35, $36, $37, $38, $39, $40, $41, $42
 	) ON CONFLICT (id) DO NOTHING`,
 		entry.ID, entry.VirtualKeyID, entry.UserID, entry.SessionID, entry.ClientRequestID, entry.AttemptNumber,
 		modelID, providerID, entry.RequestPath, entry.StatusCode, entry.RequestStatus, entry.Streamed, entry.CacheEpoch,
 		entry.InputTokens, entry.OutputTokens, entry.CacheReadTokens, entry.CacheWriteTokens, entry.CacheMissTokens,
 		entry.Cost, entry.CostNanoUSD, entry.LatencyMS, entry.ErrorMessage, entry.CreatedAt, entry.ClientApp,
 		entry.RequestedModel, entry.Complexity, entry.FailoverAttempts, entry.ThinkingLevel, entry.UsageEstimated, upstream,
-		budgetWindowID, entry.BudgetWindowStartedAt, entry.BudgetWindowResetAt)
-	return err
+		budgetWindowID, entry.BudgetWindowStartedAt, entry.BudgetWindowResetAt,
+		entry.PricingRuleSetID, entry.PricingTierThreshold, entry.PriceWindowID,
+		entry.PriceMultiplierNum, entry.PriceMultiplierDen, entry.PricedAt, entry.PromptAccounting,
+		entry.UsageAnomaly, entry.UpstreamCostNanoUSD)
+	if err != nil {
+		return err
+	}
+	// ON CONFLICT DO NOTHING above means a retry of an already-logged request
+	// inserts nothing; its lines are already present and must not be rewritten.
+	if affected, affErr := result.RowsAffected(); affErr == nil && affected == 0 {
+		return nil
+	}
+	return insertRequestPricingLines(exec, entry)
+}
+
+func insertRequestPricingLines(exec requestLogExecer, entry RequestLog) error {
+	for _, line := range entry.PricingLines {
+		if _, err := exec.Exec(`INSERT INTO request_pricing_lines (
+			request_log_id, token_class, tokens, rate_nano_usd_per_million, cost_nano_usd
+		) VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (request_log_id, token_class) DO NOTHING`,
+			entry.ID, line.TokenClass, line.Tokens, line.RatePerMillion, line.Cost); err != nil {
+			return fmt.Errorf("failed to record pricing line %s for request %s: %w",
+				line.TokenClass, entry.ID, err)
+		}
+	}
+	return nil
+}
+
+// GetRequestPricingLines returns the stored derivation of one request's charge.
+func (db *DB) GetRequestPricingLines(requestID string) ([]RequestPriceLine, error) {
+	rows, err := db.conn.Query(`SELECT token_class, tokens,
+		rate_nano_usd_per_million, cost_nano_usd
+		FROM request_pricing_lines WHERE request_log_id = $1
+		ORDER BY token_class`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var lines []RequestPriceLine
+	for rows.Next() {
+		var line RequestPriceLine
+		if err := rows.Scan(&line.TokenClass, &line.Tokens, &line.RatePerMillion, &line.Cost); err != nil {
+			return nil, err
+		}
+		lines = append(lines, line)
+	}
+	return lines, rows.Err()
 }
 
 func (db *DB) ListRequestLogs(limit int, offset int, userID string, keyID string) ([]RequestLog, error) {

@@ -3,6 +3,8 @@ package db
 import (
 	"strings"
 	"testing"
+
+	"gateway/pricing"
 )
 
 // These tests need no database: they validate the embedded migration set so a
@@ -48,6 +50,10 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"028_release_stranded_authorizations.sql",
 		"029_remove_budget_reservations.sql",
 		"030_request_logs_single_source.sql",
+		"032_prompt_accounting.sql",
+		"033_model_cache_ttl_rates.sql",
+		"034_model_price_windows.sql",
+		"035_request_pricing_audit.sql",
 	} {
 		found := false
 		for _, n := range names {
@@ -172,5 +178,65 @@ func TestRequestLogHistoryIsPreserved(t *testing.T) {
 	}
 	if strings.Contains(sql, "on delete cascade") {
 		t.Fatal("005 migration must not re-introduce ON DELETE CASCADE on request_logs")
+	}
+}
+
+// TestPricingMigrationsCarryTheirLoadBearingStatements guards the pieces the
+// pricing engine depends on at runtime. Without a database in CI these files
+// are otherwise only checked for being non-empty, so a truncated or reverted
+// migration would surface as a production column-not-found instead.
+func TestPricingMigrationsCarryTheirLoadBearingStatements(t *testing.T) {
+	cases := map[string][]string{
+		"032_prompt_accounting.sql": {
+			"add column if not exists prompt_accounting",
+			"check (prompt_accounting in ('inclusive', 'exclusive'))",
+			"set prompt_accounting = 'exclusive'",
+			"add column if not exists usage_anomaly",
+		},
+		"033_model_cache_ttl_rates.sql": {
+			"create table if not exists model_cache_ttl_rates",
+			"check (ttl in ('5m', '1h', 'default'))",
+		},
+		"034_model_price_windows.sql": {
+			"create table if not exists model_price_windows",
+			"multiplier_den bigint not null default 1",
+			"check (multiplier_den >  0)",
+			"check (start_minute_utc <> end_minute_utc)",
+		},
+		"035_request_pricing_audit.sql": {
+			"create table if not exists request_pricing_lines",
+			"add column if not exists pricing_rule_set_id",
+			"add column if not exists priced_at",
+			"add column if not exists upstream_cost_nano_usd",
+			"references request_logs(id) on delete cascade",
+		},
+	}
+	for name, required := range cases {
+		data, err := migrationFS.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		body := strings.ToLower(string(data))
+		for _, statement := range required {
+			if !strings.Contains(body, statement) {
+				t.Errorf("migration %s is missing %q", name, statement)
+			}
+		}
+	}
+}
+
+// Every token class the pricing engine can emit must be accepted by the
+// request_pricing_lines CHECK constraint, or a perfectly valid charge would
+// fail to persist its own derivation.
+func TestPricingLineClassesMatchTheEngine(t *testing.T) {
+	data, err := migrationFS.ReadFile("migrations/035_request_pricing_audit.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, class := range pricing.TokenClasses {
+		if !strings.Contains(body, "'"+string(class)+"'") {
+			t.Errorf("token class %q is not allowed by the request_pricing_lines constraint", class)
+		}
 	}
 }
