@@ -62,17 +62,42 @@ type muhiyaCapabilities struct {
 	InputModalities   []string `json:"input_modalities"`
 }
 
+// muhiyaCatalogExplainEntry is one model's discoverability verdict for the
+// ?explain=1 diagnostic — the answer to "why isn't my model showing up in
+// MuhiyaCode?" that this endpoint previously had no way to give an operator.
+type muhiyaCatalogExplainEntry struct {
+	ModelID        string `json:"model_id"`
+	Included       bool   `json:"included"`
+	ExcludedReason string `json:"excluded_reason,omitempty"`
+}
+
 func (h *ProxyHandler) handleMuhiyaCodeCatalog(w http.ResponseWriter, r *http.Request) {
 	models, err := h.db.ListModels()
 	if err != nil {
 		h.internalErrorResponse(w, "database error listing MuhiyaCode catalog", err)
 		return
 	}
+	if r.URL.Query().Get("explain") != "" {
+		h.writeMuhiyaCatalogExplain(w, models)
+		return
+	}
 	document := muhiyaCatalogDocument{SchemaVersion: muhiyaCatalogSchemaVersion}
 	for i := range models {
 		model := &models[i]
-		if !discoverableModel(model, false) || model.Name == routerModelDeprecated ||
-			!containsTag(model.Tags, "muhiyacode") {
+		// muhiyacode_visible is the single visibility authority (see
+		// discoverableModel's doc comment, which now also excludes the
+		// deprecated router model universally). The "muhiyacode" TAG used to
+		// gate this endpoint instead: it is derived from the column by the
+		// admin-API write path and by the models AFTER INSERT trigger, but
+		// nothing re-derives it on a direct SQL UPDATE, so a tag could go
+		// stale while the column was correct — a model marked visible in the
+		// admin panel could still be silently absent here. Filtering on the
+		// column directly (discoverableModel(model, true), the EXACT function
+		// /v1/models' MuhiyaCode branch calls) removes that drift entirely
+		// instead of chasing every path that must keep the tag in sync, and
+		// guarantees the two endpoints can never again disagree about which
+		// models a MuhiyaCode caller sees.
+		if !discoverableModel(model, true) {
 			continue
 		}
 		record, err := catalogRecord(model)
@@ -95,12 +120,66 @@ func (h *ProxyHandler) handleMuhiyaCodeCatalog(w http.ResponseWriter, r *http.Re
 	etag := `"` + version + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("X-Muhiya-Catalog-Version", version)
-	w.Header().Set("Cache-Control", "private, max-age=60")
+	// The ETag is already recomputed from a fresh ListModels() query on every
+	// request — it can never be stale relative to the database. max-age=60
+	// let an intermediary (a CDN or reverse proxy in front of this gateway)
+	// serve a blindly-reused response for up to 60s after an operator added or
+	// edited a model, with no request reaching this handler at all — the exact
+	// window in which "I just added a model" would appear to do nothing.
+	// no-cache still permits storing the response but forces revalidation via
+	// If-None-Match on every use, so the bandwidth win from ETag/304 is kept
+	// while the blind-reuse window is closed.
+	w.Header().Set("Cache-Control", "private, no-cache")
 	if strings.TrimSpace(r.Header.Get("If-None-Match")) == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// explainMuhiyaCodeDiscoverability classifies a single model against the
+// same rule /v1/muhiyacode/models applies (discoverableModel(model, true),
+// plus this endpoint's own router-name exclusion), reporting WHICH condition
+// failed rather than just true/false. Pure so it can be tested without a
+// database. Order matches discoverableModel's own check order.
+func explainMuhiyaCodeDiscoverability(model *db.Model) muhiyaCatalogExplainEntry {
+	entry := muhiyaCatalogExplainEntry{ModelID: model.Name}
+	switch {
+	case model.Name == routerModelDeprecated:
+		entry.ExcludedReason = "deprecated router model"
+	case model.Status != "active":
+		entry.ExcludedReason = "status=" + model.Status
+	case model.Transcribe:
+		entry.ExcludedReason = "transcribe-only"
+	case !model.MuhiyaCodeVisible:
+		entry.ExcludedReason = "not muhiyacode_visible"
+	default:
+		entry.Included = true
+	}
+	return entry
+}
+
+// writeMuhiyaCatalogExplain reports, for every model regardless of
+// discoverability, whether it is included in the MuhiyaCode catalog and why
+// not when it is excluded. discoverableModel itself gates on three
+// conditions (status, transcribe, muhiyacode_visible) with no way for an
+// operator to ask which one is failing for a given model — this is that
+// diagnostic.
+func (h *ProxyHandler) writeMuhiyaCatalogExplain(w http.ResponseWriter, models []db.Model) {
+	entries := make([]muhiyaCatalogExplainEntry, 0, len(models))
+	for i := range models {
+		entries = append(entries, explainMuhiyaCodeDiscoverability(&models[i]))
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ModelID < entries[j].ModelID })
+	body, err := json.Marshal(map[string]any{"models": entries})
+	if err != nil {
+		h.internalErrorResponse(w, "catalog explain encoding failed", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
@@ -117,6 +196,11 @@ func (h *ProxyHandler) establishModelResolution(
 	}
 	if expected := strings.TrimSpace(r.Header.Get("X-Muhiya-Expected-Model-Record")); expected != "" &&
 		expected != record.RecordID {
+		// X-Muhiya-Refresh-Catalog tells a client that CAN re-discover (rather
+		// than abandon the task outright) to re-fetch /v1/muhiyacode/models and
+		// retry once with the fresh record id — recovering from exactly the
+		// case the RecordID narrowing above already reduced the frequency of.
+		w.Header().Set("X-Muhiya-Refresh-Catalog", "true")
 		h.writeError(w, http.StatusConflict,
 			fmt.Sprintf("model record mismatch: expected %s, resolved %s", expected, record.RecordID),
 			"model_resolution_mismatch")
@@ -124,6 +208,7 @@ func (h *ProxyHandler) establishModelResolution(
 	}
 	if expected := strings.TrimSpace(r.Header.Get("X-Muhiya-Expected-Target-Model")); expected != "" &&
 		expected != record.TargetModel {
+		w.Header().Set("X-Muhiya-Refresh-Catalog", "true")
 		h.writeError(w, http.StatusConflict,
 			fmt.Sprintf("target model mismatch: expected %s, resolved %s", expected, record.TargetModel),
 			"model_resolution_mismatch")
@@ -189,23 +274,32 @@ func catalogRecord(model *db.Model) (muhiyaCatalogModel, error) {
 		DeprecatedAt:       model.DeprecatedAt,
 		DeprecationMessage: model.DeprecationMessage,
 	}
+	// RecordID identifies the model's WIRE CONTRACT — what the agent's
+	// prefix-shape guard and cache-affinity logic must be told about the
+	// instant it changes. It intentionally excludes ContextWindow,
+	// MaxOutputTokens, Pricing, and Capabilities: those are catalog-
+	// informational limits the agent uses for its own client-side budget
+	// display, not fields that change what bytes the gateway forwards or how
+	// it interprets them. Before this exclusion, an operator editing a
+	// model's PRICE while a session was live changed the RecordID, and the
+	// next request's X-Muhiya-Expected-Model-Record no longer matched —
+	// establishModelResolution returned an unrecoverable 409
+	// model_resolution_mismatch and killed a task over a change with zero
+	// wire impact. AdapterVersion is deliberately excluded too: an operator
+	// who ships an adapter change that DOES alter wire behavior is expected
+	// to bump CompatibilityEpoch, which is the one field whose entire
+	// purpose is "clients must notice this changed" (see
+	// TestCatalogRecordIDIsStableAndCompatibilitySensitive).
 	immutable := struct {
 		ModelID             string
 		TargetModel         string
 		ProviderFamily      string
-		AdapterVersion      string
 		CompatibilityEpoch  int
-		ContextWindow       int
-		MaxOutputTokens     int
 		SupportedParameters []string
 		CacheContract       json.RawMessage
-		Pricing             muhiyaCatalogPricing
-		Capabilities        muhiyaCapabilities
 	}{
 		record.ModelID, record.TargetModel, record.ProviderFamily,
-		record.AdapterVersion, record.CompatibilityEpoch, record.ContextWindow,
-		record.MaxOutputTokens, record.SupportedParameters, record.CacheContract,
-		record.Pricing, record.Capabilities,
+		record.CompatibilityEpoch, record.SupportedParameters, record.CacheContract,
 	}
 	canonical, err := json.Marshal(immutable)
 	if err != nil {
@@ -214,15 +308,6 @@ func catalogRecord(model *db.Model) (muhiyaCatalogModel, error) {
 	digest := sha256.Sum256(canonical)
 	record.RecordID = fmt.Sprintf("model:%x", digest)
 	return record, nil
-}
-
-func containsTag(tags []string, expected string) bool {
-	for _, tag := range tags {
-		if strings.EqualFold(strings.TrimSpace(tag), expected) {
-			return true
-		}
-	}
-	return false
 }
 
 func sortedCopy(values []string) []string {

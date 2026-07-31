@@ -1397,7 +1397,17 @@ func (db *DB) attachCatalogMetadata(model *Model) error {
 		&model.DeprecationMessage,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		// Defense in depth: the models AFTER INSERT trigger (026/031) creates a
+		// metadata row for every model inserted through Postgres directly, so
+		// this should be unreachable in practice. It stays reachable if a
+		// trigger is ever disabled, a row is restored from a pre-026 backup, or
+		// a future insert path bypasses triggers — and returning silently here
+		// previously left ProviderFamily/CacheContract/SupportedParameters at
+		// their zero values, which the request builder and the cache-affinity
+		// logic would then read as "no cache contract, no supported params"
+		// rather than deriving the same name-based defaults every other path
+		// gets.
+		return applyModelCatalogDefaults(model)
 	}
 	if err != nil {
 		return err

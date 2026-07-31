@@ -25,6 +25,14 @@ func TestDiscoverableModelVisibilityMatrix(t *testing.T) {
 		{"inactive visible, other caller", db.Model{Status: "inactive", MuhiyaCodeVisible: true}, false, false},
 		{"transcribe visible, muhiyacode caller", db.Model{Status: "active", Transcribe: true, MuhiyaCodeVisible: true}, true, false},
 		{"transcribe, other caller", db.Model{Status: "active", Transcribe: true, MuhiyaCodeVisible: true}, false, false},
+		// The deprecated router virtual model must never be discoverable by
+		// ANY caller — automatic model selection is no longer part of the
+		// gateway contract (027) — even if its row is active and visible.
+		// Before this, /v1/muhiyacode/models excluded it by an explicit name
+		// check that /v1/models' list branches never applied, so the two
+		// endpoints could disagree about it for a MuhiyaCode caller.
+		{"router model, muhiyacode caller", db.Model{Name: routerModelDeprecated, Status: "active", MuhiyaCodeVisible: true}, true, false},
+		{"router model, other caller", db.Model{Name: routerModelDeprecated, Status: "active", MuhiyaCodeVisible: true}, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

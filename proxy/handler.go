@@ -1801,12 +1801,15 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 // Model Discovery Endpoint (Anthropic Specification)
 // ------------------------------------------
 // discoverableModel reports whether a model should appear in /v1/models for the
-// current caller. Every caller: the model must be active and not transcribe-only.
-// The MuhiyaCode app additionally sees only models marked muhiyacode_visible.
+// current caller. Every caller: the model must be active, not transcribe-only,
+// and not the deprecated router virtual model (automatic model selection is no
+// longer part of the gateway contract — see migration 027 — so it must never be
+// offered as a selectable model to any client, MuhiyaCode or otherwise). The
+// MuhiyaCode app additionally sees only models marked muhiyacode_visible.
 // This gates DISCOVERY only - inference by exact name and router selection never
 // consult this, so a hidden model stays fully usable.
 func discoverableModel(m *db.Model, onlyMuhiyaCodeVisible bool) bool {
-	if m == nil || m.Status != "active" || m.Transcribe {
+	if m == nil || m.Status != "active" || m.Transcribe || m.Name == routerModelDeprecated {
 		return false
 	}
 	if onlyMuhiyaCodeVisible && !m.MuhiyaCodeVisible {

@@ -620,7 +620,7 @@
                 </div>
                 <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
                     <input type="checkbox" id="model-muhiyacode-visible" style="width: auto; margin-bottom: 0;">
-                    <label for="model-muhiyacode-visible" style="margin-bottom: 0; cursor: pointer;">MuhiyaCode Discoverable — listed in the MuhiyaCode app's model picker (/v1/models). Unchecked models stay fully usable by MuhiyaChat and by exact name.</label>
+                    <label for="model-muhiyacode-visible" style="margin-bottom: 0; cursor: pointer;">MuhiyaCode Discoverable — the ONLY control for whether this model appears in the MuhiyaCode app's model picker (GET /v1/muhiyacode/models and the MuhiyaCode branch of /v1/models). Unchecked models stay fully usable by MuhiyaChat and by exact name.</label>
                 </div>
                 <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
                     <input type="checkbox" id="model-supports-vision" style="width: auto; margin-bottom: 0;">
@@ -724,7 +724,8 @@
                         </div>
                         <div class="form-group">
                             <label for="model-tags">Tags (comma-separated)</label>
-                            <input type="text" id="model-tags" placeholder="muhiyacode, coding">
+                            <input type="text" id="model-tags" placeholder="coding, fast, budget">
+                            <small class="text-muted">The "muhiyacode" tag is derived automatically from the MuhiyaCode Discoverable checkbox above and cannot be set here — typing it has no effect.</small>
                         </div>
                     </div>
                     <div class="form-group">

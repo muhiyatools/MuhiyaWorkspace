@@ -8,15 +8,25 @@ INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) 
 ON CONFLICT (id) DO NOTHING;
 
 -- 2. Insert missing models
+--
+-- muhiyacode_visible is set explicitly (matching status) rather than left to
+-- its column default of FALSE: MuhiyaCode's model picker discovers ONLY
+-- models with this flag set, regardless of status, so a raw-SQL insert that
+-- omits it stays permanently absent from the coding agent's /model selector
+-- even once activated via the admin panel's status toggle. The
+-- model_catalog_metadata row (cache contract, provider family) is created
+-- automatically by the models AFTER INSERT trigger; no companion insert is
+-- needed here.
 INSERT INTO models (
-    id, name, provider_id, target_model, 
-    input_cost_per_million, output_cost_per_million, 
-    cache_read_cost_per_million, cache_write_cost_per_million, 
+    id, name, provider_id, target_model,
+    input_cost_per_million, output_cost_per_million,
+    cache_read_cost_per_million, cache_write_cost_per_million,
     status, routing_tier, model_type, price_per_minute, transcribe,
-    context_window, max_output_tokens, display_name, description, owned_by
-) VALUES 
-('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai'),
-('model-claude-3-5', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic'),
-('model-claude-3-7', 'claude-3-7-sonnet', 'anthropic', 'claude-3-7-sonnet-20250219', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.7 Sonnet', 'Anthropic latest model', 'anthropic'),
-('model-deepseek-chat', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek')
+    context_window, max_output_tokens, display_name, description, owned_by,
+    muhiyacode_visible
+) VALUES
+('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai', false),
+('model-claude-3-5', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic', false),
+('model-claude-3-7', 'claude-3-7-sonnet', 'anthropic', 'claude-3-7-sonnet-20250219', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.7 Sonnet', 'Anthropic latest model', 'anthropic', false),
+('model-deepseek-chat', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek', false)
 ON CONFLICT (id) DO NOTHING;

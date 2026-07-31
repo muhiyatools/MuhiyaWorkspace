@@ -167,19 +167,34 @@ INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) 
 ON CONFLICT (id) DO NOTHING;
 
 -- 5. Base Models
+-- muhiyacode_visible is set explicitly (matching status) rather than left to
+-- its column default of FALSE: MuhiyaCode's model picker discovers ONLY
+-- models with this flag set, regardless of status, so a raw-SQL insert that
+-- omits it stays permanently absent from the coding agent's /model selector
+-- even once activated via the admin panel's status toggle. The
+-- model_catalog_metadata row (cache contract, provider family) is created
+-- automatically by the models AFTER INSERT trigger; no companion insert is
+-- needed here.
+--
+-- model-qwen-flash is marked muhiyacode_visible=true to match its own
+-- status='active' (the same rule 021's backfill applied to every
+-- pre-existing row) — flip it to false in the admin panel if this model is
+-- intended for MuhiyaChat only, not the coding agent.
 INSERT INTO models (
-    id, name, provider_id, target_model, 
-    input_cost_per_million, output_cost_per_million, 
-    cache_read_cost_per_million, cache_write_cost_per_million, 
+    id, name, provider_id, target_model,
+    input_cost_per_million, output_cost_per_million,
+    cache_read_cost_per_million, cache_write_cost_per_million,
     status, routing_tier, model_type, price_per_minute, transcribe,
-    context_window, max_output_tokens, display_name, description, owned_by
+    context_window, max_output_tokens, display_name, description, owned_by,
+    muhiyacode_visible
 ) VALUES
-('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai'),
-('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic'),
-('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek'),
-('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-reasoner', 0.55, 2.19, 0.14, 0.55, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Reasoner', 'DeepSeek reasoning model (R1)', 'deepseek'),
-('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek'),
-('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai')
+('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai', false),
+('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic', false),
+('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek', false),
+('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-reasoner', 0.55, 2.19, 0.14, 0.55, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Reasoner', 'DeepSeek reasoning model (R1)', 'deepseek', false),
+('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek', false),
+('model-qwen-flash', 'qwen3.7-flash', 'qwen', 'qwen-2.5-flash', 0.05, 0.10, 0.02, 0.05, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'Qwen 3.7 Flash', 'Alibaba Qwen Flash model', 'qwen', true),
+('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai', false)
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================
