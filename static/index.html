@@ -768,6 +768,64 @@
                         <i class="fa-solid fa-plus"></i> Add pricing tier
                     </button>
                 </fieldset>
+
+                <fieldset class="model-catalog-fieldset">
+                    <legend>Cache rates by entry lifetime</legend>
+                    <p class="text-muted model-tier-help">
+                        For providers that charge differently for a 5-minute cache write than a
+                        1-hour one. <strong>Leave a box empty to inherit</strong> the base rate above
+                        &mdash; an empty box is not zero. Leave the threshold empty to apply to the
+                        base rates, or set it to a tier threshold to apply only above that size.
+                    </p>
+                    <div class="model-ttl-head">
+                        <span>Tier threshold</span><span>Lifetime</span>
+                        <span>Cache read $/1M</span><span>Cache write $/1M</span><span></span>
+                    </div>
+                    <div id="model-cache-ttl-rates"></div>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-add-cache-ttl-rate">
+                        <i class="fa-solid fa-plus"></i> Add cache lifetime rate
+                    </button>
+                </fieldset>
+
+                <fieldset class="model-catalog-fieldset">
+                    <legend>Time-of-day price windows</legend>
+                    <p class="text-muted model-tier-help">
+                        Peak / off-peak scaling. Times are <strong>UTC</strong>; a window whose end is
+                        earlier than its start wraps midnight. The multiplier is an exact fraction, so
+                        <code>2 / 1</code> is exactly double and <code>1 / 2</code> is exactly half.
+                        Windows do not stack &mdash; if two overlap, only the higher priority applies.
+                    </p>
+                    <div class="model-window-head">
+                        <span>Label</span><span>Start (UTC)</span><span>End (UTC)</span>
+                        <span>&times; num</span><span>&times; den</span><span>Priority</span><span></span>
+                    </div>
+                    <div id="model-price-windows"></div>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-add-price-window">
+                        <i class="fa-solid fa-plus"></i> Add price window
+                    </button>
+                    <div id="model-window-warnings" class="model-window-warnings"></div>
+                </fieldset>
+
+                <fieldset class="model-catalog-fieldset">
+                    <legend>Price simulator</legend>
+                    <p class="text-muted model-tier-help">
+                        Prices a hypothetical request against the rates entered above, before you save
+                        them. Cheaper to check here than to discover on a customer's invoice.
+                    </p>
+                    <div class="model-sim-grid">
+                        <label>Prompt tokens<input type="number" min="0" id="sim-prompt-tokens" value="10000"></label>
+                        <label>Output tokens<input type="number" min="0" id="sim-output-tokens" value="1000"></label>
+                        <label>Cache read<input type="number" min="0" id="sim-cache-read" value="0"></label>
+                        <label>Cache write (default)<input type="number" min="0" id="sim-cache-write" value="0"></label>
+                        <label>Cache write 5m<input type="number" min="0" id="sim-cache-write-5m" value="0"></label>
+                        <label>Cache write 1h<input type="number" min="0" id="sim-cache-write-1h" value="0"></label>
+                        <label>At (UTC)<input type="datetime-local" id="sim-at"></label>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-simulate-price">
+                        <i class="fa-solid fa-calculator"></i> Price this request
+                    </button>
+                    <div id="sim-result" class="model-sim-result"></div>
+                </fieldset>
                 <div class="form-group" id="model-status-group" style="display: none;">
                     <label for="model-status">Model Status</label>
                     <select id="model-status">

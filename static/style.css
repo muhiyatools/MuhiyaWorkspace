@@ -1086,6 +1086,117 @@ input:focus, select:focus, textarea:focus {
     font-size: 0.75rem;
 }
 
+.model-ttl-rate-row,
+.model-ttl-head {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr 1fr 1fr auto;
+    gap: 0.45rem;
+    margin-bottom: 0.55rem;
+    align-items: center;
+}
+
+.model-price-window-row,
+.model-window-head {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr 1fr 0.7fr 0.7fr 0.7fr auto;
+    gap: 0.45rem;
+    margin-bottom: 0.55rem;
+    align-items: center;
+}
+
+.model-ttl-head,
+.model-window-head {
+    color: #a1a1aa;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.model-ttl-rate-row input,
+.model-ttl-rate-row select,
+.model-price-window-row input,
+.model-price-window-row select {
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    margin-bottom: 0;
+}
+
+/* Overlapping windows are legal but only the highest priority applies, so an
+   overlap is nearly always a mistake worth surfacing before it bills. */
+.model-window-warnings:not(:empty) {
+    margin-top: 0.6rem;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid #b45309;
+    border-radius: 8px;
+    background: rgba(180, 83, 9, 0.12);
+    color: #fbbf24;
+    font-size: 0.76rem;
+    line-height: 1.5;
+}
+
+.model-sim-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.55rem;
+    margin-bottom: 0.7rem;
+}
+
+.model-sim-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    color: #a1a1aa;
+    font-size: 0.72rem;
+}
+
+.model-sim-grid input {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    margin-bottom: 0;
+}
+
+.model-sim-result:not(:empty) {
+    margin-top: 0.7rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: #09090b;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    line-height: 1.65;
+}
+
+.model-sim-result table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.model-sim-result td {
+    padding: 0.15rem 0.4rem 0.15rem 0;
+}
+
+.model-sim-result td:not(:first-child) {
+    text-align: right;
+}
+
+.model-sim-result .sim-total td {
+    border-top: 1px solid var(--panel-border);
+    padding-top: 0.35rem;
+    color: #34d399;
+    font-weight: 700;
+}
+
+.model-sim-result .sim-note {
+    margin-top: 0.5rem;
+    color: #a1a1aa;
+}
+
+.model-sim-result .sim-error {
+    color: #f87171;
+}
+
 @media (max-width: 760px) {
     .log-pagination,
     .log-page-controls,
@@ -1094,7 +1205,14 @@ input:focus, select:focus, textarea:focus {
         flex-direction: column;
     }
 
-    .model-pricing-tier-row {
+    .model-pricing-tier-row,
+    .model-ttl-rate-row,
+    .model-price-window-row {
         grid-template-columns: 1fr;
+    }
+
+    .model-ttl-head,
+    .model-window-head {
+        display: none;
     }
 }

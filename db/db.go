@@ -1687,17 +1687,67 @@ func normalizedCatalogTags(model Model) []string {
 	return tags
 }
 
+// validateModelPricingRules rejects a model whose prices cannot resolve, using
+// the same engine that will price its requests. Validating here means a bad
+// window or TTL rate fails at save time with a clear message, rather than at
+// request time where the fallback is to drop the rule and bill something the
+// operator did not intend.
 func validateModelPricingRules(model Model) error {
-	_, err := pricing.NewRuleSet(model.PricingRuleSetID, pricing.Rates{
+	base := pricing.Rates{
 		InputPerMillion:      model.InputCostNanoPerMillion,
 		OutputPerMillion:     model.OutputCostNanoPerMillion,
 		CacheReadPerMillion:  model.CacheReadCostNanoPerMillion,
 		CacheWritePerMillion: model.CacheWriteCostNanoPerMillion,
-	}, model.PricingTiers)
-	if err != nil {
+	}
+	base = pricing.OverlayTTLRates(base, model.CacheTTLRates, nil)
+
+	tiers := make([]pricing.Tier, 0, len(model.PricingTiers))
+	for _, tier := range model.PricingTiers {
+		threshold := tier.MinInputTokensExclusive
+		tier.Rates = pricing.OverlayTTLRates(tier.Rates, model.CacheTTLRates, &threshold)
+		tiers = append(tiers, tier)
+	}
+
+	for _, rate := range model.CacheTTLRates {
+		if !pricing.ValidTTL(rate.TTL) {
+			return fmt.Errorf("%w: unknown cache TTL %q (expected 5m, 1h or default)",
+				ErrInvalidModelConfig, rate.TTL)
+		}
+	}
+
+	windows := normalizedPriceWindows(model.PriceWindows)
+	if _, err := pricing.New(pricing.Spec{
+		ID:         model.PricingRuleSetID,
+		Base:       base,
+		Tiers:      tiers,
+		Windows:    windows,
+		Accounting: pricing.ParsePromptAccounting(model.PromptAccounting),
+	}); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidModelConfig, err)
 	}
 	return nil
+}
+
+// normalizedPriceWindows applies the defaults the persistence layer applies, so
+// validation and storage agree on what a half-filled window means.
+func normalizedPriceWindows(windows []pricing.Window) []pricing.Window {
+	out := make([]pricing.Window, 0, len(windows))
+	for i, window := range windows {
+		if window.ID == "" {
+			// Storage assigns the real id. The placeholder must still be
+			// unique, or two brand-new windows would trip the duplicate-id
+			// check and fail a perfectly valid save.
+			window.ID = fmt.Sprintf("pending-%d", i)
+		}
+		if window.MultiplierDen == 0 {
+			window.MultiplierDen = 1
+		}
+		if window.WeekdayMask == 0 {
+			window.WeekdayMask = allWeekdayMask
+		}
+		out = append(out, window)
+	}
+	return out
 }
 
 func saveModelCatalogMetadata(tx *sql.Tx, model Model) error {
@@ -1763,6 +1813,12 @@ func (db *DB) CreateModel(m Model) error {
 	if err := replaceModelPricingTiers(tx, m); err != nil {
 		return err
 	}
+	if err := replaceModelCacheTTLRates(tx, m); err != nil {
+		return err
+	}
+	if err := replaceModelPriceWindows(tx, m); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -1816,6 +1872,12 @@ func (db *DB) UpdateModel(m Model) error {
 	if err := replaceModelPricingTiers(tx, m); err != nil {
 		return err
 	}
+	if err := replaceModelCacheTTLRates(tx, m); err != nil {
+		return err
+	}
+	if err := replaceModelPriceWindows(tx, m); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -1839,6 +1901,99 @@ func replaceModelPricingTiers(tx *sql.Tx, model Model) error {
 	}
 	return nil
 }
+
+// replaceModelCacheTTLRates rewrites a model's per-lifetime cache rates.
+// A nil rate is stored as NULL, which the pricing engine reads as "inherit" —
+// distinct from a zero rate, which really means free.
+func replaceModelCacheTTLRates(tx *sql.Tx, model Model) error {
+	if _, err := tx.Exec("DELETE FROM model_cache_ttl_rates WHERE model_id = $1", model.ID); err != nil {
+		return err
+	}
+	for _, rate := range model.CacheTTLRates {
+		if !pricing.ValidTTL(rate.TTL) {
+			return fmt.Errorf("%w: unknown cache TTL %q", ErrInvalidModelConfig, rate.TTL)
+		}
+		var threshold, read, write any
+		if rate.MinInputTokensExclusive != nil {
+			threshold = *rate.MinInputTokensExclusive
+		}
+		if rate.CacheReadPerMillion != nil {
+			if *rate.CacheReadPerMillion < 0 {
+				return fmt.Errorf("%w: cache read rate cannot be negative", ErrInvalidModelConfig)
+			}
+			read = int64(*rate.CacheReadPerMillion)
+		}
+		if rate.CacheWritePerMillion != nil {
+			if *rate.CacheWritePerMillion < 0 {
+				return fmt.Errorf("%w: cache write rate cannot be negative", ErrInvalidModelConfig)
+			}
+			write = int64(*rate.CacheWritePerMillion)
+		}
+		if read == nil && write == nil {
+			continue // Nothing configured; storing the row would say nothing.
+		}
+		if _, err := tx.Exec(`INSERT INTO model_cache_ttl_rates (
+			id, model_id, min_input_tokens_exclusive, ttl,
+			cache_read_nano_usd_per_million, cache_write_nano_usd_per_million, enabled
+		) VALUES ($1,$2,$3,$4,$5,$6,TRUE)`,
+			"cache-ttl-"+uuid.NewString(), model.ID, threshold, rate.TTL, read, write,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// replaceModelPriceWindows rewrites a model's time-of-day price scaling.
+// Each window is validated by the same code the pricing engine uses, so an
+// impossible window is rejected at save time rather than silently ignored at
+// request time.
+func replaceModelPriceWindows(tx *sql.Tx, model Model) error {
+	if _, err := tx.Exec("DELETE FROM model_price_windows WHERE model_id = $1", model.ID); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(model.PriceWindows))
+	for _, window := range model.PriceWindows {
+		if window.ID == "" {
+			window.ID = "price-window-" + uuid.NewString()
+		}
+		if window.MultiplierDen == 0 {
+			window.MultiplierDen = 1
+		}
+		if window.WeekdayMask == 0 {
+			window.WeekdayMask = allWeekdayMask
+		}
+		if err := window.Validate(); err != nil {
+			return fmt.Errorf("%w: %s", ErrInvalidModelConfig, err)
+		}
+		if _, duplicate := seen[window.ID]; duplicate {
+			return fmt.Errorf("%w: duplicate price window id %q", ErrInvalidModelConfig, window.ID)
+		}
+		seen[window.ID] = struct{}{}
+
+		classes := make([]string, 0, len(window.AppliesTo))
+		for _, class := range window.AppliesTo {
+			classes = append(classes, string(class))
+		}
+		if _, err := tx.Exec(`INSERT INTO model_price_windows (
+			id, model_id, label, start_minute_utc, end_minute_utc, weekday_mask,
+			multiplier_num, multiplier_den, applies_to, priority, enabled,
+			effective_from, effective_until
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,$11,$12)`,
+			window.ID, model.ID, window.Label, window.StartMinuteUTC, window.EndMinuteUTC,
+			window.WeekdayMask, window.MultiplierNum, window.MultiplierDen,
+			strings.Join(classes, ","), window.Priority,
+			window.EffectiveFrom, window.EffectiveUntil,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// allWeekdayMask is every ISO weekday selected, the sensible default for a
+// window an operator did not restrict by day.
+const allWeekdayMask = 127
 
 func (db *DB) DeleteModel(id string) error {
 	_, err := db.conn.Exec("DELETE FROM models WHERE id = $1", id)

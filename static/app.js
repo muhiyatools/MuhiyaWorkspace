@@ -309,6 +309,336 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('btn-add-pricing-tier').addEventListener('click', () => addPricingTierRow());
 
+    // ---- Cache rates by entry lifetime -------------------------------------
+    // A null rate means "inherit", which is why every box is optional and an
+    // empty box is NOT stored as zero: zero would mean the provider gives
+    // those tokens away free.
+    function addCacheTTLRateRow(rate = {}) {
+        const row = document.createElement('div');
+        row.className = 'model-ttl-rate-row';
+        const toUSD = value => value === undefined || value === null ? '' : Number(value) / 1_000_000_000;
+        const ttl = rate.ttl || '5m';
+        row.innerHTML = `
+            <input class="ttl-threshold" type="number" min="0" placeholder="(base rates)" value="${escapeHtml(rate.min_input_tokens_exclusive ?? '')}">
+            <select class="ttl-lifetime">
+                <option value="5m">5 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="default">Default</option>
+            </select>
+            <input class="ttl-read-rate" type="number" min="0" step="0.000001" placeholder="inherit" value="${escapeHtml(toUSD(rate.cache_read_nano_usd_per_million))}">
+            <input class="ttl-write-rate" type="number" min="0" step="0.000001" placeholder="inherit" value="${escapeHtml(toUSD(rate.cache_write_nano_usd_per_million))}">
+            <button type="button" class="btn btn-secondary btn-sm ttl-remove" aria-label="Remove cache lifetime rate"><i class="fa-solid fa-trash"></i></button>
+        `;
+        row.querySelector('.ttl-lifetime').value = ttl;
+        row.querySelector('.ttl-remove').addEventListener('click', () => row.remove());
+        document.getElementById('model-cache-ttl-rates').appendChild(row);
+    }
+
+    function optionalNano(input) {
+        const raw = String(input.value).trim();
+        if (raw === '') return null;
+        return Math.round(Number(raw) * 1_000_000_000);
+    }
+
+    function readCacheTTLRates() {
+        return [...document.querySelectorAll('.model-ttl-rate-row')].map(row => {
+            const thresholdRaw = String(row.querySelector('.ttl-threshold').value).trim();
+            return {
+                min_input_tokens_exclusive: thresholdRaw === '' ? null : Number(thresholdRaw),
+                ttl: row.querySelector('.ttl-lifetime').value,
+                cache_read_nano_usd_per_million: optionalNano(row.querySelector('.ttl-read-rate')),
+                cache_write_nano_usd_per_million: optionalNano(row.querySelector('.ttl-write-rate'))
+            };
+        }).filter(rate => rate.cache_read_nano_usd_per_million !== null ||
+                          rate.cache_write_nano_usd_per_million !== null);
+    }
+
+    // ---- Time-of-day price windows -----------------------------------------
+    function minutesToHHMM(minutes) {
+        if (minutes === undefined || minutes === null) return '';
+        const clamped = Math.max(0, Math.min(1440, Number(minutes)));
+        const h = String(Math.floor(clamped / 60) % 24).padStart(2, '0');
+        const m = String(clamped % 60).padStart(2, '0');
+        return `${h}:${m}`;
+    }
+
+    function hhmmToMinutes(value) {
+        const parts = String(value || '').split(':');
+        if (parts.length !== 2) return null;
+        const h = Number(parts[0]);
+        const m = Number(parts[1]);
+        if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+        return h * 60 + m;
+    }
+
+    function addPriceWindowRow(window = {}) {
+        const row = document.createElement('div');
+        row.className = 'model-price-window-row';
+        row.dataset.windowId = window.id || '';
+        row.innerHTML = `
+            <input class="win-label" type="text" placeholder="e.g. Peak" value="${escapeHtml(window.label || '')}">
+            <input class="win-start" type="time" value="${escapeHtml(minutesToHHMM(window.start_minute_utc ?? 0))}">
+            <input class="win-end" type="time" value="${escapeHtml(minutesToHHMM(window.end_minute_utc ?? 0))}">
+            <input class="win-num" type="number" min="0" step="1" placeholder="2" value="${escapeHtml(window.multiplier_num ?? 2)}">
+            <input class="win-den" type="number" min="1" step="1" placeholder="1" value="${escapeHtml(window.multiplier_den ?? 1)}">
+            <input class="win-priority" type="number" step="1" placeholder="0" value="${escapeHtml(window.priority ?? 0)}">
+            <button type="button" class="btn btn-secondary btn-sm win-remove" aria-label="Remove price window"><i class="fa-solid fa-trash"></i></button>
+        `;
+        row.querySelector('.win-remove').addEventListener('click', () => {
+            row.remove();
+            refreshWindowWarnings();
+        });
+        row.querySelectorAll('input').forEach(input => {
+            input.addEventListener('change', refreshWindowWarnings);
+        });
+        document.getElementById('model-price-windows').appendChild(row);
+        refreshWindowWarnings();
+    }
+
+    function readPriceWindows() {
+        return [...document.querySelectorAll('.model-price-window-row')].map(row => {
+            const start = hhmmToMinutes(row.querySelector('.win-start').value);
+            const end = hhmmToMinutes(row.querySelector('.win-end').value);
+            const win = {
+                label: row.querySelector('.win-label').value.trim(),
+                start_minute_utc: start === null ? 0 : start,
+                end_minute_utc: end === null ? 0 : end,
+                // Day-of-week restriction is not exposed yet; every day applies.
+                weekday_mask: 127,
+                multiplier_num: Number(row.querySelector('.win-num').value) || 0,
+                multiplier_den: Number(row.querySelector('.win-den').value) || 1,
+                priority: Number(row.querySelector('.win-priority').value) || 0
+            };
+            if (row.dataset.windowId) win.id = row.dataset.windowId;
+            return win;
+        });
+    }
+
+    function windowCoversMinute(win, minute) {
+        if (win.start_minute_utc < win.end_minute_utc) {
+            return minute >= win.start_minute_utc && minute < win.end_minute_utc;
+        }
+        return minute >= win.start_minute_utc || minute < win.end_minute_utc;
+    }
+
+    // Overlaps are legal but only the highest-priority window applies, so an
+    // unnoticed overlap silently disables a rate the operator thinks is live.
+    function refreshWindowWarnings() {
+        const target = document.getElementById('model-window-warnings');
+        if (!target) return;
+        const windows = readPriceWindows();
+        const problems = [];
+
+        windows.forEach((win, index) => {
+            const name = win.label || `window ${index + 1}`;
+            if (win.start_minute_utc === win.end_minute_utc) {
+                problems.push(`"${name}" starts and ends at the same time, which is ambiguous (empty day or whole day?) and will be rejected on save. Use 00:00 to 24:00 for a whole day.`);
+            }
+            if (win.multiplier_den <= 0) {
+                problems.push(`"${name}" has a zero or negative denominator.`);
+            }
+        });
+
+        for (let i = 0; i < windows.length; i++) {
+            for (let j = i + 1; j < windows.length; j++) {
+                const a = windows[i], b = windows[j];
+                if (a.priority !== b.priority) continue;
+                const overlaps = [a.start_minute_utc, b.start_minute_utc]
+                    .some(minute => windowCoversMinute(a, minute) && windowCoversMinute(b, minute));
+                if (overlaps) {
+                    const nameA = a.label || `window ${i + 1}`;
+                    const nameB = b.label || `window ${j + 1}`;
+                    problems.push(`"${nameA}" and "${nameB}" overlap at the same priority. Windows never stack - exactly one applies, and which one wins is then decided arbitrarily. Give one a higher priority.`);
+                }
+            }
+        }
+        target.innerHTML = problems.map(text => `<div>${escapeHtml(text)}</div>`).join('');
+    }
+
+    // ---- Price simulator ---------------------------------------------------
+    // BigInt throughout: a million tokens at $15/M is 1.5e16 nano-USD, past the
+    // point where a JS double stays exact. The gateway ceils once over the whole
+    // rational expression; this mirrors that rather than approximating it.
+    const NANO_PER_MILLION = 1000000n;
+
+    function ceilCost(tokens, ratePerMillion, num, den) {
+        const numerator = BigInt(tokens) * BigInt(ratePerMillion) * BigInt(num);
+        const denominator = NANO_PER_MILLION * BigInt(den);
+        if (denominator === 0n) return 0n;
+        const quotient = numerator / denominator;
+        return numerator % denominator === 0n ? quotient : quotient + 1n;
+    }
+
+    function formatNano(nano) {
+        const negative = nano < 0n;
+        const value = negative ? -nano : nano;
+        const whole = value / 1000000000n;
+        const fraction = (value % 1000000000n).toString().padStart(9, '0');
+        return `${negative ? '-' : ''}$${whole}.${fraction}`;
+    }
+
+    const SIM_CLASSES = [
+        ['input_fresh', 'Fresh input'],
+        ['output', 'Output'],
+        ['cache_read', 'Cache read'],
+        ['cache_read_5m', 'Cache read (5m)'],
+        ['cache_write', 'Cache write'],
+        ['cache_write_5m', 'Cache write (5m)'],
+        ['cache_write_1h', 'Cache write (1h)']
+    ];
+
+    function simulatorBaseRates() {
+        const toNano = id => Math.round((Number(document.getElementById(id).value) || 0) * 1_000_000_000);
+        return {
+            input_nano_usd_per_million: toNano('model-cost-in'),
+            output_nano_usd_per_million: toNano('model-cost-out'),
+            cache_read_nano_usd_per_million: toNano('model-cost-read'),
+            cache_write_nano_usd_per_million: toNano('model-cost-write')
+        };
+    }
+
+    function overlayTTL(rates, ttlRates, threshold) {
+        const result = Object.assign({}, rates);
+        ttlRates.forEach(rate => {
+            const sameThreshold = (rate.min_input_tokens_exclusive === null && threshold === null) ||
+                (rate.min_input_tokens_exclusive !== null && threshold !== null &&
+                 Number(rate.min_input_tokens_exclusive) === Number(threshold));
+            if (!sameThreshold) return;
+            if (rate.ttl === '5m') {
+                if (rate.cache_read_nano_usd_per_million !== null) result.cache_read_5m = rate.cache_read_nano_usd_per_million;
+                if (rate.cache_write_nano_usd_per_million !== null) result.cache_write_5m = rate.cache_write_nano_usd_per_million;
+            } else if (rate.ttl === '1h') {
+                if (rate.cache_write_nano_usd_per_million !== null) result.cache_write_1h = rate.cache_write_nano_usd_per_million;
+            } else {
+                if (rate.cache_read_nano_usd_per_million !== null) result.cache_read_nano_usd_per_million = rate.cache_read_nano_usd_per_million;
+                if (rate.cache_write_nano_usd_per_million !== null) result.cache_write_nano_usd_per_million = rate.cache_write_nano_usd_per_million;
+            }
+        });
+        return result;
+    }
+
+    function rateForClass(rates, tokenClass) {
+        const effectiveWrite = rates.cache_write_nano_usd_per_million || rates.input_nano_usd_per_million || 0;
+        switch (tokenClass) {
+            case 'input_fresh': return rates.input_nano_usd_per_million || 0;
+            case 'output': return rates.output_nano_usd_per_million || 0;
+            case 'cache_read': return rates.cache_read_nano_usd_per_million || 0;
+            case 'cache_read_5m': return rates.cache_read_5m || rates.cache_read_nano_usd_per_million || 0;
+            case 'cache_write': return effectiveWrite;
+            case 'cache_write_5m': return rates.cache_write_5m || effectiveWrite;
+            case 'cache_write_1h': return rates.cache_write_1h || effectiveWrite;
+            default: return 0;
+        }
+    }
+
+    function simulatePrice() {
+        const target = document.getElementById('sim-result');
+        const num = id => Math.max(0, Number(document.getElementById(id).value) || 0);
+
+        const cacheRead = num('sim-cache-read');
+        const cacheWrite = num('sim-cache-write');
+        const write5m = num('sim-cache-write-5m');
+        const write1h = num('sim-cache-write-1h');
+        const promptTokens = num('sim-prompt-tokens');
+        const accounting = document.getElementById('model-prompt-accounting').value || 'inclusive';
+
+        const cached = cacheRead + cacheWrite + write5m + write1h;
+        let promptTotal, fresh, anomaly = '';
+        if (accounting === 'exclusive') {
+            fresh = promptTokens;
+            promptTotal = promptTokens + cached;
+        } else {
+            promptTotal = promptTokens;
+            fresh = promptTotal - cached;
+            if (fresh < 0) {
+                anomaly = 'The prompt token count is smaller than the cached tokens. Under inclusive accounting that is contradictory; fresh input was clamped to zero and the request would be flagged.';
+                fresh = 0;
+                promptTotal = cached;
+            }
+        }
+
+        // Highest matching tier wins, selected by TOTAL prompt size.
+        const tiers = readPricingTiers();
+        let rates = simulatorBaseRates();
+        let threshold = null;
+        tiers.forEach(tier => {
+            if (promptTotal > tier.min_input_tokens_exclusive) {
+                rates = Object.assign({}, tier.rates);
+                threshold = tier.min_input_tokens_exclusive;
+            }
+        });
+        rates = overlayTTL(rates, readCacheTTLRates(), threshold);
+
+        // Exactly one window applies: the highest-priority match.
+        const atValue = document.getElementById('sim-at').value;
+        const at = atValue ? new Date(atValue + 'Z') : new Date();
+        if (Number.isNaN(at.getTime())) {
+            target.innerHTML = '<div class="sim-error">That timestamp could not be parsed.</div>';
+            return;
+        }
+        const minute = at.getUTCHours() * 60 + at.getUTCMinutes();
+        let active = null;
+        readPriceWindows().forEach(win => {
+            if (win.start_minute_utc === win.end_minute_utc) return;
+            if (!windowCoversMinute(win, minute)) return;
+            if (!active || win.priority > active.priority) active = win;
+        });
+        const mulNum = active ? active.multiplier_num : 1;
+        const mulDen = active ? active.multiplier_den : 1;
+        if (mulDen <= 0) {
+            target.innerHTML = '<div class="sim-error">A price window has a zero denominator; fix it before simulating.</div>';
+            return;
+        }
+
+        const tokensByClass = {
+            input_fresh: fresh,
+            output: num('sim-output-tokens'),
+            cache_read: cacheRead,
+            cache_read_5m: 0,
+            cache_write: cacheWrite,
+            cache_write_5m: write5m,
+            cache_write_1h: write1h
+        };
+
+        let total = 0n;
+        const rows = [];
+        SIM_CLASSES.forEach(entry => {
+            const tokenClass = entry[0];
+            const label = entry[1];
+            const tokens = tokensByClass[tokenClass] || 0;
+            if (tokens === 0) return;
+            const rate = rateForClass(rates, tokenClass);
+            const cost = ceilCost(tokens, rate, mulNum, mulDen);
+            total += cost;
+            rows.push(`<tr><td>${escapeHtml(label)}</td><td>${tokens.toLocaleString()}</td><td>$${(rate / 1_000_000_000).toFixed(6)}/M</td><td>${formatNano(cost)}</td></tr>`);
+        });
+
+        const notes = [];
+        notes.push(threshold === null
+            ? 'Base rates (no context tier applied).'
+            : `Context tier above ${threshold.toLocaleString()} tokens applied.`);
+        notes.push(active
+            ? `Window "${escapeHtml(active.label || 'unnamed')}" applied: x${mulNum}/${mulDen}.`
+            : 'No time-of-day window active at this instant.');
+        notes.push(`Prompt accounting: ${escapeHtml(accounting)} - total prompt ${promptTotal.toLocaleString()} tokens, of which ${fresh.toLocaleString()} billed at the input rate.`);
+        if (anomaly) notes.push(`<span class="sim-error">${escapeHtml(anomaly)}</span>`);
+
+        target.innerHTML = `
+            <table>
+                <tbody>
+                    ${rows.join('') || '<tr><td colspan="4">No billable tokens.</td></tr>'}
+                    <tr class="sim-total"><td>Total</td><td></td><td></td><td>${formatNano(total)}</td></tr>
+                </tbody>
+            </table>
+            <div class="sim-note">${notes.join('<br>')}</div>
+        `;
+    }
+
+    document.getElementById('btn-add-cache-ttl-rate').addEventListener('click', () => addCacheTTLRateRow());
+    document.getElementById('btn-add-price-window').addEventListener('click', () => addPriceWindowRow());
+    document.getElementById('btn-simulate-price').addEventListener('click', simulatePrice);
+
+
     document.getElementById('btn-add-model').addEventListener('click', () => {
         const form = document.getElementById('model-form');
         form.reset();
@@ -336,6 +666,10 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('model-deprecated-at').value = '';
         document.getElementById('model-deprecation-message').value = '';
         document.getElementById('model-pricing-tiers').innerHTML = '';
+        document.getElementById('model-cache-ttl-rates').innerHTML = '';
+        document.getElementById('model-price-windows').innerHTML = '';
+        document.getElementById('model-window-warnings').innerHTML = '';
+        document.getElementById('sim-result').innerHTML = '';
         toggleModelTypeFields();
         document.getElementById('model-test-btn').style.display = 'none';
         document.getElementById('model-test-result').style.display = 'none';
@@ -499,6 +833,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const deprecation_message = document.getElementById('model-deprecation-message').value.trim();
         const pricing_tiers = readPricingTiers();
         const prompt_accounting = document.getElementById('model-prompt-accounting').value || 'inclusive';
+        const cache_ttl_rates = readCacheTTLRates();
+        const price_windows = readPriceWindows();
 
         if (cache_contract) {
             try {
@@ -540,7 +876,9 @@ document.addEventListener('DOMContentLoaded', () => {
             deprecated_at,
             deprecation_message,
             pricing_tiers,
-            prompt_accounting
+            prompt_accounting,
+            cache_ttl_rates,
+            price_windows
         };
 
         const method = id ? 'PUT' : 'POST';
@@ -1308,7 +1646,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 deprecatedInput.value = '';
             }
             document.getElementById('model-pricing-tiers').innerHTML = '';
+        document.getElementById('model-cache-ttl-rates').innerHTML = '';
+        document.getElementById('model-price-windows').innerHTML = '';
+        document.getElementById('model-window-warnings').innerHTML = '';
+        document.getElementById('sim-result').innerHTML = '';
             (m.pricing_tiers || []).forEach(addPricingTierRow);
+            document.getElementById('model-cache-ttl-rates').innerHTML = '';
+            (m.cache_ttl_rates || []).forEach(addCacheTTLRateRow);
+            document.getElementById('model-price-windows').innerHTML = '';
+            (m.price_windows || []).forEach(addPriceWindowRow);
+            refreshWindowWarnings();
+            document.getElementById('sim-result').innerHTML = '';
 
             document.getElementById('model-status-group').style.display = 'block';
             document.getElementById('model-status').value = m.status;
