@@ -1452,12 +1452,21 @@ func (api *AdminAPI) errorResponse(w http.ResponseWriter, status int, message st
 	api.jsonResponse(w, status, map[string]string{"error": message})
 }
 
-// dbErrorResponse logs a database/internal error server-side (with whatever
-// detail is useful for debugging) and returns a generic message to the
-// client - a raw err.Error() risks leaking schema, driver, or query
-// fragments to whoever is calling the admin API.
+// dbErrorResponse logs a database/internal error server-side and answers the
+// caller.
+//
+// The full error still never reaches the wire — a raw err.Error() risks leaking
+// query fragments. But a recognised Postgres failure gets a classified,
+// actionable message instead of the generic line: this endpoint is
+// admin-authenticated, and telling the one person who can fix a missing
+// migration only "see the logs" costs a production debugging session to learn
+// something the error already knew (see describeDatabaseError).
 func (api *AdminAPI) dbErrorResponse(w http.ResponseWriter, err error) {
 	log.Printf("[ADMIN-ERROR] %v", err)
+	if message, classified := describeDatabaseError(err); classified {
+		api.errorResponse(w, http.StatusInternalServerError, message)
+		return
+	}
 	api.errorResponse(w, http.StatusInternalServerError, "Internal server error. See gateway logs for details.")
 }
 

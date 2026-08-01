@@ -398,6 +398,13 @@ func Open(dsn string) (*DB, error) {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
+	// Fail at boot with a named cause rather than on the first write that
+	// touches a missing column, which surfaces as an opaque 500 far from here.
+	if err := VerifySchemaExpectations(conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
 	db := &DB{conn: conn}
 	if err := db.backfillVirtualKeyHashes(); err != nil {
 		conn.Close()
