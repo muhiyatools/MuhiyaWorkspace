@@ -371,14 +371,21 @@ document.addEventListener('DOMContentLoaded', () => {
         return h * 60 + m;
     }
 
+    // A new row must not open in a state the engine rejects. Starting a window
+    // at 00:00 and ending it at 00:00 is the one span that is ambiguous (empty
+    // day or whole day?), so new rows open on a plausible evening peak block
+    // that the operator can adjust.
+    const DEFAULT_WINDOW_START = 16 * 60;
+    const DEFAULT_WINDOW_END = 20 * 60;
+
     function addPriceWindowRow(window = {}) {
         const row = document.createElement('div');
         row.className = 'model-price-window-row';
         row.dataset.windowId = window.id || '';
         row.innerHTML = `
             <input class="win-label" type="text" placeholder="e.g. Peak" value="${escapeHtml(window.label || '')}">
-            <input class="win-start" type="time" value="${escapeHtml(minutesToHHMM(window.start_minute_utc ?? 0))}">
-            <input class="win-end" type="time" value="${escapeHtml(minutesToHHMM(window.end_minute_utc ?? 0))}">
+            <input class="win-start" type="time" value="${escapeHtml(minutesToHHMM(window.start_minute_utc ?? DEFAULT_WINDOW_START))}">
+            <input class="win-end" type="time" value="${escapeHtml(minutesToHHMM(window.end_minute_utc ?? DEFAULT_WINDOW_END))}">
             <input class="win-num" type="number" min="0" step="1" placeholder="2" value="${escapeHtml(window.multiplier_num ?? 2)}">
             <input class="win-den" type="number" min="1" step="1" placeholder="1" value="${escapeHtml(window.multiplier_den ?? 1)}">
             <input class="win-priority" type="number" step="1" placeholder="0" value="${escapeHtml(window.priority ?? 0)}">
