@@ -30,7 +30,7 @@ func TestFeature009DeepSeekCaptureMatchesPinnedBefore(t *testing.T) {
 			body := feature009DeepSeekBody()
 			body["model"] = scenario.model
 			delete(body, "web_search")
-			applied := ApplyThinkingOpenAI(body, "https://api.deepseek.com", scenario.model, scenario.level)
+			applied := ApplyThinkingOpenAI(body, "https://api.deepseek.com", scenario.model, scenario.level, false)
 			body["stream_options"] = map[string]interface{}{"include_usage": true}
 			sanitizeUpstreamIdentity(body, famDeepseek, "", "")
 			if scenario.identity {

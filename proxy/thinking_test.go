@@ -92,7 +92,7 @@ func applyOpenAI(t *testing.T, baseURL, model, level string, extra map[string]in
 	for k, v := range extra {
 		body[k] = v
 	}
-	applied := ApplyThinkingOpenAI(body, baseURL, model, level)
+	applied := ApplyThinkingOpenAI(body, baseURL, model, level, false)
 	return body, applied
 }
 

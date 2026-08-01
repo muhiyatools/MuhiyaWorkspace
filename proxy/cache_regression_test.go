@@ -17,7 +17,7 @@ func deepSeekTransform(t *testing.T, body map[string]interface{}, level string) 
 	t.Helper()
 	body["model"] = "deepseek-chat"
 	delete(body, "web_search")
-	ApplyThinkingOpenAI(body, "https://api.deepseek.com", "deepseek-chat", level)
+	ApplyThinkingOpenAI(body, "https://api.deepseek.com", "deepseek-chat", level, false)
 	// Non-OpenRouter provider: this must be a strict no-op (byte stability).
 	InjectOpenRouterAnthropicCache(body, false, "deepseek-chat")
 	if stream, _ := body["stream"].(bool); stream {

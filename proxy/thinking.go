@@ -223,7 +223,21 @@ func classifyUpstream(baseURL, targetModel string) upstreamFamily {
 // actually applied ("" when nothing was requested; "unsupported" when the
 // model has no controllable thinking; "disabled" when an explicit none/off
 // effort turned DeepSeek thinking off).
-func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, level string) string {
+// ApplyThinkingOpenAI rewrites an OpenAI-dialect body for the upstream family.
+//
+// supportsThinking is the operator-set models.supports_thinking flag and is the
+// SOURCE OF TRUTH for whether a model has a reasoning mode, exactly as
+// supports_vision is for vision routing. The name heuristic below is only a
+// fallback for callers that have no catalog row.
+//
+// It has to be the flag rather than the name: reasoner detection used to be
+// strings.Contains(model, "reasoner") || strings.Contains(model, "r1"), which
+// silently misclassifies every DeepSeek generation whose name does not carry
+// those tokens — deepseek-v4-flash targeting deepseek-chat matched neither, so
+// its thinking configuration was stripped on every request and the model ran
+// with whatever default the upstream chose. A naming convention is not an API
+// contract, and the catalog already records the answer.
+func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, level string, supportsThinking bool) string {
 	family := classifyUpstream(baseURL, targetModel)
 	model := strings.ToLower(targetModel)
 	rank := thinkingRank(level)
@@ -272,7 +286,7 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 		}
 		delete(bodyMap, "reasoning_effort")
 		delete(bodyMap, "thinking")
-		if !isDeepseekReasoner(model) {
+		if !modelSupportsThinking(supportsThinking, model) {
 			// deepseek-chat (and any other non-reasoning DeepSeek model)
 			// rejects or ignores the thinking parameter - inject nothing. The
 			// raw client fields are still gone, so nothing leaks through.
@@ -404,6 +418,13 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 // thinking mode and rejects or ignores the parameter).
 func isDeepseekReasoner(model string) bool {
 	return strings.Contains(model, "reasoner") || strings.Contains(model, "r1")
+}
+
+// modelSupportsThinking answers whether a DeepSeek model has a reasoning mode.
+// The operator flag wins whenever it is set; the name heuristic is the fallback
+// for callers with no catalog row (direct-dialect probes, tests).
+func modelSupportsThinking(operatorFlag bool, model string) bool {
+	return operatorFlag || isDeepseekReasoner(model)
 }
 
 // openAISupportsReasoningEffort gates the strict OpenAI parameter to model

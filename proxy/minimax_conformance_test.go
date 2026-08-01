@@ -66,7 +66,7 @@ func simulatedMiniMaxRequestBody(t *testing.T, index int) []byte {
 		},
 		"tools": []interface{}{map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "read_file", "description": "Read one file", "parameters": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"path": map[string]interface{}{"type": "string"}}, "required": []interface{}{"path"}}}}},
 	}
-	if applied := ApplyThinkingOpenAI(body, "https://api.minimax.io/v1", "MiniMax-M3", "max"); applied != "always-on" {
+	if applied := ApplyThinkingOpenAI(body, "https://api.minimax.io/v1", "MiniMax-M3", "max", false); applied != "always-on" {
 		t.Fatalf("MiniMax reasoning applied = %q", applied)
 	}
 	encoded, err := json.Marshal(body)

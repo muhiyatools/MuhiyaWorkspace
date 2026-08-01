@@ -1156,7 +1156,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 
 	// Translate the canonical thinking level into this provider's dialect
 	// (and strip the gateway-level fields regardless).
-	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel, model.SupportsThinking)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
 
 	// OpenRouter → Claude only: add cache_control breakpoints. Auto-caching
@@ -1540,7 +1540,7 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 	translated, _ := json.Marshal(oaiReq)
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(translated, &bodyMap)
-	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel, model.SupportsThinking)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
 	sanitizeUpstreamIdentity(bodyMap, classifyUpstream(provider.BaseURL, model.TargetModel), h.identitySecret, log.UserID)
 	newBody, _ := json.Marshal(bodyMap)

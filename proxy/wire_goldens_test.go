@@ -32,7 +32,7 @@ func wireGoldenTestdataDir(t *testing.T) string {
 // non-reviewable drift here silently invalidates the cache.
 func TestMiniMaxWireRequestIsFrozen(t *testing.T) {
 	body := miniMaxCanonicalBody()
-	ApplyThinkingOpenAI(body, "https://api.minimax.io/v1", "MiniMax-M3", "max")
+	ApplyThinkingOpenAI(body, "https://api.minimax.io/v1", "MiniMax-M3", "max", false)
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)

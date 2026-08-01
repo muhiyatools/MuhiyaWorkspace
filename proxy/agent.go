@@ -340,7 +340,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 	structBody, _ := json.Marshal(upstreamReq)
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(structBody, &bodyMap)
-	ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, thinkingLevel)
+	ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, thinkingLevel, model.SupportsThinking)
 	// Document parts to OpenRouter: pin the free PDF parsing engine so a file
 	// attachment never silently invokes the paid OCR engine.
 	maybeInjectOpenRouterPDFParser(bodyMap, provider, h.openRouterPDFEngine())

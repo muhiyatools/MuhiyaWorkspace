@@ -63,7 +63,7 @@ func TestDeepSeekThinkingNormalizationAndStripList(t *testing.T) {
 				"user_id":           "forged-id",
 			}
 
-			applied := ApplyThinkingOpenAI(body, baseURL, tc.model, tc.level)
+			applied := ApplyThinkingOpenAI(body, baseURL, tc.model, tc.level, false)
 			if applied != tc.wantApplied {
 				t.Fatalf("applied = %q, want %q", applied, tc.wantApplied)
 			}
