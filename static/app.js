@@ -814,6 +814,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const muhiyachat_visible = document.getElementById('model-muhiyachat-visible').checked;
         const supports_vision = document.getElementById('model-supports-vision').checked;
         const supports_thinking = document.getElementById('model-supports-thinking').checked;
+        // 0 means unrated; the picker renders that as unknown rather than a zero score.
+        const coding_tier = Math.min(5, Math.max(0, parseInt(document.getElementById('model-coding-tier').value) || 0));
+        const speed_score = Math.min(5, Math.max(0, parseInt(document.getElementById('model-speed-score').value) || 0));
         const supports_audio = document.getElementById('model-supports-audio').checked;
         const supports_video = document.getElementById('model-supports-video').checked;
         const supports_documents = document.getElementById('model-supports-documents').checked;
@@ -871,6 +874,8 @@ document.addEventListener('DOMContentLoaded', () => {
             description,
             supports_vision,
             supports_thinking,
+            coding_tier,
+            speed_score,
             supports_audio,
             supports_video,
             supports_documents,
@@ -1623,6 +1628,8 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-muhiyachat-visible').checked = !!m.muhiyachat_visible;
             document.getElementById('model-supports-vision').checked = !!m.supports_vision;
             document.getElementById('model-supports-thinking').checked = !!m.supports_thinking;
+            document.getElementById('model-coding-tier').value = m.coding_tier || '';
+            document.getElementById('model-speed-score').value = m.speed_score || '';
             document.getElementById('model-supports-audio').checked = !!m.supports_audio;
             document.getElementById('model-supports-video').checked = !!m.supports_video;
             document.getElementById('model-supports-documents').checked = !!m.supports_documents;

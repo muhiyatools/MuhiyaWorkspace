@@ -397,8 +397,12 @@ func modelInputModalities(m *db.Model) []string {
 // so the four response shapes can never drift apart.
 func modelCapabilityFields(m *db.Model) map[string]interface{} {
 	return map[string]interface{}{
-		"supports_vision":              m.SupportsVision,
-		"supports_thinking":            m.SupportsThinking,
+		"supports_vision":   m.SupportsVision,
+		"supports_thinking": m.SupportsThinking,
+		// Operator-supplied 1..5 capability ranks; 0 means unrated and clients
+		// must render that as "unknown", never as a zero score.
+		"coding_tier":                  m.CodingTier,
+		"speed_score":                  m.SpeedScore,
 		"supports_audio":               m.SupportsAudio,
 		"supports_video":               m.SupportsVideo,
 		"supports_documents":           m.SupportsDocuments,

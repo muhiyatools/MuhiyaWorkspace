@@ -709,6 +709,18 @@
                         <input type="number" id="model-max-output-tokens" placeholder="e.g. 4096">
                     </div>
                 </div>
+                <div class="form-group-row">
+                    <div class="form-group">
+                        <label for="model-coding-tier">Intelligence (1&ndash;5)</label>
+                        <input type="number" id="model-coding-tier" min="0" max="5" placeholder="0 = unrated">
+                        <small style="color:var(--text-muted); font-size:0.72rem;">Shown as the Intelligence bar in the MuhiyaCode model picker. Leave 0 to show &ldquo;unrated&rdquo; instead of a score.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="model-speed-score">Speed (1&ndash;5)</label>
+                        <input type="number" id="model-speed-score" min="0" max="5" placeholder="0 = unrated">
+                        <small style="color:var(--text-muted); font-size:0.72rem;">Perceived responsiveness in the harness. Cost is derived from this model&rsquo;s pricing and needs no entry.</small>
+                    </div>
+                </div>
                 <div class="form-group">
                     <label for="model-description">Description</label>
                     <textarea id="model-description" placeholder="Brief model description..." rows="2" style="background:#09090b; border:1px solid var(--panel-border); border-radius:6px; padding:0.65rem 0.85rem; color:#fff; font-family:var(--font-body); font-size:0.85rem; outline:none; transition:var(--transition); resize:vertical;"></textarea>
