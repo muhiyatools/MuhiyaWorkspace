@@ -1293,6 +1293,17 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		var upstreamProvider string
 		normalClose := false
 		logged := false
+		// Time to the first forwarded data frame. Everything before it is
+		// provider queue plus prompt prefill — the part prompt caching can
+		// actually reduce; everything after is generation, which only fewer
+		// tokens can reduce. Collapsed into latency_ms they were unattributable.
+		var firstTokenMS *int
+		markFirstToken := func() {
+			if firstTokenMS == nil {
+				elapsed := int(time.Since(startTime).Milliseconds())
+				firstTokenMS = &elapsed
+			}
+		}
 
 		// finish persists billing/usage and sends the MuhiyaChat meta chunk
 		// exactly once, BEFORE the terminal [DONE] line - a data frame after
@@ -1314,7 +1325,14 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 				cacheRead = finalUsage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
 				cacheWrite = finalUsage.CacheWriteTokensReported()
 				log.CacheMissTokens = finalUsage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
+				// Reasoning is a subset of completion_tokens, so it is recorded
+				// alongside them rather than added: it is the only way to tell a
+				// long answer from a long silent deliberation after the fact.
+				if reasoning := finalUsage.ReasoningTokensReported(); reasoning > 0 {
+					log.ReasoningTokens = &reasoning
+				}
 			}
+			log.FirstTokenMS = firstTokenMS
 			log.UsageEstimated = finalUsage == nil
 			log.UpstreamProvider = upstreamProvider
 			h.observeProviderAffinity(routeScope, upstreamProvider)
@@ -1350,6 +1368,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 					flusher.Flush()
 					continue
 				} else if dataStr != "" {
+					markFirstToken()
 					var chunk OpenAIChunk
 					if err := json.Unmarshal([]byte(dataStr), &chunk); err == nil {
 						// The accumulator only feeds the fallback token estimator used
@@ -1395,6 +1414,9 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 			log.InputTokens = oaiResp.Usage.PromptTokens
 			completionTokens = oaiResp.Usage.CompletionTokens
 			cacheRead = oaiResp.Usage.CacheReadTokensFor(provider.BaseURL, model.TargetModel)
+			if reasoning := oaiResp.Usage.ReasoningTokensReported(); reasoning > 0 {
+				log.ReasoningTokens = &reasoning
+			}
 			cacheWrite = oaiResp.Usage.CacheWriteTokensReported()
 			log.CacheMissTokens = oaiResp.Usage.CacheMissTokensFor(provider.BaseURL, model.TargetModel)
 			log.UsageEstimated = false
@@ -3097,6 +3119,12 @@ func sendMuhiyaMetaChunk(w http.ResponseWriter, log *db.RequestLog, modelName st
 			"cost":            log.Cost,
 			"log_id":          log.ID,
 			"usage_estimated": log.UsageEstimated,
+			// Latency forensics for the client: how much of the reply the user
+			// never saw, and how long the provider took before the first frame.
+			// Omitted rather than zeroed when unmeasured, so a client can tell
+			// "none" from "not reported".
+			"reasoning_tokens": log.ReasoningTokens,
+			"first_token_ms":   log.FirstTokenMS,
 		},
 	})
 	if err == nil {

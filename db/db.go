@@ -210,8 +210,17 @@ type RequestLog struct {
 	// token count. It is nil for rows logged before feature 007 or by upstreams
 	// that do not report it, in which case the dashboard hit-rate falls back to
 	// the input_tokens-based approximation.
-	CacheMissTokens *int64        `json:"cache_miss_tokens,omitempty"`
-	Cost            float64       `json:"cost"`
+	CacheMissTokens *int64 `json:"cache_miss_tokens,omitempty"`
+	// ReasoningTokens is the thinking-model share of OutputTokens (reported by
+	// the upstream as a SUBSET of completion_tokens, not an addition). nil when
+	// the upstream reported no split. Without it, a long turn cannot be
+	// attributed to a long answer versus a long silent deliberation.
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
+	// FirstTokenMS is the time from dispatching the upstream request to
+	// forwarding its first data frame: provider queue + prompt prefill, as
+	// distinct from generation. nil when not measured (non-streaming paths).
+	FirstTokenMS *int    `json:"first_token_ms,omitempty"`
+	Cost         float64 `json:"cost"`
 	CostNanoUSD     money.NanoUSD `json:"cost_nano_usd"`
 	CreditsConsumed float64       `json:"credits_consumed"`
 	// ChargeCeilingNanoUSD is an ephemeral admission-time cap. Completed
@@ -2130,12 +2139,12 @@ func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
 		budget_window_id, budget_window_started_at, budget_window_reset_at,
 		pricing_rule_set_id, pricing_tier_threshold, price_window_id,
 		price_multiplier_num, price_multiplier_den, priced_at, prompt_accounting,
-		usage_anomaly, upstream_cost_nano_usd
+		usage_anomaly, upstream_cost_nano_usd, reasoning_tokens, first_token_ms
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
 		$14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
 		$25, $26, $27, $28, $29, $30, $31, $32, $33,
-		$34, $35, $36, $37, $38, $39, $40, $41, $42
+		$34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44
 	) ON CONFLICT (id) DO NOTHING`,
 		entry.ID, entry.VirtualKeyID, entry.UserID, entry.SessionID, entry.ClientRequestID, entry.AttemptNumber,
 		modelID, providerID, entry.RequestPath, entry.StatusCode, entry.RequestStatus, entry.Streamed, entry.CacheEpoch,
@@ -2145,7 +2154,7 @@ func insertRequestLog(exec requestLogExecer, entry RequestLog) error {
 		budgetWindowID, entry.BudgetWindowStartedAt, entry.BudgetWindowResetAt,
 		entry.PricingRuleSetID, entry.PricingTierThreshold, entry.PriceWindowID,
 		entry.PriceMultiplierNum, entry.PriceMultiplierDen, entry.PricedAt, entry.PromptAccounting,
-		entry.UsageAnomaly, entry.UpstreamCostNanoUSD)
+		entry.UsageAnomaly, entry.UpstreamCostNanoUSD, entry.ReasoningTokens, entry.FirstTokenMS)
 	if err != nil {
 		return err
 	}
@@ -2228,7 +2237,8 @@ func (db *DB) ListRequestLogsPage(query RequestLogQuery) (RequestLogPage, error)
 		       request_logs.latency_ms, COALESCE(request_logs.error_message, ''), request_logs.created_at, COALESCE(request_logs.client_app, ''),
 		       COALESCE(request_logs.requested_model, ''), COALESCE(request_logs.complexity, ''), COALESCE(request_logs.failover_attempts, 0), COALESCE(request_logs.thinking_level, ''), COALESCE(request_logs.usage_estimated, FALSE),
 		       COALESCE(request_logs.upstream_provider, ''), COALESCE(request_logs.budget_window_id, ''),
-		       request_logs.budget_window_started_at, request_logs.budget_window_reset_at
+		       request_logs.budget_window_started_at, request_logs.budget_window_reset_at,
+		       request_logs.reasoning_tokens, request_logs.first_token_ms
 		FROM request_logs
 		LEFT JOIN models ON request_logs.model_id = models.id
 		LEFT JOIN users ON request_logs.user_id = users.id
@@ -2251,7 +2261,8 @@ func (db *DB) ListRequestLogsPage(query RequestLogQuery) (RequestLogPage, error)
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.CacheMissTokens,
 			&r.Cost, &r.CostNanoUSD, &r.CreditsConsumed, &r.LatencyMS, &r.ErrorMessage, &r.CreatedAt, &r.ClientApp,
 			&r.RequestedModel, &r.Complexity, &r.FailoverAttempts, &r.ThinkingLevel, &r.UsageEstimated, &r.UpstreamProvider,
-			&r.BudgetWindowID, &r.BudgetWindowStartedAt, &r.BudgetWindowResetAt)
+			&r.BudgetWindowID, &r.BudgetWindowStartedAt, &r.BudgetWindowResetAt,
+			&r.ReasoningTokens, &r.FirstTokenMS)
 		if err != nil {
 			return RequestLogPage{}, err
 		}

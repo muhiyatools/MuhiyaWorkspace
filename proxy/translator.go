@@ -78,6 +78,31 @@ type PromptTokensDetail struct {
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
+// CompletionTokensDetail is the output-side split. DeepSeek and the OpenAI
+// reasoning models both report reasoning_tokens here, as a SUBSET of
+// completion_tokens (not an addition to it).
+type CompletionTokensDetail struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+// ReasoningTokensReported returns the reasoning tokens the upstream declared,
+// clamped to completion_tokens because it is documented as a subset of them. 0
+// means "none reported", which is also the correct value for a non-thinking
+// model — the two are indistinguishable on the wire and cost the same.
+func (u *OpenAIUsage) ReasoningTokensReported() int {
+	if u == nil || u.CompletionTokensDetails == nil {
+		return 0
+	}
+	reasoning := u.CompletionTokensDetails.ReasoningTokens
+	if reasoning < 0 {
+		return 0
+	}
+	if u.CompletionTokens > 0 && reasoning > u.CompletionTokens {
+		return u.CompletionTokens
+	}
+	return reasoning
+}
+
 type OpenAIUsage struct {
 	PromptTokens        int                 `json:"prompt_tokens"`
 	CompletionTokens    int                 `json:"completion_tokens"`
@@ -88,6 +113,13 @@ type OpenAIUsage struct {
 	// fields every DeepSeek request logged 0 cache tokens even on real hits.
 	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
 	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+	// CompletionTokensDetails carries the reasoning-token split. On a thinking
+	// model reasoning_tokens is counted INSIDE completion_tokens, so without
+	// this the logs cannot distinguish "the model wrote a long answer" from
+	// "the model reasoned for four minutes and wrote three lines" — the single
+	// number needed to explain why a turn was slow. Every other latency figure
+	// we record is uninterpretable without it.
+	CompletionTokensDetails *CompletionTokensDetail `json:"completion_tokens_details,omitempty"`
 	CacheWriteTokens      int `json:"-"` // internal tracking
 	// Cache writes split by requested entry lifetime, for upstreams that
 	// price a five-minute write differently from a one-hour one. Internal

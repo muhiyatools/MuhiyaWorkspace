@@ -34,6 +34,13 @@ var requiredSchema = []schemaExpectation{
 		purpose: "MuhiyaCode model discovery"},
 	{table: "models", column: "muhiyachat_visible", migration: "038_model_muhiyachat_visible.sql",
 		purpose: "MuhiyaChat model discovery"},
+	// The request-log INSERT names these columns unconditionally, so their
+	// absence fails every log write rather than degrading — worth naming
+	// explicitly instead of surfacing as an opaque insert error.
+	{table: "request_logs", column: "reasoning_tokens", migration: "039_request_latency_instrumentation.sql",
+		purpose: "thinking-model latency attribution"},
+	{table: "request_logs", column: "first_token_ms", migration: "039_request_latency_instrumentation.sql",
+		purpose: "prefill vs generation latency split"},
 	{table: "models", column: "prompt_accounting", migration: "032_prompt_accounting.sql",
 		purpose: "per-provider prompt-token accounting (billing correctness)"},
 	{table: "model_pricing_tiers", migration: "025_model_pricing_tiers.sql",
