@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -156,13 +157,14 @@ type Model struct {
 	// thinking effort. Source of truth for thinking-tier routing (the target-name
 	// heuristic is only a fallback for unflagged rows).
 	SupportsThinking bool `json:"supports_thinking"`
-	// CodingTier / SpeedScore are operator-supplied capability ranks from 1 to 5,
-	// where 0 means UNRATED. They drive the Intelligence and Speed bars in the
-	// MuhiyaCode model picker (the Cost bar is derived from this row's pricing).
-	// Nothing in the gateway routes on them — they are descriptive metadata for
-	// clients, so a wrong value misinforms a human but cannot misroute a request.
-	CodingTier int `json:"coding_tier"`
-	SpeedScore int `json:"speed_score"`
+	// CodingTier / SpeedScore are operator-supplied capability ranks from 1.0 to
+	// 5.0 to one decimal place, where 0 means UNRATED. They drive the
+	// Intelligence and Speed bars in the MuhiyaCode model picker (the Cost bar is
+	// derived from this row's pricing). Nothing in the gateway routes on them —
+	// they are descriptive metadata for clients, so a wrong value misinforms a
+	// human but cannot misroute a request.
+	CodingTier float64 `json:"coding_tier"`
+	SpeedScore float64 `json:"speed_score"`
 	// SupportsAudio / SupportsVideo / SupportsDocuments extend the capability
 	// system (migration 020) to every input modality: audio parts (input_audio),
 	// video parts (video_url) and document parts (file, e.g. PDF). Operator-set,
@@ -1632,16 +1634,18 @@ func normalizeModelCatalog(model *Model) error {
 	return validateModelPricingRules(*model)
 }
 
-// clampSpecScore bounds an operator capability rank to 0..5, where 0 is the
-// "unrated" sentinel clients render as unknown.
-func clampSpecScore(value int) int {
-	if value < 0 {
+// clampSpecScore bounds an operator capability rank to 0.0..5.0 at one decimal
+// place, where 0 is the "unrated" sentinel clients render as unknown. Rounding
+// here rather than at the column keeps what the operator sees on reload equal to
+// what they typed.
+func clampSpecScore(value float64) float64 {
+	if value < 0 || math.IsNaN(value) {
 		return 0
 	}
 	if value > 5 {
 		return 5
 	}
-	return value
+	return math.Round(value*10) / 10
 }
 
 func applyModelCatalogDefaults(model *Model) error {

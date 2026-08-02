@@ -815,8 +815,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const supports_vision = document.getElementById('model-supports-vision').checked;
         const supports_thinking = document.getElementById('model-supports-thinking').checked;
         // 0 means unrated; the picker renders that as unknown rather than a zero score.
-        const coding_tier = Math.min(5, Math.max(0, parseInt(document.getElementById('model-coding-tier').value) || 0));
-        const speed_score = Math.min(5, Math.max(0, parseInt(document.getElementById('model-speed-score').value) || 0));
+        const specScore = id => Math.min(5, Math.max(0, Math.round((parseFloat(document.getElementById(id).value) || 0) * 10) / 10));
+        const coding_tier = specScore('model-coding-tier');
+        const speed_score = specScore('model-speed-score');
         const supports_audio = document.getElementById('model-supports-audio').checked;
         const supports_video = document.getElementById('model-supports-video').checked;
         const supports_documents = document.getElementById('model-supports-documents').checked;

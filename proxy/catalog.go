@@ -37,6 +37,15 @@ type muhiyaCatalogModel struct {
 	CacheContract       json.RawMessage      `json:"cache_contract"`
 	Pricing             muhiyaCatalogPricing `json:"pricing"`
 	Capabilities        muhiyaCapabilities   `json:"capabilities"`
+	// CodingTier / SpeedScore are the operator's 0..5 capability ranks, drawn as
+	// the model picker's Intelligence and Speed bars. 0 means unrated.
+	//
+	// These belong on the catalog document, not only on the v1-shaped /v1/models
+	// response: catalog v2 is what MuhiyaCode actually consumes, so ranks added
+	// to the v1 shape alone were saved by the admin panel and then never reached
+	// the picker, which drew every rated model as "unrated".
+	CodingTier float64 `json:"coding_tier"`
+	SpeedScore float64 `json:"speed_score"`
 	Health              string               `json:"health"`
 	DeprecatedAt        *time.Time           `json:"deprecated_at,omitempty"`
 	DeprecationMessage  string               `json:"deprecation_message,omitempty"`
@@ -270,6 +279,8 @@ func catalogRecord(model *db.Model) (muhiyaCatalogModel, error) {
 			AcceptedMIMETypes: splitMimeList(model.AcceptedMimeTypes),
 			InputModalities:   modelInputModalities(model),
 		},
+		CodingTier:         model.CodingTier,
+		SpeedScore:         model.SpeedScore,
 		Health:             model.Health,
 		DeprecatedAt:       model.DeprecatedAt,
 		DeprecationMessage: model.DeprecationMessage,
