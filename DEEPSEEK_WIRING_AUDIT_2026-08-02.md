@@ -1,5 +1,16 @@
 # DeepSeek Wiring Audit & Remediation Plan — 2026-08-02
 
+> **STATUS: EXECUTED 2026-08-02.** All phases applied to both repos. Build, vet,
+> staticcheck (0) and full test suites green on each; `gateway.exe` rebuilt.
+>
+> Phase 0 needed no data change: the live catalog was already correct
+> (`deepseek-v4-flash` → `deepseek-v4-flash`, thinking on, 1M / 384k). The seed
+> files and migration 036 were still fixed so a fresh deployment cannot
+> reintroduce the retired alias.
+>
+> Findings P0-1 (seeds), P0-2, P0-3, P0-4, P1-5, P1-6, P1-7 and P2-9 are all
+> resolved. P1-8 is resolved via the `X-Muhiya-Output-Limit` response header.
+
 Scope: end-to-end DeepSeek path across **MuhiyaCode Agent** (`F:\MuhiyaCode Agent Go`)
 and **Muhiya Go Gateway** (`F:\MuhiyaWorkspace\MuhiyaWorkspace`), checked against
 DeepSeek's live API documentation as of 2026-08-02.

@@ -12,6 +12,7 @@ import (
 
 	"gateway/db"
 	"gateway/pricing"
+	"gateway/upstreamurl"
 	"github.com/google/uuid"
 )
 
@@ -174,9 +175,10 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 
 		// Append the assistant turn (with its tool calls) to the conversation.
 		messages = append(messages, OpenAIMessage{
-			Role:      "assistant",
-			Content:   turn.assistantText,
-			ToolCalls: turn.toolCalls,
+			Role:             "assistant",
+			Content:          turn.assistantText,
+			ReasoningContent: turn.reasoningContent,
+			ToolCalls:        turn.toolCalls,
 		})
 
 		// Execute each tool call in order, streaming status + result events.
@@ -310,10 +312,11 @@ func (h *ProxyHandler) resolveAgentModel(oaiReq *OpenAIRequest, thinkingLevel st
 
 // turnResult captures what a single upstream streaming turn produced.
 type turnResult struct {
-	assistantText string
-	toolCalls     []OpenAIToolCall
-	usage         OpenAIUsage
-	finishReason  string
+	assistantText    string
+	reasoningContent string
+	toolCalls        []OpenAIToolCall
+	usage            OpenAIUsage
+	finishReason     string
 }
 
 // streamOpenAITurn performs one streaming upstream call. It relays text and
@@ -324,6 +327,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 
 	temperature := 0.7
 	maxTokens := 4096
+	family := classifyUpstream(provider.BaseURL, model.TargetModel)
 	var toolChoice interface{}
 	if len(tools) > 0 {
 		toolChoice = "auto"
@@ -338,19 +342,25 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 		Temperature:   &temperature,
 		MaxTokens:     &maxTokens,
 	}
+	if family == famDeepseek {
+		upstreamReq.MaxTokens = nil
+	}
 	structBody, _ := json.Marshal(upstreamReq)
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(structBody, &bodyMap)
 	ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, thinkingLevel, model.SupportsThinking)
-	// Document parts to OpenRouter: pin the free PDF parsing engine so a file
-	// attachment never silently invokes the paid OCR engine.
-	maybeInjectOpenRouterPDFParser(bodyMap, provider, h.openRouterPDFEngine())
+	if family == famDeepseek {
+		conditionDeepSeekChatCompletion(bodyMap)
+	}
+	sanitizeUpstreamIdentity(bodyMap, family, h.identitySecret, "")
+	// Document parts to OpenRouter pin the free parser. Avoid resolving its
+	// setting for direct providers, whose request path does not need it.
+	if provider.ID == "openrouter" {
+		maybeInjectOpenRouterPDFParser(bodyMap, provider, h.openRouterPDFEngine())
+	}
 	body, _ := json.Marshal(bodyMap)
 
-	url := strings.TrimSuffix(provider.BaseURL, "/")
-	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/completions") {
-		url += "/chat/completions"
-	}
+	url := upstreamurl.ChatCompletions(provider.BaseURL)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return res, fmt.Errorf("failed to build upstream request")
@@ -371,6 +381,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 
 	accum := newToolCallAccumulator()
 	var textBuf strings.Builder
+	var reasoningBuf strings.Builder
 	reader := bufio.NewReader(resp.Body)
 	resetIdle, stopIdle, _ := armIdleWatchdog(resp.Body, streamIdleTimeout)
 	defer stopIdle()
@@ -400,6 +411,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 								writeClientDelta(w, flusher, msgID, model.Name, OpenAIDelta{Content: delta.Content})
 							}
 							if delta.ReasoningContent != "" {
+								reasoningBuf.WriteString(delta.ReasoningContent)
 								writeClientDelta(w, flusher, msgID, model.Name, OpenAIDelta{ReasoningContent: delta.ReasoningContent})
 							}
 							// Accumulate tool calls silently.
@@ -420,6 +432,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 	}
 
 	res.assistantText = textBuf.String()
+	res.reasoningContent = reasoningBuf.String()
 	res.toolCalls = accum.finalize()
 	return res, nil
 }

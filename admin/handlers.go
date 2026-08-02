@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gateway/db"
+	"gateway/upstreamurl"
 )
 
 type AdminAPI struct {
@@ -979,14 +980,9 @@ func postJSONProbe(url string, headers map[string]string, payload interface{}) (
 func testModelCompletion(p *db.Provider, targetModel string) (bool, int, string) {
 	if strings.TrimSpace(p.BaseURL) != "" {
 		return postJSONProbe(
-			strings.TrimSuffix(p.BaseURL, "/")+"/chat/completions",
+			upstreamurl.ChatCompletions(p.BaseURL),
 			map[string]string{"Authorization": "Bearer " + p.APIKey},
-			map[string]interface{}{
-				"model":      targetModel,
-				"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-				"max_tokens": 1,
-				"stream":     false,
-			})
+			openAIModelProbePayload(p, targetModel))
 	}
 	if strings.TrimSpace(p.AnthropicBaseURL) != "" {
 		return postJSONProbe(
@@ -999,6 +995,18 @@ func testModelCompletion(p *db.Provider, targetModel string) (bool, int, string)
 			})
 	}
 	return false, 0, "provider has no base URL configured"
+}
+
+func openAIModelProbePayload(provider *db.Provider, targetModel string) map[string]interface{} {
+	payload := map[string]interface{}{
+		"model": targetModel, "messages": []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 1, "stream": false,
+	}
+	identity := strings.ToLower(provider.ID + " " + provider.BaseURL + " " + targetModel)
+	if strings.Contains(identity, "deepseek") {
+		payload["thinking"] = map[string]string{"type": "disabled"}
+	}
+	return payload
 }
 
 func truncateMsg(s string) string {

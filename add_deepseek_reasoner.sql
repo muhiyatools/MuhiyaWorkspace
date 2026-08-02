@@ -1,6 +1,6 @@
 -- SQL script to insert the deepseek-reasoner model (DeepSeek R1) into the models table
 --
--- muhiyacode_visible is set explicitly (matching status='active') rather than
+-- muhiyacode_visible is set explicitly rather than
 -- left to its column default of FALSE: MuhiyaCode's model picker discovers
 -- ONLY models with this flag set, regardless of status, so a raw-SQL insert
 -- that omits it stays permanently absent from the coding agent's /model
@@ -15,26 +15,27 @@ INSERT INTO models (
     cache_read_cost_per_million, cache_write_cost_per_million,
     status, routing_tier, model_type, price_per_minute, transcribe,
     context_window, max_output_tokens, display_name, description, owned_by,
-    muhiyacode_visible
+    muhiyacode_visible, supports_thinking
 ) VALUES (
     'model-deepseek-r1',
     'deepseek-reasoner',
     'deepseek',
-    'deepseek-reasoner',
-    0.55,
-    2.19,
+    'deepseek-v4-flash',
     0.14,
-    0.55,
+    0.28,
+    0.0028,
+    0.00,
     'inactive',
     'none',
     'llm',
     0.0,
     false,
-    64000,
-    8192,
-    'DeepSeek Reasoner',
-    'DeepSeek reasoning model (R1)',
+    1000000,
+    384000,
+    'DeepSeek Reasoner (legacy alias)',
+    'Legacy reasoning alias routed to DeepSeek V4 Flash',
     'deepseek',
-    false
+    false,
+    true
 )
 ON CONFLICT (id) DO NOTHING;

@@ -637,9 +637,10 @@ func (db *DB) seedDefaults() error {
 	models := []Model{
 		{ID: "model-gpt4o", Name: "gpt-4o", ProviderID: "openai", TargetModel: "gpt-4o", InputCostPerMillion: 2.50, OutputCostPerMillion: 10.00, CacheReadCostPerMillion: 1.25, CacheWriteCostPerMillion: 2.50, Status: "inactive", ModelType: "llm", ContextWindow: 128000, MaxOutputTokens: 4096, DisplayName: "GPT-4o", Description: "OpenAI flagship model", OwnedBy: "openai"},
 		{ID: "model-claude", Name: "claude-3-5-sonnet", ProviderID: "anthropic", TargetModel: "claude-3-5-sonnet-20241022", InputCostPerMillion: 3.00, OutputCostPerMillion: 15.00, CacheReadCostPerMillion: 0.30, CacheWriteCostPerMillion: 3.75, Status: "inactive", ModelType: "llm", ContextWindow: 200000, MaxOutputTokens: 8192, DisplayName: "Claude 3.5 Sonnet", Description: "Anthropic high-intelligence model", OwnedBy: "anthropic"},
-		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "inactive", ModelType: "llm", ContextWindow: 64000, MaxOutputTokens: 8192, DisplayName: "DeepSeek Chat", Description: "DeepSeek cheap general-purpose model", OwnedBy: "deepseek"},
-		{ID: "model-deepseek-r1", Name: "deepseek-reasoner", ProviderID: "deepseek", TargetModel: "deepseek-reasoner", InputCostPerMillion: 0.55, OutputCostPerMillion: 2.19, CacheReadCostPerMillion: 0.14, CacheWriteCostPerMillion: 0.55, Status: "inactive", ModelType: "llm", ContextWindow: 64000, MaxOutputTokens: 8192, DisplayName: "DeepSeek Reasoner", Description: "DeepSeek reasoning model (R1)", OwnedBy: "deepseek"},
-		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-chat", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.07, CacheWriteCostPerMillion: 0.14, Status: "inactive", ModelType: "llm", ContextWindow: 64000, MaxOutputTokens: 8192, DisplayName: "DeepSeek v4 Flash", Description: "DeepSeek flash model", OwnedBy: "deepseek"},
+		{ID: "model-deepseek", Name: "deepseek-chat", ProviderID: "deepseek", TargetModel: "deepseek-v4-flash", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.0028, Status: "inactive", ModelType: "llm", ContextWindow: 1_000_000, MaxOutputTokens: 384_000, DisplayName: "DeepSeek Chat (legacy alias)", Description: "Legacy alias routed to DeepSeek V4 Flash", OwnedBy: "deepseek", SupportsThinking: true},
+		{ID: "model-deepseek-r1", Name: "deepseek-reasoner", ProviderID: "deepseek", TargetModel: "deepseek-v4-flash", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.0028, Status: "inactive", ModelType: "llm", ContextWindow: 1_000_000, MaxOutputTokens: 384_000, DisplayName: "DeepSeek Reasoner (legacy alias)", Description: "Legacy reasoning alias routed to DeepSeek V4 Flash", OwnedBy: "deepseek", SupportsThinking: true},
+		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-v4-flash", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.0028, Status: "inactive", ModelType: "llm", ContextWindow: 1_000_000, MaxOutputTokens: 384_000, DisplayName: "DeepSeek V4 Flash", Description: "DeepSeek V4 Flash with thinking and non-thinking modes", OwnedBy: "deepseek", SupportsThinking: true},
+		{ID: "model-deepseek-pro", Name: "deepseek-v4-pro", ProviderID: "deepseek", TargetModel: "deepseek-v4-pro", InputCostPerMillion: 0.435, OutputCostPerMillion: 0.87, CacheReadCostPerMillion: 0.003625, Status: "inactive", ModelType: "llm", ContextWindow: 1_000_000, MaxOutputTokens: 384_000, DisplayName: "DeepSeek V4 Pro", Description: "DeepSeek V4 Pro with thinking and non-thinking modes", OwnedBy: "deepseek", SupportsThinking: true},
 		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", Status: "inactive", ModelType: "transcript", PricePerMinute: 0.006, Transcribe: true, DisplayName: "Whisper 1", Description: "OpenAI speech-to-text model", OwnedBy: "openai"},
 	}
 	for _, m := range models {
@@ -653,14 +654,14 @@ func (db *DB) seedDefaults() error {
 				input_cost_nano_usd_per_million, output_cost_nano_usd_per_million,
 				cache_read_cost_nano_usd_per_million, cache_write_cost_nano_usd_per_million, status,
 				routing_tier, model_type, price_per_minute, price_per_minute_nano_usd, transcribe, context_window, max_output_tokens,
-				display_name, description, owned_by
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+				display_name, description, owned_by, supports_thinking
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 			ON CONFLICT (id) DO NOTHING`,
 			m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 			m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
 			m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
 			m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.PricePerMinuteNano, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
-			m.DisplayName, m.Description, m.OwnedBy)
+			m.DisplayName, m.Description, m.OwnedBy, m.SupportsThinking)
 		if err != nil {
 			return err
 		}

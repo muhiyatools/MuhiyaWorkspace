@@ -24,6 +24,7 @@ import (
 	"gateway/db"
 	"gateway/money"
 	"gateway/pricing"
+	"gateway/upstreamurl"
 	"github.com/google/uuid"
 )
 
@@ -1183,15 +1184,19 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	stripUnsupportedMediaInBodyMap(bodyMap, model)
 	maybeInjectOpenRouterPDFParser(bodyMap, provider, h.openRouterPDFEngine())
 
+	family := classifyUpstream(provider.BaseURL, model.TargetModel)
 	// Translate the canonical thinking level into this provider's dialect
 	// (and strip the gateway-level fields regardless).
 	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel, model.SupportsThinking)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
+	if family == famDeepseek {
+		conditionDeepSeekChatCompletion(bodyMap)
+	}
 
 	// OpenRouter → Claude only: add cache_control breakpoints. Auto-caching
 	// targets (DeepSeek, GLM, Kimi, ...) are left byte-for-byte untouched so
 	// their prefix caches keep hitting; this is a strict no-op for them.
-	InjectOpenRouterAnthropicCache(bodyMap, provider != nil && provider.ID == "openrouter", model.TargetModel)
+	InjectOpenRouterAnthropicCache(bodyMap, provider.ID == "openrouter", model.TargetModel)
 
 	stream, _ := bodyMap["stream"].(bool)
 	if stream {
@@ -1200,7 +1205,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	sanitizeUpstreamIdentity(bodyMap, classifyUpstream(provider.BaseURL, model.TargetModel), h.identitySecret, log.UserID)
+	sanitizeUpstreamIdentity(bodyMap, family, h.identitySecret, log.UserID)
 	// OpenRouter reads the standard `user` field as the stable end-user
 	// identifier — its documented purpose, and the field sanitizeUpstreamIdentity
 	// strips for every upstream because most of them do not want it. Restoring it
@@ -1216,10 +1221,7 @@ func (h *ProxyHandler) proxyOpenAIToOpenAI(w http.ResponseWriter, r *http.Reques
 	routeScope := h.applyProviderAffinity(r.Context(), bodyMap, r, model, &log)
 
 	newBody, _ := json.Marshal(bodyMap)
-	url := strings.TrimSuffix(provider.BaseURL, "/")
-	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/completions") {
-		url += "/chat/completions"
-	}
+	url := upstreamurl.ChatCompletions(provider.BaseURL)
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(newBody))
 	if err != nil {
@@ -1571,12 +1573,13 @@ func (h *ProxyHandler) proxyAnthropicToOpenAI(w http.ResponseWriter, r *http.Req
 	_ = json.Unmarshal(translated, &bodyMap)
 	applied := ApplyThinkingOpenAI(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel, model.SupportsThinking)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
-	sanitizeUpstreamIdentity(bodyMap, classifyUpstream(provider.BaseURL, model.TargetModel), h.identitySecret, log.UserID)
-	newBody, _ := json.Marshal(bodyMap)
-	url := strings.TrimSuffix(provider.BaseURL, "/")
-	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/completions") {
-		url += "/chat/completions"
+	family := classifyUpstream(provider.BaseURL, model.TargetModel)
+	if family == famDeepseek {
+		conditionDeepSeekChatCompletion(bodyMap)
 	}
+	sanitizeUpstreamIdentity(bodyMap, family, h.identitySecret, log.UserID)
+	newBody, _ := json.Marshal(bodyMap)
+	url := upstreamurl.ChatCompletions(provider.BaseURL)
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(newBody))
 	if err != nil {

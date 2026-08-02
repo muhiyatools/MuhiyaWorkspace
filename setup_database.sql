@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS models (
     display_name VARCHAR(255) DEFAULT '',
     description TEXT DEFAULT '',
     owned_by VARCHAR(100) DEFAULT '',
+    muhiyacode_visible BOOLEAN NOT NULL DEFAULT FALSE,
+    supports_thinking BOOLEAN NOT NULL DEFAULT FALSE,
     -- Whether this provider's reported prompt token count already includes
     -- cached tokens. Anthropic reports them separately ('exclusive'); every
     -- other upstream we speak to folds them in ('inclusive'). Pricing needs
@@ -256,15 +258,16 @@ INSERT INTO models (
     cache_read_cost_per_million, cache_write_cost_per_million,
     status, routing_tier, model_type, price_per_minute, transcribe,
     context_window, max_output_tokens, display_name, description, owned_by,
-    muhiyacode_visible
+    muhiyacode_visible, supports_thinking
 ) VALUES
-('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai', false),
-('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic', false),
-('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek', false),
-('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-reasoner', 0.55, 2.19, 0.14, 0.55, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Reasoner', 'DeepSeek reasoning model (R1)', 'deepseek', false),
-('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek', false),
-('model-qwen-flash', 'qwen3.7-flash', 'qwen', 'qwen-2.5-flash', 0.05, 0.10, 0.02, 0.05, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'Qwen 3.7 Flash', 'Alibaba Qwen Flash model', 'qwen', false),
-('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai', false)
+('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai', false, false),
+('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic', false, false),
+('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.0028, 0.00, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek Chat (legacy alias)', 'Legacy alias routed to DeepSeek V4 Flash', 'deepseek', false, true),
+('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.0028, 0.00, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek Reasoner (legacy alias)', 'Legacy reasoning alias routed to DeepSeek V4 Flash', 'deepseek', false, true),
+('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.0028, 0.00, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek V4 Flash', 'DeepSeek V4 Flash with thinking and non-thinking modes', 'deepseek', false, true),
+('model-deepseek-pro', 'deepseek-v4-pro', 'deepseek', 'deepseek-v4-pro', 0.435, 0.87, 0.003625, 0.00, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek V4 Pro', 'DeepSeek V4 Pro with thinking and non-thinking modes', 'deepseek', false, true),
+('model-qwen-flash', 'qwen3.7-flash', 'qwen', 'qwen-2.5-flash', 0.05, 0.10, 0.02, 0.05, 'active', 'none', 'llm', 0.0, false, 64000, 8192, 'Qwen 3.7 Flash', 'Alibaba Qwen Flash model', 'qwen', false, false),
+('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai', false, false)
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================

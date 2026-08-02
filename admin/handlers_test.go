@@ -286,6 +286,17 @@ func TestAdminModelVisionCapable(t *testing.T) {
 	}
 }
 
+func TestDeepSeekModelProbeDisablesThinking(t *testing.T) {
+	payload := openAIModelProbePayload(&db.Provider{ID: "deepseek", BaseURL: "https://api.deepseek.com"}, "deepseek-v4-flash")
+	thinking, ok := payload["thinking"].(map[string]string)
+	if !ok || thinking["type"] != "disabled" {
+		t.Fatalf("DeepSeek probe thinking = %#v", payload["thinking"])
+	}
+	if payload["max_tokens"] != 1 {
+		t.Errorf("probe max_tokens = %v", payload["max_tokens"])
+	}
+}
+
 func TestComputeCoverage(t *testing.T) {
 	providers := []db.Provider{
 		{ID: "deepseek", Status: "active"},
