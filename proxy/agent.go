@@ -353,7 +353,7 @@ func (h *ProxyHandler) streamOpenAITurn(r *http.Request, w http.ResponseWriter, 
 		conditionDeepSeekChatCompletion(bodyMap)
 	}
 	sanitizeUpstreamIdentity(bodyMap, family, h.identitySecret, "")
-	// Document parts to OpenRouter pin the free parser. Avoid resolving its
+	// Document parts sent to OpenRouter pin the free parser. Avoid resolving its
 	// setting for direct providers, whose request path does not need it.
 	if provider.ID == "openrouter" {
 		maybeInjectOpenRouterPDFParser(bodyMap, provider, h.openRouterPDFEngine())

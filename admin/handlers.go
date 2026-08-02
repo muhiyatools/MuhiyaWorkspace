@@ -999,8 +999,10 @@ func testModelCompletion(p *db.Provider, targetModel string) (bool, int, string)
 
 func openAIModelProbePayload(provider *db.Provider, targetModel string) map[string]interface{} {
 	payload := map[string]interface{}{
-		"model": targetModel, "messages": []map[string]string{{"role": "user", "content": "ping"}},
-		"max_tokens": 1, "stream": false,
+		"model":      targetModel,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 1,
+		"stream":     false,
 	}
 	identity := strings.ToLower(provider.ID + " " + provider.BaseURL + " " + targetModel)
 	if strings.Contains(identity, "deepseek") {

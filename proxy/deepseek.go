@@ -1,7 +1,7 @@
 package proxy
 
-// conditionDeepSeekChatCompletion removes fields from other OpenAI APIs and
-// normalizes the one output-limit alias DeepSeek's Chat Completions API lacks.
+// conditionDeepSeekChatCompletion removes unsupported OpenAI fields and
+// normalizes the output-limit alias DeepSeek's Chat Completions API lacks.
 func conditionDeepSeekChatCompletion(body map[string]interface{}) {
 	if limit, ok := body["max_completion_tokens"]; ok {
 		if _, hasMaxTokens := body["max_tokens"]; !hasMaxTokens {
