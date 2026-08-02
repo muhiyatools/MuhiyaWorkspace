@@ -14,8 +14,9 @@ import (
 // `reasoning_effort` body field, normalized to the canonical levels below.
 // The gateway then maps the level onto each provider's SUPPORTED thinking
 // ladder. When a level is requested it is never dropped below a provider's floor:
-// a level under the floor rides the floor (e.g. DeepSeek supports only high|max, so
-// low/medium effort -> "high" and high/max effort -> "max"). When no level is
+// a level under the floor rides the floor (e.g. deepseek-v4-pro supports only
+// high|max, so a low effort rides "high"). A level is never mapped ABOVE what
+// was asked for either: requesting "high" must not buy "max". When no level is
 // requested the body passes through untouched - DeepSeek included - so a bare
 // reasoner request keeps the provider's own default and the forwarded bytes
 // match the pre-normalization gateway exactly. An EXPLICIT none/off effort on
@@ -23,7 +24,7 @@ import (
 // the sole exception: a brand-new provider with no pre-existing deployments,
 // its documented reasoning_split control is emitted unconditionally (MX-4).
 //
-//	DeepSeek  : thinking enabled + reasoning_effort high (low..medium) | max (high..max); type:disabled on explicit none/off; untouched when unset
+//	DeepSeek  : thinking enabled + reasoning_effort low|high|max (v4-flash) / high|max (v4-pro); type:disabled on explicit none/off; untouched when unset
 //	GLM       : thinking enabled (+ reasoning_effort low|medium|high on GLM-5+)
 //	MiniMax   : always-on; only reasoning_split is useful
 //	OpenAI    : reasoning_effort minimal|low|medium|high (reasoning models ONLY - others 400)
@@ -292,20 +293,32 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 			// raw client fields are still gone, so nothing leaks through.
 			return "unsupported"
 		}
-		// DeepSeek reasoning supports exactly high|max: low/medium effort ride
-		// "high", high/max ride "max". An EXPLICIT none/off request disables
-		// thinking - only a stated preference ever turns reasoning off.
+		// DeepSeek's ladder is low|high|max, and its own default is "high".
+		// deepseek-v4-flash supports all three; deepseek-v4-pro currently
+		// supports only high|max, so "low" rides its floor there.
+		//
+		// This used to map high -> "max", inherited from the reasoner-era API
+		// where high|max were the only rungs. That silently escalated every
+		// request from a client whose session effort is High — the common case —
+		// into the longest and most expensive reasoning mode DeepSeek offers.
+		// Requesting a level must never buy a higher one than was asked for.
+		//
+		// An EXPLICIT none/off request disables thinking; only a stated
+		// preference ever turns reasoning off.
 		if rank == 0 {
 			bodyMap["thinking"] = map[string]interface{}{"type": "disabled"}
 			return "disabled"
 		}
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
-		if rank >= 3 {
-			bodyMap["reasoning_effort"] = "max"
-			return "max"
+		effort := "high" // low/medium both land on DeepSeek's own default
+		switch {
+		case rank >= 4:
+			effort = "max"
+		case rank == 1 && deepseekSupportsLowEffort(model):
+			effort = "low"
 		}
-		bodyMap["reasoning_effort"] = "high"
-		return "high"
+		bodyMap["reasoning_effort"] = effort
+		return effort
 	}
 	if family == famMiniMax {
 		// MiniMax reasoning is always on. Force its documented separated
@@ -420,6 +433,14 @@ func isDeepseekReasoner(model string) bool {
 	return strings.Contains(model, "reasoner") || strings.Contains(model, "r1")
 }
 
+// deepseekSupportsLowEffort reports whether a DeepSeek target accepts the "low"
+// rung. DeepSeek documents all three levels for deepseek-v4-flash, while
+// deepseek-v4-pro "temporarily supports only high and max", so an unrecognized
+// or pro model rides the "high" floor rather than risking a rejected value.
+func deepseekSupportsLowEffort(model string) bool {
+	return strings.Contains(model, "v4-flash")
+}
+
 // modelSupportsThinking answers whether a DeepSeek model has a reasoning mode.
 // The operator flag wins whenever it is set; the name heuristic is the fallback
 // for callers with no catalog row (direct-dialect probes, tests).
@@ -442,7 +463,12 @@ func openAISupportsReasoningEffort(model string) bool {
 // target provider. Same contract as ApplyThinkingOpenAI. When level is ""
 // an explicit client thinking object passes through untouched (back-compat
 // for native Anthropic clients).
-func ApplyThinkingAnthropic(bodyMap map[string]interface{}, baseURL, targetModel, level string) string {
+// supportsThinking carries the same operator flag as ApplyThinkingOpenAI. It was
+// missing here, so this path still used the reasoner name heuristic that
+// misclassifies every DeepSeek generation not carrying "reasoner" or "r1" in its
+// name — deepseek-v4-flash among them, which fell through to "unsupported" and
+// had its thinking configuration stripped on every Anthropic-format request.
+func ApplyThinkingAnthropic(bodyMap map[string]interface{}, baseURL, targetModel, level string, supportsThinking bool) string {
 	// Never an Anthropic wire field; it round-trips via our request struct.
 	delete(bodyMap, "reasoning_effort")
 	if level == "" {
@@ -452,16 +478,28 @@ func ApplyThinkingAnthropic(bodyMap map[string]interface{}, baseURL, targetModel
 	model := strings.ToLower(targetModel)
 	rank := thinkingRank(level)
 
-	if classifyUpstream(baseURL, targetModel) == famDeepseek && isDeepseekReasoner(model) {
-		// DeepSeek's Anthropic-compatible endpoint uses output_config.effort
-		// and supports exactly high|max - thinking is never disabled.
-		// deepseek-chat has no reasoning mode; fall through to "unsupported".
-		effort := "high"
-		if rank >= 3 {
-			effort = "max"
+	if classifyUpstream(baseURL, targetModel) == famDeepseek {
+		if !modelSupportsThinking(supportsThinking, model) {
+			// A DeepSeek model with no reasoning mode; fall through rather than
+			// inject a control it will reject.
+			return "unsupported"
 		}
-		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
-		bodyMap["output_config"] = map[string]interface{}{"effort": effort}
+		// DeepSeek's Anthropic-compatible endpoint takes `reasoning.effort` with
+		// none|low|high|max, where "none" is the disable. It does NOT take
+		// output_config — that is the Responses API shape, which this branch
+		// emitted, so the effort was silently ignored by the endpoint.
+		effort := "high"
+		switch {
+		case rank == 0:
+			effort = "none"
+		case rank >= 4:
+			effort = "max"
+		case rank == 1 && deepseekSupportsLowEffort(model):
+			effort = "low"
+		}
+		delete(bodyMap, "thinking")
+		delete(bodyMap, "output_config")
+		bodyMap["reasoning"] = map[string]interface{}{"effort": effort}
 		return effort
 	}
 

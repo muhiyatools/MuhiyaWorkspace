@@ -28,5 +28,7 @@ INSERT INTO models (
 ('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai', false),
 ('model-claude-3-5', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic', false),
 ('model-claude-3-7', 'claude-3-7-sonnet', 'anthropic', 'claude-3-7-sonnet-20250219', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.7 Sonnet', 'Anthropic latest model', 'anthropic', false),
-('model-deepseek-chat', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek', false)
+-- target_model is sent upstream as the model name. `deepseek-chat` was retired
+-- on 2026-07-24; it resolved to deepseek-v4-flash, which is what this targets.
+('model-deepseek-chat', 'deepseek-chat', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek Chat (retired alias)', 'Retired 2026-07-24; targets deepseek-v4-flash', 'deepseek', false)
 ON CONFLICT (id) DO NOTHING;

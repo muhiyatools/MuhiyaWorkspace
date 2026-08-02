@@ -824,10 +824,10 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		textBuilder.WriteString(GetMessageContentString(m.Content))
 	}
 	promptTokens := estimateTokens(textBuilder.String())
-	requestedOutput := requestedOpenAIOutput(&oaiReq, targetModel)
+	requestedOutput, clientSetOutputLimit := requestedOpenAIOutput(&oaiReq, targetModel)
 	correlation := requestCorrelationFor(r, key.ID)
 	requestID := correlation.LogID
-	if err := h.limiter.CheckLimit(key, promptTokens+requestedOutput); err != nil {
+	if err := h.limiter.CheckLimit(key, promptTokens+rateLimitOutputEstimate(requestedOutput, clientSetOutputLimit)); err != nil {
 		h.saveAdmissionFailure(admissionFailure{
 			request: r, key: key, model: targetModel, provider: provider,
 			requestID: requestID, requestedModel: oaiReq.Model,
@@ -882,10 +882,39 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		h.writeBudgetError(w, err)
 		return
 	}
-	bodyBytes, err = rewriteOpenAIOutputLimit(bodyBytes, allowedOutput)
-	if err != nil {
-		h.writeError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error(), "invalid_request_error")
+	// The budget reduced the ceiling below what the caller could otherwise have.
+	// This used to happen silently: the only observable was finish_reason=length,
+	// which reads as "the model rambled" rather than "you are out of credit".
+	budgetReducedOutput := allowedOutput < requestedOutput
+	if budgetReducedOutput && allowedOutput < reasoningVisibleFloor && thinkingWillBeEnabled(targetModel, thinkingLevel) {
+		// A thinking model given less than the floor spends it all on reasoning
+		// and returns nothing. Refuse instead of billing for an empty answer.
+		budgetErr := &db.BudgetExceededError{Requested: chargeCeiling, Available: budgetWindow.Available}
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: targetModel, provider: provider,
+			requestID: requestID, requestedModel: oaiReq.Model,
+			inputTokens: promptTokens, status: http.StatusPaymentRequired, err: budgetErr,
+			budget: budgetWindow,
+		})
+		h.writeError(w, http.StatusPaymentRequired, fmt.Sprintf(
+			"Remaining balance covers only %d completion tokens on %s, which runs in thinking mode and needs at least %d to produce an answer. Top up, or use a non-thinking model.",
+			allowedOutput, targetModel.Name, reasoningVisibleFloor), "budget_exceeded")
 		return
+	}
+	// Only touch max_tokens when the client set one (respect their intent, bounded)
+	// or when the budget genuinely forced a reduction. A request that named no
+	// limit and is affordable in full is forwarded without the key, so the
+	// provider applies its own default.
+	if clientSetOutputLimit || budgetReducedOutput {
+		bodyBytes, err = rewriteOpenAIOutputLimit(bodyBytes, allowedOutput)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error(), "invalid_request_error")
+			return
+		}
+	}
+	if budgetReducedOutput {
+		w.Header().Set("X-Muhiya-Output-Limit", strconv.Itoa(allowedOutput))
+		w.Header().Set("X-Muhiya-Output-Limit-Reason", "budget")
 	}
 
 	reqCopy := oaiReq
@@ -1401,7 +1430,7 @@ func (h *ProxyHandler) proxyOpenAIToAnthropic(w http.ResponseWriter, r *http.Req
 	translated, _ := json.Marshal(anthRequest)
 	var bodyMap map[string]interface{}
 	_ = json.Unmarshal(translated, &bodyMap)
-	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel, model.SupportsThinking)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
 	// Anthropic caches nothing without explicit breakpoints; inject them so
 	// agent loops stop re-billing their full history at full price.
@@ -1673,7 +1702,7 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 	}
 	bodyMap["model"] = model.TargetModel
 
-	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel)
+	applied := ApplyThinkingAnthropic(bodyMap, provider.BaseURL, model.TargetModel, log.ThinkingLevel, model.SupportsThinking)
 	log.ThinkingLevel = ThinkingLogValue(log.ThinkingLevel, applied)
 	// No-op when the client already placed its own cache_control breakpoints.
 	InjectAnthropicCacheControl(bodyMap, model.TargetModel)
@@ -2425,14 +2454,59 @@ func exactRate(exact money.NanoUSD, legacy float64) (money.NanoUSD, error) {
 	return money.FromUSD(legacy)
 }
 
-func requestedOpenAIOutput(req *OpenAIRequest, model *db.Model) int {
+// requestedOpenAIOutput reports the output ceiling to admit against, and
+// whether the CLIENT actually named one. The second value decides whether the
+// forwarded body carries a max_tokens at all: a request that omitted the key is
+// asking the provider for its own default, and inventing one on the client's
+// behalf is not equivalent. On a thinking model it is actively harmful, because
+// reasoning tokens are counted inside completion_tokens and will consume a
+// small ceiling before any visible token is produced.
+func requestedOpenAIOutput(req *OpenAIRequest, model *db.Model) (limit int, clientSpecified bool) {
 	requested := 0
 	if req.MaxCompletionTokens != nil {
 		requested = *req.MaxCompletionTokens
 	} else if req.MaxTokens != nil {
 		requested = *req.MaxTokens
 	}
-	return boundedOutputLimit(requested, model)
+	return boundedOutputLimit(requested, model), requested > 0
+}
+
+// typicalCompletionTokens is what an unbounded request reserves against a
+// token-per-window rate limit. Reserving the model's full documented ceiling
+// instead (384,000 on DeepSeek V4) exhausted any realistic allowance on the
+// first call, even though a normal completion is orders of magnitude smaller.
+// Actual usage is reconciled from the response, so this only affects admission.
+const typicalCompletionTokens = 8192
+
+// rateLimitOutputEstimate is the output figure a request debits from a rate
+// limit. A client that named its own ceiling is taken at its word; one that did
+// not reserves a typical completion rather than the theoretical maximum.
+func rateLimitOutputEstimate(limit int, clientSpecified bool) int {
+	if clientSpecified {
+		return limit
+	}
+	if limit < typicalCompletionTokens {
+		return limit
+	}
+	return typicalCompletionTokens
+}
+
+// reasoningVisibleFloor is the smallest completion budget worth issuing to a
+// model in thinking mode. Below it the reasoning trace alone can exhaust the
+// ceiling, and the caller receives finish_reason=length with empty content and
+// no tool calls — a response that looks like a model failure but is really an
+// exhausted balance. Refusing with an explicit budget error is the honest
+// outcome. This is a policy floor, not a provider-documented constant.
+const reasoningVisibleFloor = 8192
+
+// thinkingWillBeEnabled reports whether the upstream request will run in
+// thinking mode: the operator flag says the model has one, and the resolved
+// effort is not an explicit request to turn it off.
+func thinkingWillBeEnabled(model *db.Model, thinkingLevel string) bool {
+	if model == nil || !model.SupportsThinking {
+		return false
+	}
+	return NormalizeThinkingLevel(thinkingLevel) != ThinkingMinimal
 }
 
 func boundedOutputLimit(requested int, model *db.Model) int {

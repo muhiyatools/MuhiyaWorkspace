@@ -32,8 +32,12 @@ func TestDeepSeekThinkingNormalizationAndStripList(t *testing.T) {
 		wantEffort   string // expected reasoning_effort, "" = must be absent
 	}{
 		{"reasoner+max", "deepseek-reasoner", ThinkingMax, "max", "enabled", "max"},
-		{"reasoner+high", "deepseek-reasoner", ThinkingHigh, "max", "enabled", "max"},
+		// high stays high. This row said "max" until 2026-08-02 — an escalation
+		// inherited from the reasoner-era high|max ladder, which turned every
+		// High-effort client request into DeepSeek's longest reasoning mode.
+		{"reasoner+high", "deepseek-reasoner", ThinkingHigh, "high", "enabled", "high"},
 		{"reasoner+medium", "deepseek-reasoner", ThinkingMedium, "high", "enabled", "high"},
+		// deepseek-reasoner is not v4-flash, so low rides the high floor.
 		{"reasoner+low", "deepseek-reasoner", ThinkingLow, "high", "enabled", "high"},
 		// ONLY an explicit none/off/minimal preference disables thinking.
 		{"reasoner+explicit-off", "deepseek-reasoner", ThinkingMinimal, "disabled", "disabled", ""},

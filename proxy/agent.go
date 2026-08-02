@@ -85,7 +85,8 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		textBuilder.WriteString(GetMessageContentString(m.Content))
 	}
 	promptTokens := estimateTokens(textBuilder.String())
-	if err := h.limiter.CheckLimit(key, promptTokens+requestedOpenAIOutput(oaiReq, model)*maxAgentIterations); err != nil {
+	agentOutputLimit, agentClientSetLimit := requestedOpenAIOutput(oaiReq, model)
+	if err := h.limiter.CheckLimit(key, promptTokens+rateLimitOutputEstimate(agentOutputLimit, agentClientSetLimit)*maxAgentIterations); err != nil {
 		// Parity with the proxy path: this used to answer a bare 429 with no
 		// Retry-After, so a client here could not even back off correctly.
 		h.writeLimitError(w, err)

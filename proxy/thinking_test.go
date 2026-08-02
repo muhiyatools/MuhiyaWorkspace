@@ -96,12 +96,26 @@ func applyOpenAI(t *testing.T, baseURL, model, level string, extra map[string]in
 	return body, applied
 }
 
+// applyOpenAIFlagged is applyOpenAI with the operator supports_thinking flag
+// set. It is the realistic shape for a V4 model: deepseek-v4-flash carries no
+// "reasoner"/"r1" token, so only the flag identifies it as reasoning-capable.
+func applyOpenAIFlagged(t *testing.T, baseURL, model, level string) (map[string]interface{}, string) {
+	t.Helper()
+	body := map[string]interface{}{"model": model}
+	applied := ApplyThinkingOpenAI(body, baseURL, model, level, true)
+	return body, applied
+}
+
 func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
-	// Real DeepSeek target model names only: "deepseek-reasoner" is the
-	// thinking-capable one. MuhiyaLLM's own virtual aliases (deepseek-v4-pro,
-	// deepseek-v4-flash, ...) resolve to a concrete target_model before this
-	// function ever sees them (see handler.go), so exercising the mapper
-	// with an alias here would not reflect a real call.
+	// deepseek-reasoner is the legacy thinking-capable name, recognised by the
+	// isDeepseekReasoner fallback when no operator flag is set.
+	//
+	// This block used to claim that deepseek-v4-* were virtual aliases resolved
+	// to a concrete target_model before reaching the mapper. That is not how the
+	// catalog is configured: target_model IS 'deepseek-v4-flash', so those names
+	// reach this function directly and must be exercised. They carry no
+	// "reasoner"/"r1" token, so only the supports_thinking flag identifies them
+	// — see TestApplyThinkingOpenAI_DeepSeekV4LowRung.
 	body, applied := applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "max", nil)
 	if applied != "max" {
 		t.Fatalf("applied = %q", applied)
@@ -129,9 +143,37 @@ func TestApplyThinkingOpenAI_DeepSeek(t *testing.T) {
 	if applied != "high" || body["reasoning_effort"] != "high" {
 		t.Errorf("medium -> %q / %v", applied, body["reasoning_effort"])
 	}
+	// "high" must stay "high". This asserted "max" until 2026-08-02, a mapping
+	// inherited from the reasoner-era API where high|max were the only rungs.
+	// It silently escalated every request from a client running at High effort —
+	// the common case — into DeepSeek's longest and most expensive reasoning
+	// mode. A requested level must never buy a higher one.
 	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "high", nil)
-	if applied != "max" || body["reasoning_effort"] != "max" {
+	if applied != "high" || body["reasoning_effort"] != "high" {
 		t.Errorf("high -> %q / %v", applied, body["reasoning_effort"])
+	}
+	body, applied = applyOpenAI(t, "https://api.deepseek.com", "deepseek-reasoner", "max", nil)
+	if applied != "max" || body["reasoning_effort"] != "max" {
+		t.Errorf("max -> %q / %v", applied, body["reasoning_effort"])
+	}
+}
+
+// TestApplyThinkingOpenAI_DeepSeekV4LowRung covers the rung DeepSeek added with
+// V4: deepseek-v4-flash documents low|high|max, while deepseek-v4-pro
+// "temporarily supports only high and max" and therefore rides the high floor.
+func TestApplyThinkingOpenAI_DeepSeekV4LowRung(t *testing.T) {
+	body, applied := applyOpenAIFlagged(t, "https://api.deepseek.com", "deepseek-v4-flash", "low")
+	if applied != "low" || body["reasoning_effort"] != "low" {
+		t.Errorf("v4-flash low -> %q / %v", applied, body["reasoning_effort"])
+	}
+	body, applied = applyOpenAIFlagged(t, "https://api.deepseek.com", "deepseek-v4-pro", "low")
+	if applied != "high" || body["reasoning_effort"] != "high" {
+		t.Errorf("v4-pro low -> %q / %v, want the high floor", applied, body["reasoning_effort"])
+	}
+	// And the level is still honoured, not escalated, on a flagged V4 model.
+	body, applied = applyOpenAIFlagged(t, "https://api.deepseek.com", "deepseek-v4-flash", "high")
+	if applied != "high" || body["reasoning_effort"] != "high" {
+		t.Errorf("v4-flash high -> %q / %v", applied, body["reasoning_effort"])
 	}
 }
 
@@ -344,7 +386,7 @@ func TestApplyThinkingAnthropic_Budget(t *testing.T) {
 		"max_tokens":  float64(4096),
 		"temperature": float64(0.2),
 	}
-	applied := ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-4-5", "max")
+	applied := ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-4-5", "max", false)
 	if applied != "budget-24576" {
 		t.Fatalf("applied = %q", applied)
 	}
@@ -363,7 +405,7 @@ func TestApplyThinkingAnthropic_Budget(t *testing.T) {
 
 	// Models without extended thinking must not receive the parameter.
 	old := map[string]interface{}{"model": "claude-3-5-sonnet-20241022", "temperature": float64(0.2)}
-	if applied := ApplyThinkingAnthropic(old, "https://api.anthropic.com", "claude-3-5-sonnet-20241022", "high"); applied != "unsupported" {
+	if applied := ApplyThinkingAnthropic(old, "https://api.anthropic.com", "claude-3-5-sonnet-20241022", "high", false); applied != "unsupported" {
 		t.Fatalf("claude-3-5 applied = %q", applied)
 	}
 	if _, has := old["thinking"]; has {
@@ -375,7 +417,7 @@ func TestApplyThinkingAnthropic_Budget(t *testing.T) {
 
 	// Thinking is never disabled: low levels get the smallest real budget.
 	body = map[string]interface{}{"model": "claude-sonnet-4-5", "thinking": map[string]interface{}{"type": "enabled", "budget_tokens": 1024}}
-	applied = ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-4-5", "low")
+	applied = ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-4-5", "low", false)
 	if applied != "budget-4096" {
 		t.Fatalf("low applied = %q", applied)
 	}
@@ -386,7 +428,7 @@ func TestApplyThinkingAnthropic_Budget(t *testing.T) {
 
 func TestApplyThinkingAnthropic_AdaptiveAndDeepseek(t *testing.T) {
 	body := map[string]interface{}{"model": "claude-opus-4-8", "temperature": float64(0.7)}
-	applied := ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-opus-4-8", "max")
+	applied := ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-opus-4-8", "max", false)
 	if applied != "adaptive-max" {
 		t.Fatalf("applied = %q", applied)
 	}
@@ -402,44 +444,62 @@ func TestApplyThinkingAnthropic_AdaptiveAndDeepseek(t *testing.T) {
 
 	// Adaptive models take the full ladder: medium maps to medium.
 	body = map[string]interface{}{"model": "claude-sonnet-5"}
-	applied = ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-5", "medium")
+	applied = ApplyThinkingAnthropic(body, "https://api.anthropic.com", "claude-sonnet-5", "medium", false)
 	if applied != "adaptive-medium" {
 		t.Fatalf("adaptive medium applied = %q", applied)
 	}
 
-	// DeepSeek-Anthropic supports high|max only: high effort rides "max",
-	// low rides the "high" floor - never disabled. Real target model name
-	// only ("deepseek-reasoner"); see TestApplyThinkingOpenAI_DeepSeek for
-	// why an alias like deepseek-v4-pro would not reflect a real call.
-	body = map[string]interface{}{"model": "deepseek-reasoner"}
-	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-reasoner", "high")
-	if applied != "max" {
-		t.Fatalf("deepseek anthropic high applied = %q", applied)
+	// DeepSeek's Anthropic-compatible endpoint takes `reasoning.effort` with
+	// none|low|high|max. It does NOT take output_config — that is the Responses
+	// API shape, which this branch used to emit, so the effort never applied.
+	// The requested level is also honoured rather than escalated: "high" means
+	// high, not max.
+	body = map[string]interface{}{"model": "deepseek-v4-flash"}
+	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-flash", "high", true)
+	if applied != "high" {
+		t.Fatalf("deepseek anthropic high applied = %q, want high", applied)
 	}
-	if body["output_config"].(map[string]interface{})["effort"] != "max" {
-		t.Errorf("output_config = %v", body["output_config"])
-	}
-	body = map[string]interface{}{"model": "deepseek-reasoner"}
-	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-reasoner", "low")
-	if applied != "high" || body["thinking"].(map[string]interface{})["type"] != "enabled" {
-		t.Fatalf("deepseek anthropic low applied = %q / %v", applied, body["thinking"])
-	}
-
-	// deepseek-chat has no reasoning mode: must fall through to unsupported,
-	// not have output_config/thinking injected (audit fix, mirrors the
-	// OpenAI-path test).
-	body = map[string]interface{}{"model": "deepseek-chat"}
-	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-chat", "high")
-	if applied != "unsupported" {
-		t.Fatalf("deepseek-chat anthropic applied = %q, want unsupported", applied)
+	if body["reasoning"].(map[string]interface{})["effort"] != "high" {
+		t.Errorf("reasoning = %v", body["reasoning"])
 	}
 	if _, has := body["output_config"]; has {
-		t.Errorf("deepseek-chat must not receive output_config, got %v", body["output_config"])
+		t.Error("output_config is the Responses API shape and must never be emitted here")
+	}
+
+	// v4-flash carries the full ladder, so a low request stays low.
+	body = map[string]interface{}{"model": "deepseek-v4-flash"}
+	if applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-flash", "low", true); applied != "low" {
+		t.Fatalf("deepseek anthropic low applied = %q, want low", applied)
+	}
+
+	// v4-pro supports only high|max, so a low request rides the floor.
+	body = map[string]interface{}{"model": "deepseek-v4-pro"}
+	if applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-pro", "low", true); applied != "high" {
+		t.Fatalf("deepseek-v4-pro low applied = %q, want the high floor", applied)
+	}
+
+	// The operator flag is the source of truth, exactly as on the OpenAI path.
+	// A model whose name carries no "reasoner"/"r1" token must still be
+	// recognised when the flag is set — the bug this path used to have.
+	body = map[string]interface{}{"model": "deepseek-v4-flash"}
+	if applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-v4-flash", "max", true); applied != "max" {
+		t.Fatalf("flagged model applied = %q, want max", applied)
+	}
+
+	// A DeepSeek model with the flag OFF has no reasoning mode: fall through to
+	// unsupported rather than inject a control it will reject.
+	body = map[string]interface{}{"model": "deepseek-chat"}
+	applied = ApplyThinkingAnthropic(body, "https://api.deepseek.com/anthropic", "deepseek-chat", "high", false)
+	if applied != "unsupported" {
+		t.Fatalf("unflagged deepseek applied = %q, want unsupported", applied)
+	}
+	if _, has := body["reasoning"]; has {
+		t.Errorf("unflagged deepseek must not receive reasoning, got %v", body["reasoning"])
 	}
 
 	// Unset level: client thinking object passes through untouched.
 	passthrough := map[string]interface{}{"thinking": map[string]interface{}{"type": "enabled", "budget_tokens": float64(2048)}}
-	if applied := ApplyThinkingAnthropic(passthrough, "https://api.anthropic.com", "claude-sonnet-4-5", ""); applied != "" {
+	if applied := ApplyThinkingAnthropic(passthrough, "https://api.anthropic.com", "claude-sonnet-4-5", "", false); applied != "" {
 		t.Fatalf("unset applied = %q", applied)
 	}
 	if passthrough["thinking"].(map[string]interface{})["budget_tokens"] != float64(2048) {

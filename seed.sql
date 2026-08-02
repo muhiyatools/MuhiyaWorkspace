@@ -52,8 +52,13 @@ INSERT INTO models (
 ) VALUES
 ('model-gpt4o', 'gpt-4o', 'openai', 'gpt-4o', 2.50, 10.00, 1.25, 2.50, 'inactive', 'none', 'llm', 0.0, false, 128000, 4096, 'GPT-4o', 'OpenAI flagship model', 'openai', false),
 ('model-claude', 'claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 3.00, 15.00, 0.30, 3.75, 'inactive', 'none', 'llm', 0.0, false, 200000, 8192, 'Claude 3.5 Sonnet', 'Anthropic high-intelligence model', 'anthropic', false),
-('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek Chat', 'DeepSeek cheap general-purpose model', 'deepseek', false),
-('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-chat', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 64000, 8192, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek', false),
+-- deepseek-chat and deepseek-reasoner were retired by DeepSeek on 2026-07-24 and
+-- are no longer served. They are kept here only so an existing row keeps a
+-- coherent name; both now TARGET deepseek-v4-flash, which is what those aliases
+-- pointed at during the deprecation window. Never point target_model at a
+-- retired alias: it is the value sent upstream as the model name.
+('model-deepseek', 'deepseek-chat', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek Chat (retired alias)', 'Retired 2026-07-24; targets deepseek-v4-flash', 'deepseek', false),
+('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.07, 0.14, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek v4 Flash', 'DeepSeek flash model', 'deepseek', false),
 ('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai', false)
 ON CONFLICT (id) DO NOTHING;
 
