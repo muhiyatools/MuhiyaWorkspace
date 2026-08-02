@@ -1856,11 +1856,51 @@ func (h *ProxyHandler) proxyAnthropicToAnthropic(w http.ResponseWriter, r *http.
 // This gates DISCOVERY only - inference by exact name and router selection never
 // consult this, so a hidden model stays fully usable.
 func discoverableModel(m *db.Model, onlyMuhiyaCodeVisible bool) bool {
+	return discoverableModelFor(m, appVisibilityFlag(onlyMuhiyaCodeVisible))
+}
+
+// appVisibility selects WHICH per-app visibility column a discovery request is
+// filtered by. The two first-party apps each have their own column and neither
+// constrains the other; every other caller (third-party SDKs, the platform)
+// sees the full active catalog.
+type appVisibility int
+
+const (
+	visibilityAny appVisibility = iota
+	visibilityMuhiyaCode
+	visibilityMuhiyaChat
+)
+
+// appVisibilityFor maps the X-Client-App name onto its visibility column.
+func appVisibilityFor(clientApp string) appVisibility {
+	switch clientApp {
+	case "MuhiyaCode":
+		return visibilityMuhiyaCode
+	case "MuhiyaChat":
+		return visibilityMuhiyaChat
+	default:
+		return visibilityAny
+	}
+}
+
+// appVisibilityFlag preserves the original boolean call shape used by callers
+// that only ever ask the MuhiyaCode question (the MuhiyaCode catalog endpoint).
+func appVisibilityFlag(onlyMuhiyaCodeVisible bool) appVisibility {
+	if onlyMuhiyaCodeVisible {
+		return visibilityMuhiyaCode
+	}
+	return visibilityAny
+}
+
+func discoverableModelFor(m *db.Model, visibility appVisibility) bool {
 	if m == nil || m.Status != "active" || m.Transcribe || m.Name == routerModelDeprecated {
 		return false
 	}
-	if onlyMuhiyaCodeVisible && !m.MuhiyaCodeVisible {
-		return false
+	switch visibility {
+	case visibilityMuhiyaCode:
+		return m.MuhiyaCodeVisible
+	case visibilityMuhiyaChat:
+		return m.MuhiyaChatVisible
 	}
 	return true
 }
@@ -1878,13 +1918,15 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 
 	clientIsAnthropic := isAnthropicRequest(r)
 
-	// MuhiyaCode discoverability filter: when the caller identifies as the
-	// MuhiyaCode app, only models an operator has explicitly marked
-	// muhiyacode_visible are listed/resolvable here. Every other client app
-	// (MuhiyaChat, the platform, third-party SDKs) sees the full active catalog
-	// unchanged. Discovery-only: inference by exact name and router selection
-	// are never gated, so a hidden model stays fully usable.
-	onlyMuhiyaCodeVisible := getClientAppName(r) == "MuhiyaCode"
+	// Per-app discoverability filter: a caller identifying as MuhiyaCode sees
+	// only muhiyacode_visible models, one identifying as MuhiyaChat sees only
+	// muhiyachat_visible models, and every other client (the platform,
+	// third-party SDKs) sees the full active catalog. The two flags are
+	// independent — hiding a model from one app never affects the other.
+	// Discovery-only: inference by exact name and router selection are never
+	// gated, so a hidden model stays fully usable and an existing conversation
+	// pinned to it keeps working.
+	visibility := appVisibilityFor(getClientAppName(r))
 
 	// If asking for a specific model details
 	pathParts := strings.Split(r.URL.Path, "/models/")
@@ -1895,7 +1937,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 			m := &models[i]
 			// The detail branch must apply the same visibility rule as the list
 			// branches so /v1/models/{id} cannot leak a disabled or hidden model.
-			if m.Name == modelID && discoverableModel(m, onlyMuhiyaCodeVisible) {
+			if m.Name == modelID && discoverableModelFor(m, visibility) {
 				matchedModel = m
 				break
 			}
@@ -1971,7 +2013,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		var data []map[string]interface{}
 		for i := range models {
 			m := &models[i]
-			if discoverableModel(m, onlyMuhiyaCodeVisible) {
+			if discoverableModelFor(m, visibility) {
 				displayName := m.DisplayName
 				if displayName == "" {
 					displayName = m.Name + " (via MuhiyaLLM)"
@@ -2004,7 +2046,7 @@ func (h *ProxyHandler) handleModelDiscovery(w http.ResponseWriter, r *http.Reque
 		var data []map[string]interface{}
 		for i := range models {
 			m := &models[i]
-			if discoverableModel(m, onlyMuhiyaCodeVisible) {
+			if discoverableModelFor(m, visibility) {
 				displayName := m.DisplayName
 				if displayName == "" {
 					displayName = m.Name

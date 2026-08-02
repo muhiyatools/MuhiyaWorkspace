@@ -623,6 +623,10 @@
                     <label for="model-muhiyacode-visible" style="margin-bottom: 0; cursor: pointer;">MuhiyaCode Discoverable — the ONLY control for whether this model appears in the MuhiyaCode app's model picker (GET /v1/muhiyacode/models and the MuhiyaCode branch of /v1/models). Unchecked models stay fully usable by MuhiyaChat and by exact name.</label>
                 </div>
                 <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                    <input type="checkbox" id="model-muhiyachat-visible" style="width: auto; margin-bottom: 0;">
+                    <label for="model-muhiyachat-visible" style="margin-bottom: 0; cursor: pointer;">MuhiyaChat Discoverable — the ONLY control for whether this model appears in the MuhiyaChat model picker (the MuhiyaChat branch of /v1/models). Independent of the MuhiyaCode flag. Unchecked models stay fully usable by exact name, so conversations already using one keep working.</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
                     <input type="checkbox" id="model-supports-vision" style="width: auto; margin-bottom: 0;">
                     <label for="model-supports-vision" style="margin-bottom: 0; cursor: pointer;">Vision — accepts image input (routes image requests here)</label>
                 </div>

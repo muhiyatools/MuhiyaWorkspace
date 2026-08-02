@@ -178,7 +178,12 @@ type Model struct {
 	// exact name and router selection are NOT gated by this flag, so a hidden
 	// model stays fully usable — it just does not appear in the coding agent's
 	// model picker. Opt-in for new rows (see migration 021).
-	MuhiyaCodeVisible bool      `json:"muhiyacode_visible"`
+	MuhiyaCodeVisible bool `json:"muhiyacode_visible"`
+	// MuhiyaChatVisible is the same control for the MuhiyaChat app
+	// (X-Client-App: MuhiyaChat). Identical semantics to MuhiyaCodeVisible,
+	// including that it gates DISCOVERY only: a conversation already pinned to a
+	// model keeps working after an operator hides it. See migration 038.
+	MuhiyaChatVisible bool      `json:"muhiyachat_visible"`
 	CreatedAt         time.Time `json:"created_at"`
 }
 
@@ -1286,7 +1291,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(muhiyachat_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
 		FROM models
 		WHERE status = 'active' AND (name = $1 OR id = $1 OR lower(display_name) = lower($1))
 		ORDER BY (name = $1) DESC, (id = $1) DESC
@@ -1297,7 +1302,7 @@ func (db *DB) GetModelByName(name string) (*Model, error) {
 			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
 			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.PromptAccounting)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.MuhiyaChatVisible, &m.PromptAccounting)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1326,7 +1331,7 @@ func (db *DB) GetModel(id string) (*Model, error) {
 		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(muhiyachat_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
 		FROM models WHERE id = $1`, id).
 		Scan(&m.ID, &m.Name, &m.ProviderID, &m.TargetModel, &m.InputCostPerMillion, &m.OutputCostPerMillion,
 			&m.CacheReadCostPerMillion, &m.CacheWriteCostPerMillion,
@@ -1334,7 +1339,7 @@ func (db *DB) GetModel(id string) (*Model, error) {
 			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
 			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.PromptAccounting)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.MuhiyaChatVisible, &m.PromptAccounting)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1362,7 +1367,7 @@ func (db *DB) ListModels() ([]Model, error) {
 		COALESCE(price_per_minute_nano_usd, 0),
 		COALESCE(transcribe, FALSE), created_at, COALESCE(context_window, 0), COALESCE(max_output_tokens, 0),
 		COALESCE(display_name, ''), COALESCE(description, ''), COALESCE(owned_by, ''), COALESCE(supports_vision, FALSE), COALESCE(supports_thinking, FALSE),
-		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
+		COALESCE(supports_audio, FALSE), COALESCE(supports_video, FALSE), COALESCE(supports_documents, FALSE), COALESCE(max_attachment_mb, 0), COALESCE(accepted_mime_types, ''), COALESCE(muhiyacode_visible, FALSE), COALESCE(muhiyachat_visible, FALSE), COALESCE(prompt_accounting, 'inclusive')
 		FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1378,7 +1383,7 @@ func (db *DB) ListModels() ([]Model, error) {
 			&m.Status, &m.RoutingTier, &m.ModelType, &m.PricePerMinute, &m.PricePerMinuteNano,
 			&m.Transcribe, &m.CreatedAt, &m.ContextWindow, &m.MaxOutputTokens,
 			&m.DisplayName, &m.Description, &m.OwnedBy, &m.SupportsVision, &m.SupportsThinking,
-			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.PromptAccounting)
+			&m.SupportsAudio, &m.SupportsVideo, &m.SupportsDocuments, &m.MaxAttachmentMB, &m.AcceptedMimeTypes, &m.MuhiyaCodeVisible, &m.MuhiyaChatVisible, &m.PromptAccounting)
 		if err != nil {
 			return nil, err
 		}
@@ -1683,7 +1688,7 @@ func normalizedCatalogTags(model Model) []string {
 	seen := make(map[string]bool, len(model.Tags)+1)
 	for _, raw := range model.Tags {
 		tag := strings.TrimSpace(raw)
-		if tag == "" || strings.EqualFold(tag, "muhiyacode") || seen[tag] {
+		if tag == "" || strings.EqualFold(tag, "muhiyacode") || strings.EqualFold(tag, "muhiyachat") || seen[tag] {
 			continue
 		}
 		seen[tag] = true
@@ -1691,6 +1696,9 @@ func normalizedCatalogTags(model Model) []string {
 	}
 	if model.MuhiyaCodeVisible {
 		tags = append(tags, "muhiyacode")
+	}
+	if model.MuhiyaChatVisible {
+		tags = append(tags, "muhiyachat")
 	}
 	return tags
 }
@@ -1803,15 +1811,15 @@ func (db *DB) CreateModel(m Model) error {
 		routing_tier, model_type, price_per_minute, price_per_minute_nano_usd, transcribe, context_window, max_output_tokens,
 		display_name, description, owned_by, supports_vision, supports_thinking,
 		supports_audio, supports_video, supports_documents, max_attachment_mb, accepted_mime_types,
-		muhiyacode_visible, prompt_accounting
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)`,
+		muhiyacode_visible, muhiyachat_visible, prompt_accounting
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`,
 		m.ID, m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion,
 		m.OutputCostPerMillion, m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
 		m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
 		m.Status, m.RoutingTier, m.ModelType, m.PricePerMinute, m.PricePerMinuteNano, m.Transcribe, m.ContextWindow, m.MaxOutputTokens,
 		m.DisplayName, m.Description, m.OwnedBy, m.SupportsVision, m.SupportsThinking,
 		m.SupportsAudio, m.SupportsVideo, m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes,
-		m.MuhiyaCodeVisible, m.PromptAccounting)
+		m.MuhiyaCodeVisible, m.MuhiyaChatVisible, m.PromptAccounting)
 	if err != nil {
 		return err
 	}
@@ -1855,7 +1863,8 @@ func (db *DB) UpdateModel(m Model) error {
 		price_per_minute_nano_usd = $16, transcribe = $17, context_window = $18, max_output_tokens = $19,
 		display_name = $20, description = $21, owned_by = $22, supports_vision = $23,
 		supports_thinking = $24, supports_audio = $25, supports_video = $26, supports_documents = $27,
-		max_attachment_mb = $28, accepted_mime_types = $29, muhiyacode_visible = $30, prompt_accounting = $31 WHERE id = $32`,
+		max_attachment_mb = $28, accepted_mime_types = $29, muhiyacode_visible = $30,
+		muhiyachat_visible = $31, prompt_accounting = $32 WHERE id = $33`,
 		m.Name, m.ProviderID, m.TargetModel, m.InputCostPerMillion, m.OutputCostPerMillion,
 		m.CacheReadCostPerMillion, m.CacheWriteCostPerMillion,
 		m.InputCostNanoPerMillion, m.OutputCostNanoPerMillion, m.CacheReadCostNanoPerMillion, m.CacheWriteCostNanoPerMillion,
@@ -1863,7 +1872,7 @@ func (db *DB) UpdateModel(m Model) error {
 		m.Transcribe, m.ContextWindow, m.MaxOutputTokens, m.DisplayName, m.Description,
 		m.OwnedBy, m.SupportsVision, m.SupportsThinking, m.SupportsAudio, m.SupportsVideo,
 		m.SupportsDocuments, m.MaxAttachmentMB, m.AcceptedMimeTypes, m.MuhiyaCodeVisible,
-		m.PromptAccounting, m.ID)
+		m.MuhiyaChatVisible, m.PromptAccounting, m.ID)
 	if err != nil {
 		return err
 	}

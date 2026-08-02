@@ -32,6 +32,8 @@ type schemaExpectation struct {
 var requiredSchema = []schemaExpectation{
 	{table: "models", column: "muhiyacode_visible", migration: "021_model_muhiyacode_visible.sql",
 		purpose: "MuhiyaCode model discovery"},
+	{table: "models", column: "muhiyachat_visible", migration: "038_model_muhiyachat_visible.sql",
+		purpose: "MuhiyaChat model discovery"},
 	{table: "models", column: "prompt_accounting", migration: "032_prompt_accounting.sql",
 		purpose: "per-provider prompt-token accounting (billing correctness)"},
 	{table: "model_pricing_tiers", migration: "025_model_pricing_tiers.sql",

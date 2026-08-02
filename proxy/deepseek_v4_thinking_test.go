@@ -124,6 +124,40 @@ func TestMuhiyaChatEffortHeaderContract(t *testing.T) {
 	}
 }
 
+// medium has no rung of its own on DeepSeek (low|high|max), so it resolves DOWN
+// to low wherever low exists, and rides the high floor where it does not.
+//
+// It used to resolve UP to high. Because DeepSeek's output cap covers
+// reasoning_content, that made a "balanced" request able to spend its entire
+// completion budget reasoning and return finish_reason=length with no visible
+// content — minutes of waiting for nothing, on a level the caller never asked
+// for. Requesting a level must never buy a higher one.
+func TestDeepSeekMediumResolvesDownNotUp(t *testing.T) {
+	flash := map[string]interface{}{"model": "deepseek-v4-flash"}
+	if applied := ApplyThinkingOpenAI(flash, deepseekBase, "deepseek-v4-flash", "medium", true); applied != "low" {
+		t.Errorf("v4-flash medium -> %q, want low", applied)
+	}
+	if flash["reasoning_effort"] != "low" {
+		t.Errorf("v4-flash medium reasoning_effort = %v, want low", flash["reasoning_effort"])
+	}
+
+	// v4-pro has no low rung, so medium rides its documented high floor.
+	pro := map[string]interface{}{"model": "deepseek-v4-pro"}
+	if applied := ApplyThinkingOpenAI(pro, deepseekBase, "deepseek-v4-pro", "medium", true); applied != "high" {
+		t.Errorf("v4-pro medium -> %q, want high (its floor)", applied)
+	}
+
+	// The rungs above medium are untouched: high stays high, max stays max.
+	high := map[string]interface{}{"model": "deepseek-v4-flash"}
+	if applied := ApplyThinkingOpenAI(high, deepseekBase, "deepseek-v4-flash", "high", true); applied != "high" {
+		t.Errorf("v4-flash high -> %q, want high", applied)
+	}
+	max := map[string]interface{}{"model": "deepseek-v4-flash"}
+	if applied := ApplyThinkingOpenAI(max, deepseekBase, "deepseek-v4-flash", "max", true); applied != "max" {
+		t.Errorf("v4-flash max -> %q, want max", applied)
+	}
+}
+
 // DeepSeek rejects these; they must never reach it regardless of the flag.
 func TestDeepSeekPenaltiesStrippedRegardlessOfFlag(t *testing.T) {
 	for _, flag := range []bool{true, false} {

@@ -310,11 +310,26 @@ func ApplyThinkingOpenAI(bodyMap map[string]interface{}, baseURL, targetModel, l
 			return "disabled"
 		}
 		bodyMap["thinking"] = map[string]interface{}{"type": "enabled"}
-		effort := "high" // low/medium both land on DeepSeek's own default
+		// The canonical ladder has five rungs; DeepSeek's has three
+		// (low|high|max), so medium has to resolve to one of its neighbours.
+		// It resolves DOWN, to "low", for the same reason high no longer
+		// resolves up to "max": requesting a level must never buy a higher one
+		// than was asked for.
+		//
+		// Rounding medium UP to "high" was not a small inaccuracy. DeepSeek's
+		// output cap covers reasoning_content, so a high-effort turn can spend
+		// its entire completion budget reasoning and come back
+		// finish_reason=length with nothing visible. Clients whose balanced
+		// setting is medium — MuhiyaCode's, and the platform's analytical
+		// Auto — were being charged for, and made to wait minutes on, the
+		// deepest reasoning mode they never asked for.
+		effort := "high"
 		switch {
 		case rank >= 4:
 			effort = "max"
-		case rank == 1 && deepseekSupportsLowEffort(model):
+		case rank <= 2 && deepseekSupportsLowEffort(model):
+			// low and medium both land on "low" where it exists; v4-pro has no
+			// low rung, so they ride its "high" floor there.
 			effort = "low"
 		}
 		bodyMap["reasoning_effort"] = effort

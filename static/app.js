@@ -656,6 +656,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Discoverability is opt-in: a new model is hidden from the MuhiyaCode
         // picker until an operator explicitly marks it.
         document.getElementById('model-muhiyacode-visible').checked = false;
+        document.getElementById('model-muhiyachat-visible').checked = false;
         document.getElementById('model-supports-vision').checked = false;
         document.getElementById('model-supports-thinking').checked = false;
         document.getElementById('model-supports-audio').checked = false;
@@ -810,6 +811,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const price_per_minute = parseFloat(document.getElementById('model-price-minute').value) || 0.0;
         const transcribe = document.getElementById('model-transcribe').checked;
         const muhiyacode_visible = document.getElementById('model-muhiyacode-visible').checked;
+        const muhiyachat_visible = document.getElementById('model-muhiyachat-visible').checked;
         const supports_vision = document.getElementById('model-supports-vision').checked;
         const supports_thinking = document.getElementById('model-supports-thinking').checked;
         const supports_audio = document.getElementById('model-supports-audio').checked;
@@ -855,6 +857,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const body = {
             id, name, provider_id, target_model, model_type, price_per_minute, transcribe,
             muhiyacode_visible,
+            muhiyachat_visible,
             input_cost_per_million: inCost,
             output_cost_per_million: outCost,
             cache_read_cost_per_million: readCost,
@@ -1544,6 +1547,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (m.supports_documents) caps.push('<span class="badge" style="background:#15803d;">Docs</span>');
                     if (m.max_attachment_mb > 0) caps.push(`<span class="badge" style="background:#3f3f46;">≤${m.max_attachment_mb}MB</span>`);
                     if (m.muhiyacode_visible) caps.push('<span class="badge" style="background:#0d9488;">MuhiyaCode</span>');
+                    if (m.muhiyachat_visible) caps.push('<span class="badge" style="background:#7c3aed;">MuhiyaChat</span>');
                     if (!isTrans && m.input_cost_per_million === 0 && m.output_cost_per_million === 0) caps.push('<span class="badge" style="background:#3f3f46;">Free</span>');
                     if (provInactive) caps.push('<span class="badge" style="background:#b91c1c;">provider inactive</span>');
                     return `
@@ -1616,6 +1620,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('model-price-minute').value = m.price_per_minute || 0.0;
             document.getElementById('model-transcribe').checked = !!m.transcribe;
             document.getElementById('model-muhiyacode-visible').checked = !!m.muhiyacode_visible;
+            document.getElementById('model-muhiyachat-visible').checked = !!m.muhiyachat_visible;
             document.getElementById('model-supports-vision').checked = !!m.supports_vision;
             document.getElementById('model-supports-thinking').checked = !!m.supports_thinking;
             document.getElementById('model-supports-audio').checked = !!m.supports_audio;
