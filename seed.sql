@@ -28,6 +28,7 @@ ON CONFLICT (id) DO NOTHING;
 -- 4. Providers
 INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status) VALUES
 ('openai', 'OpenAI', '', 'https://api.openai.com/v1', '', 'inactive'),
+('openrouter', 'OpenRouter', '', 'https://openrouter.ai/api/v1', '', 'inactive'),
 ('anthropic', 'Anthropic', '', '', 'https://api.anthropic.com', 'inactive'),
 ('deepseek', 'DeepSeek', '', 'https://api.deepseek.com', 'https://api.deepseek.com/anthropic', 'inactive')
 ON CONFLICT (id) DO NOTHING;
@@ -61,7 +62,7 @@ INSERT INTO models (
 ('model-deepseek-r1', 'deepseek-reasoner', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.0028, 0.00, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek Reasoner (legacy alias)', 'Legacy reasoning alias routed to DeepSeek V4 Flash', 'deepseek', false, true),
 ('model-deepseek-flash', 'deepseek-v4-flash', 'deepseek', 'deepseek-v4-flash', 0.14, 0.28, 0.0028, 0.00, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek V4 Flash', 'DeepSeek V4 Flash with thinking and non-thinking modes', 'deepseek', false, true),
 ('model-deepseek-pro', 'deepseek-v4-pro', 'deepseek', 'deepseek-v4-pro', 0.435, 0.87, 0.003625, 0.00, 'inactive', 'none', 'llm', 0.0, false, 1000000, 384000, 'DeepSeek V4 Pro', 'DeepSeek V4 Pro with thinking and non-thinking modes', 'deepseek', false, true),
-('model-whisper', 'whisper-1', 'openai', 'whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model', 'openai', false, false)
+('model-whisper', 'whisper-1', 'openrouter', 'openai/whisper-1', 0.00, 0.00, 0.00, 0.00, 'inactive', 'none', 'transcript', 0.006, true, 0, 0, 'Whisper 1', 'OpenAI speech-to-text model via OpenRouter', 'openai', false, false)
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================

@@ -54,6 +54,7 @@ func TestMigrationsEmbedded(t *testing.T) {
 		"033_model_cache_ttl_rates.sql",
 		"034_model_price_windows.sql",
 		"035_request_pricing_audit.sql",
+		"040_route_whisper_through_openrouter.sql",
 	} {
 		found := false
 		for _, n := range names {
@@ -221,6 +222,24 @@ func TestPricingMigrationsCarryTheirLoadBearingStatements(t *testing.T) {
 			if !strings.Contains(body, statement) {
 				t.Errorf("migration %s is missing %q", name, statement)
 			}
+		}
+	}
+}
+
+func TestWhisperOpenRouterMigrationKeepsVirtualModelContract(t *testing.T) {
+	data, err := migrationFS.ReadFile("migrations/040_route_whisper_through_openrouter.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(data))
+	for _, required := range []string{
+		"where name = 'whisper-1'",
+		"provider_id = 'openrouter'",
+		"target_model = 'openai/whisper-1'",
+		"where id = 'openrouter'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("whisper migration missing %q", required)
 		}
 	}
 }

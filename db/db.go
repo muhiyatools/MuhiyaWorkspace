@@ -643,6 +643,7 @@ func (db *DB) seedDefaults() error {
 
 	providers := []Provider{
 		{ID: "openai", Name: "OpenAI", BaseURL: "https://api.openai.com/v1", Status: "inactive"},
+		{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1", Status: "inactive"},
 		{ID: "anthropic", Name: "Anthropic", AnthropicBaseURL: "https://api.anthropic.com", Status: "inactive"},
 		{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com", AnthropicBaseURL: "https://api.deepseek.com/anthropic", Status: "inactive"},
 	}
@@ -664,7 +665,7 @@ func (db *DB) seedDefaults() error {
 		{ID: "model-deepseek-r1", Name: "deepseek-reasoner", ProviderID: "deepseek", TargetModel: "deepseek-v4-flash", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.0028, Status: "inactive", ModelType: "llm", ContextWindow: 1_000_000, MaxOutputTokens: 384_000, DisplayName: "DeepSeek Reasoner (legacy alias)", Description: "Legacy reasoning alias routed to DeepSeek V4 Flash", OwnedBy: "deepseek", SupportsThinking: true},
 		{ID: "model-deepseek-flash", Name: "deepseek-v4-flash", ProviderID: "deepseek", TargetModel: "deepseek-v4-flash", InputCostPerMillion: 0.14, OutputCostPerMillion: 0.28, CacheReadCostPerMillion: 0.0028, Status: "inactive", ModelType: "llm", ContextWindow: 1_000_000, MaxOutputTokens: 384_000, DisplayName: "DeepSeek V4 Flash", Description: "DeepSeek V4 Flash with thinking and non-thinking modes", OwnedBy: "deepseek", SupportsThinking: true},
 		{ID: "model-deepseek-pro", Name: "deepseek-v4-pro", ProviderID: "deepseek", TargetModel: "deepseek-v4-pro", InputCostPerMillion: 0.435, OutputCostPerMillion: 0.87, CacheReadCostPerMillion: 0.003625, Status: "inactive", ModelType: "llm", ContextWindow: 1_000_000, MaxOutputTokens: 384_000, DisplayName: "DeepSeek V4 Pro", Description: "DeepSeek V4 Pro with thinking and non-thinking modes", OwnedBy: "deepseek", SupportsThinking: true},
-		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openai", TargetModel: "whisper-1", Status: "inactive", ModelType: "transcript", PricePerMinute: 0.006, Transcribe: true, DisplayName: "Whisper 1", Description: "OpenAI speech-to-text model", OwnedBy: "openai"},
+		{ID: "model-whisper", Name: "whisper-1", ProviderID: "openrouter", TargetModel: "openai/whisper-1", Status: "inactive", ModelType: "transcript", PricePerMinute: 0.006, Transcribe: true, DisplayName: "Whisper 1", Description: "OpenAI speech-to-text model via OpenRouter", OwnedBy: "openai"},
 	}
 	for _, m := range models {
 		if err := normalizeModelMoney(&m); err != nil {

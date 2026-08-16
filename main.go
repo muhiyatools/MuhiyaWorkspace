@@ -102,10 +102,10 @@ func main() {
 		fmt.Fprintf(w, `{"status":"ok","version":%q,"migrations":%d,"billing_loss":%d}`, buildVersion, migrationCount.Load(), proxy.BillingLossCount.Load())
 	})
 
-	// Root redirect
+	// Root redirect (temporary redirect so browsers/CDNs do not permanently cache)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
+			http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
 			return
 		}
 		http.NotFound(w, r)
@@ -237,7 +237,7 @@ func main() {
 		path := r.URL.Path
 
 		if path == "/admin" {
-			http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
+			http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
 			return
 		}
 
