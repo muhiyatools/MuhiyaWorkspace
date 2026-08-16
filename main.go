@@ -102,10 +102,12 @@ func main() {
 		fmt.Fprintf(w, `{"status":"ok","version":%q,"migrations":%d,"billing_loss":%d}`, buildVersion, migrationCount.Load(), proxy.BillingLossCount.Load())
 	})
 
-	// Root redirect (temporary redirect so browsers/CDNs do not permanently cache)
+	// Root endpoint — no auto-redirect to /admin. Admin dashboard is accessed directly at /admin/
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"running","gateway":"MuhiyaLLM"}`))
 			return
 		}
 		http.NotFound(w, r)
