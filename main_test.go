@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegisterProxyRoutesIncludesGatewayTools(t *testing.T) {
@@ -225,5 +226,91 @@ func TestWithPostgresConnectTimeout(t *testing.T) {
 	}
 	if existing.Query().Get("lock_timeout") != "5000" {
 		t.Fatalf("unset params must still be defaulted, got %q", existing.RawQuery)
+	}
+}
+
+func TestLoginThrottleLocksOutRepeatedFailures(t *testing.T) {
+	loginThrottleMu.Lock()
+	loginThrottleBuckets = make(map[string]*loginBucket)
+	loginThrottleGlobal = nil
+	loginThrottleMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/stats", nil)
+	req.RemoteAddr = "203.0.113.9:4444"
+	rec := httptest.NewRecorder()
+
+	// First failure: allowed through (401 path proceeds).
+	if !loginThrottleGuard(rec, req) {
+		t.Fatal("first failed attempt must not be locked out")
+	}
+	for i := 0; i < loginLockThreshold; i++ {
+		loginThrottleFail(req)
+	}
+
+	// Threshold reached: guard must now reject with 429.
+	rec2 := httptest.NewRecorder()
+	if loginThrottleGuard(rec2, req) {
+		t.Fatal("expected lockout after repeated failures")
+	}
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on lockout, got %d", rec2.Code)
+	}
+
+	// A different source is unaffected (per-source bucketing).
+	reqOther := httptest.NewRequest(http.MethodPost, "/api/stats", nil)
+	reqOther.RemoteAddr = "198.51.100.7:5555"
+	rec3 := httptest.NewRecorder()
+	if !loginThrottleGuard(rec3, reqOther) {
+		t.Fatal("a different source must not inherit another source's lockout")
+	}
+}
+
+func TestLoginThrottleGlobalBreakerAndReset(t *testing.T) {
+	loginThrottleMu.Lock()
+	loginThrottleBuckets = make(map[string]*loginBucket)
+	loginThrottleGlobal = nil
+	loginThrottleMu.Unlock()
+
+	// Trip the global breaker with failures from many distinct sources.
+	now := time.Now()
+	loginThrottleMu.Lock()
+	for i := 0; i < loginGlobalFailMax; i++ {
+		loginThrottleGlobal = append(loginThrottleGlobal, now)
+	}
+	loginThrottleMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.RemoteAddr = "192.0.2.50:1234"
+	rec := httptest.NewRecorder()
+	if loginThrottleGuard(rec, req) {
+		t.Fatal("global circuit breaker should reject while failure window is saturated")
+	}
+
+	// Drain the window; a success resets the per-source bucket entirely.
+	loginThrottleMu.Lock()
+	loginThrottleGlobal = nil
+	loginThrottleMu.Unlock()
+	if !loginThrottleGuard(rec, req) {
+		t.Fatal("guard should pass once global breaker drains")
+	}
+	loginThrottleSuccess(req)
+
+	loginThrottleMu.Lock()
+	defer loginThrottleMu.Unlock()
+	if _, exists := loginThrottleBuckets[clientSource(req)]; exists {
+		t.Fatal("successful login must clear the source's throttle state")
+	}
+}
+
+func TestSecurityHeadersApplied(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	rec := httptest.NewRecorder()
+	securityHeaders(base).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	for _, h := range []string{"X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy"} {
+		if rec.Header().Get(h) == "" {
+			t.Errorf("missing security header %s", h)
+		}
 	}
 }

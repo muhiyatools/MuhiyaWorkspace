@@ -399,6 +399,10 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 		if bw.ID == "" {
 			bw.ID = "budget-" + generateRandomString(8)
 		}
+		if !validID(bw.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid budget window ID")
+			return
+		}
 		bw.CreatedAt = time.Now()
 
 		if err := api.db.CreateBudgetWindow(bw); err != nil {
@@ -416,6 +420,10 @@ func (api *AdminAPI) handleBudgets(w http.ResponseWriter, r *http.Request) {
 		}
 		if bw.ID == "" {
 			api.errorResponse(w, http.StatusBadRequest, "Budget Window ID is required")
+			return
+		}
+		if !validID(bw.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid budget window ID")
 			return
 		}
 		if err := api.db.UpdateBudgetWindow(bw); err != nil {
@@ -610,6 +618,18 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 		if p.ID == "" {
 			p.ID = strings.ToLower(p.Name)
 		}
+		// Audit finding L2: provider IDs are interpolated into the admin
+		// panel's onclick="fn('...')" JS-string contexts, where HTML-entity
+		// decoding precedes JS compilation and escaping does not help — the
+		// same hazard validID guards for users/plans/topups.
+		if !validID(p.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid provider ID: must be 1-64 characters of [A-Za-z0-9_-]. Supply an explicit id or simplify the name.")
+			return
+		}
+		if !validName(p.Name) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid provider name")
+			return
+		}
 		p.Status = "active"
 		p.CreatedAt = time.Now()
 		p.UpdatedAt = time.Now()
@@ -628,6 +648,10 @@ func (api *AdminAPI) handleProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		if p.ID == "" {
 			api.errorResponse(w, http.StatusBadRequest, "Provider ID is required")
+			return
+		}
+		if !validID(p.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid provider ID")
 			return
 		}
 		existing, err := api.db.GetProvider(p.ID)
@@ -790,6 +814,12 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 		if m.ID == "" {
 			m.ID = "model-" + generateRandomString(8)
 		}
+		// Audit finding L2: model IDs land in onclick="editModel('${m.id}')"
+		// JS-string contexts in the panel — enforce the ID charset.
+		if !validID(m.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid model ID")
+			return
+		}
 		m.RoutingTier = "none"
 		// Honor an explicit status if the form sent one; default to active so the
 		// common "add and use immediately" flow stays frictionless.
@@ -830,6 +860,10 @@ func (api *AdminAPI) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		if incoming.ID == "" {
 			api.errorResponse(w, http.StatusBadRequest, "Model ID is required")
+			return
+		}
+		if !validID(incoming.ID) {
+			api.errorResponse(w, http.StatusBadRequest, "Invalid model ID")
 			return
 		}
 		existing, err := api.db.GetModel(incoming.ID)

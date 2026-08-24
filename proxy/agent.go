@@ -111,6 +111,43 @@ func (h *ProxyHandler) serveMuhiyaAgent(w http.ResponseWriter, r *http.Request, 
 		CreatedAt:      startTime,
 	}
 
+	// Audit finding M1: the loop previously skipped budget admission,
+	// per-user concurrency serialization, and ceiling-tagged settlement —
+	// meaning budget windows were unenforceable and extra credits were never
+	// deducted on this path. All three now mirror serveOpenAIClient.
+	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, reqLog.ID)
+	if err != nil {
+		h.serviceUnavailableResponse(w, "generation guard failed", err)
+		return true
+	}
+	defer releaseGeneration()
+
+	// Quote against the WHOLE loop (up to maxAgentIterations upstream turns),
+	// not one turn, so the charge ceiling actually bounds what this request
+	// can spend. Settlement below charges real usage against this ceiling and
+	// deducts top-ups via SettleUsageAndLog.
+	rawReq, _ := json.Marshal(oaiReq)
+	loopOutput := agentOutputLimit * maxAgentIterations
+	_, chargeCeiling, budgetWindow, err := h.affordableGeneration(r.Context(), generationQuoteRequest{
+		userID:          key.UserID,
+		model:           model,
+		inputUpperBound: conservativeInputTokenBound(rawReq, promptTokens, model),
+		requestedOutput: loopOutput,
+		pricedAt:        pricedAtFrom(r.Context()),
+	})
+	if err != nil {
+		h.saveAdmissionFailure(admissionFailure{
+			request: r, key: key, model: model, provider: provider,
+			requestID: reqLog.ID, requestedModel: requestedModel,
+			inputTokens: promptTokens, status: budgetErrorStatus(err), err: err,
+			budget: budgetWindow,
+		})
+		h.writeBudgetError(w, err)
+		return true
+	}
+	reqLog.ChargeCeilingNanoUSD = chargeCeiling
+	applyBudgetWindow(&reqLog, budgetWindow)
+
 	tc := &ToolContext{DB: h.db, Settings: settings, Complexity: complexity}
 	tools := BuildToolSchemas(settings)
 

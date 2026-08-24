@@ -129,6 +129,11 @@ type ProxyHandler struct {
 	// identitySecret is the HMAC key used to derive a stable, opaque upstream
 	// "user" identifier (see DeriveUserID). Empty disables identity injection.
 	identitySecret string
+	// byteBudget caps total in-flight buffered request bytes. Bodies are read
+	// fully into memory BEFORE rate limiting / the generation guard run, so
+	// without this cap concurrent authenticated uploads exhaust memory ahead
+	// of any admission control (audit finding M2).
+	byteBudget *byteBudget
 }
 
 func NewProxyHandler(database *db.DB, limiter *RateLimiter, identitySecret string) *ProxyHandler {
@@ -138,6 +143,7 @@ func NewProxyHandler(database *db.DB, limiter *RateLimiter, identitySecret strin
 		outbox:         newLogOutbox(database),
 		affinity:       newRouteAffinityStore(),
 		identitySecret: identitySecret,
+		byteBudget:     newByteBudget(maxInflightRequestBytes()),
 	}
 }
 
@@ -425,12 +431,16 @@ func translateErrorBytes(respBytes []byte, clientIsAnthropic bool) []byte {
 				return out
 			}
 		}
-		// Fallback: wrap unknown error in Anthropic format
+		// Fallback: the upstream body is not a recognized error JSON. Never
+		// relay it verbatim - provider payloads can embed account/project
+		// identifiers or internal endpoints (audit finding L1). Clients get a
+		// generic message; the raw body remains visible server-side via the
+		// truncated request_logs.error_message.
 		translated := anthropicErrorPayload{
 			Type: "error",
 		}
 		translated.Error.Type = "api_error"
-		translated.Error.Message = string(respBytes)
+		translated.Error.Message = "The upstream provider returned an unrecognized error response. Check the gateway logs."
 		out, err := json.Marshal(translated)
 		if err == nil {
 			return out
@@ -452,9 +462,9 @@ func translateErrorBytes(respBytes []byte, clientIsAnthropic bool) []byte {
 				return out
 			}
 		}
-		// Fallback: wrap unknown error in OpenAI format
+		// Fallback: same sanitization rule for OpenAI-dialect clients (L1).
 		translated := openaiErrorPayload{}
-		translated.Error.Message = string(respBytes)
+		translated.Error.Message = "The upstream provider returned an unrecognized error response. Check the gateway logs."
 		translated.Error.Type = "api_error"
 		out, err := json.Marshal(translated)
 		if err == nil {
@@ -581,6 +591,14 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(r.URL.Path, "/audio/transcriptions") {
 		bodyLimit = maxTranscriptionRequestBytes
 	}
+	// Reserve buffer budget BEFORE reading: the body is about to be held in
+	// RAM in full, ahead of every other admission control. Concurrent uploads
+	// beyond the process-wide cap queue here instead of exhausting memory.
+	if err := h.byteBudget.Acquire(r.Context(), bodyLimit); err != nil {
+		h.serviceUnavailableResponse(w, "server at buffer capacity", err)
+		return
+	}
+	defer h.byteBudget.Release(bodyLimit)
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -2257,7 +2275,14 @@ func (h *ProxyHandler) logAndWriteError(w http.ResponseWriter, code int, msg str
 
 func (h *ProxyHandler) logFailedUpstream(w http.ResponseWriter, statusCode int, respBytes []byte, respHeader http.Header, log *db.RequestLog, startTime time.Time) {
 	log.StatusCode = statusCode
-	log.ErrorMessage = string(respBytes)
+	// Persist a bounded copy for admin forensics: unbounded upstream bodies
+	// bloat request_logs, and the raw text is never shown to tenants (the
+	// relay below sanitizes unrecognized bodies).
+	errMsg := string(respBytes)
+	if len(errMsg) > 2048 {
+		errMsg = errMsg[:2048]
+	}
+	log.ErrorMessage = errMsg
 	log.LatencyMS = int(time.Since(startTime).Milliseconds())
 	h.saveRequestLog(*log)
 

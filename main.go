@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,10 +40,18 @@ var buildVersion = "dev"
 var migrationCount atomic.Int64
 
 func main() {
-	dsn := withPostgresConnectTimeout("host=127.0.0.1 port=5432 user=postgres password=postgres dbname=gateway sslmode=disable")
-	if envDSN := os.Getenv("DATABASE_URL"); envDSN != "" {
-		dsn = withPostgresConnectTimeout(envDSN)
+	// Audit finding L3: the previous silent fallback embedded superuser
+	// credentials (postgres/postgres) with sslmode=disable. Production must
+	// state its DSN explicitly; only DEV_MODE keeps the local default.
+	dsn := os.Getenv("DATABASE_URL")
+	if strings.TrimSpace(dsn) == "" {
+		if !isDevMode() {
+			log.Fatalf("[SECURITY] DATABASE_URL must be set (refusing to fall back to known-default superuser credentials over an unencrypted connection). For local development only, set DEV_MODE=1.")
+		}
+		log.Printf("[SECURITY] DATABASE_URL is not set; DEV_MODE local default in use (postgres/postgres@127.0.0.1, sslmode=disable). Never use DEV_MODE in production.")
+		dsn = "host=127.0.0.1 port=5432 user=postgres password=postgres dbname=gateway sslmode=disable"
 	}
+	dsn = withPostgresConnectTimeout(dsn)
 
 	port := "8090"
 	if envPort := os.Getenv("PORT"); envPort != "" {
@@ -54,7 +64,7 @@ func main() {
 	}
 	adminPass := os.Getenv("ADMIN_PASSWORD")
 	if adminPass == "" {
-		if strings.EqualFold(os.Getenv("DEV_MODE"), "1") || strings.EqualFold(os.Getenv("DEV_MODE"), "true") {
+		if isDevMode() {
 			adminPass = "adminpassword"
 			log.Printf("[SECURITY] ADMIN_PASSWORD is not set; DEV_MODE is enabled so the insecure default admin password is in use. Never set DEV_MODE in production.")
 		} else {
@@ -88,18 +98,20 @@ func main() {
 	var adminMuxHandler http.Handler
 	var proxyMuxHandler http.Handler
 
-	// Health endpoint — responds immediately so elest.io proxy never 502s. Also
-	// reports the build version + applied-migration count so a deploy is
-	// verifiable with a single curl (no more guessing whether a fix is live).
+	// Health endpoint — responds immediately so elest.io proxy never 502s.
+	// Audit finding L4: this endpoint is unauthenticated, so it now exposes a
+	// bare status only (no build version, migration count, or billing-loss
+	// counters for anonymous fingerprinting). The detailed payload moved to
+	// the authenticated /api/health below.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if !dbReady.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, `{"status":"connecting","version":%q}`, buildVersion)
+			fmt.Fprintf(w, `{"status":"connecting"}`)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok","version":%q,"migrations":%d,"billing_loss":%d}`, buildVersion, migrationCount.Load(), proxy.BillingLossCount.Load())
+		fmt.Fprintf(w, `{"status":"ok"}`)
 	})
 
 	// Root endpoint — no auto-redirect to /admin. Admin dashboard is accessed directly at /admin/
@@ -232,7 +244,18 @@ func main() {
 	// Instantiate actual sub-routers now that DB is connected
 	apiMux := http.NewServeMux()
 	admin.RegisterRoutes(apiMux, database, limiter)
-	apiMuxHandler = serviceOrAdminAuth(adminUser, adminPass, svcUser, svcPass, apiMux)
+	// Detailed health payload for deploy verification (build version,
+	// migration count, billing-loss counter) — authenticated like every other
+	// /api route; /api/health is already in the SERVICE credential allowlist.
+	apiMux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","version":%q,"migrations":%d,"billing_loss":%d}`, buildVersion, migrationCount.Load(), proxy.BillingLossCount.Load())
+	})
+	apiMuxHandler = securityHeaders(serviceOrAdminAuth(adminUser, adminPass, svcUser, svcPass, apiMux))
 
 	adminMux := http.NewServeMux()
 	adminMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +305,7 @@ func main() {
 
 		http.NotFound(w, r)
 	})
-	adminMuxHandler = basicAuth(adminUser, adminPass, adminMux)
+	adminMuxHandler = securityHeaders(basicAuth(adminUser, adminPass, adminMux))
 
 	identitySecret := strings.TrimSpace(os.Getenv("IDENTITY_SECRET"))
 	if identitySecret == "" {
@@ -580,9 +603,182 @@ func basicAuth(username, password string, next http.Handler) http.Handler {
 		userOK := subtle.ConstantTimeCompare([]byte(u), []byte(username)) == 1
 		passOK := subtle.ConstantTimeCompare([]byte(p), []byte(password)) == 1
 		if !ok || !userOK || !passOK {
+			// Audit finding M3: constant-time compare defeats timing oracles,
+			// not password guessing — throttle repeated failures.
+			if !loginThrottleGuard(w, r) {
+				return
+			}
+			loginThrottleFail(r)
 			w.Header().Set("WWW-Authenticate", `Basic realm="Admin Area"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
+		}
+		loginThrottleSuccess(r)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// --- Login throttling (audit finding M3) ------------------------------------
+//
+// Online brute-force resistance for the Basic-auth surfaces (/admin and /api).
+// Three layers:
+//  1. Per-source exponential backoff sleep before each failed response.
+//  2. Per-source lockout after loginLockThreshold consecutive failures.
+//  3. A global circuit breaker: when failure rate across ALL sources exceeds
+//     loginGlobalFailLimit in the trailing window (e.g. one attacker rotating
+//     spoofed X-Forwarded-For values), every further attempt is rejected
+//     without processing credentials until the window drains.
+//
+// Source attribution: the first X-Forwarded-For hop when present (the gateway
+// is deployed behind a trusted reverse proxy), else the socket address. XFF is
+// spoofable, which is exactly why layer 3 exists.
+
+const (
+	loginBaseBackoff    = 100 * time.Millisecond
+	loginMaxBackoff     = 2 * time.Second
+	loginLockThreshold  = 10
+	loginLockDuration   = 15 * time.Minute
+	loginBucketIdleTTL  = 30 * time.Minute
+	loginGlobalFailMax  = 100
+	loginGlobalFailWin  = time.Minute
+)
+
+type loginBucket struct {
+	fails       int
+	lastFail    time.Time
+	lockedUntil time.Time
+}
+
+var (
+	loginThrottleMu     sync.Mutex
+	loginThrottleBuckets = make(map[string]*loginBucket)
+	loginThrottleGlobal []time.Time
+)
+
+// clientSource identifies the throttling bucket for a request.
+func clientSource(r *http.Request) string {
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		if i := strings.IndexByte(xff, ','); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return xff
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func pruneLoginThrottleLocked(now time.Time) {
+	if len(loginThrottleBuckets) <= 4096 {
+		return
+	}
+	for k, b := range loginThrottleBuckets {
+		if now.Sub(b.lastFail) > loginBucketIdleTTL {
+			delete(loginThrottleBuckets, k)
+		}
+	}
+	cutoff := now.Add(-loginGlobalFailWin)
+	kept := loginThrottleGlobal[:0]
+	for _, t := range loginThrottleGlobal {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	loginThrottleGlobal = kept
+}
+
+// loginThrottleGuard reports whether a failed-login response may proceed. It
+// writes a 429 itself when the source or the global breaker is locked out,
+// and otherwise sleeps the per-source backoff delay. Called BEFORE writing
+// the 401.
+func loginThrottleGuard(w http.ResponseWriter, r *http.Request) bool {
+	now := time.Now()
+	src := clientSource(r)
+	loginThrottleMu.Lock()
+	pruneLoginThrottleLocked(now)
+	b := loginThrottleBuckets[src]
+	globalFails := 0
+	for _, t := range loginThrottleGlobal {
+		if now.Sub(t) <= loginGlobalFailWin {
+			globalFails++
+		}
+	}
+	locked := b != nil && now.Before(b.lockedUntil)
+	globallyTripped := globalFails >= loginGlobalFailMax
+	var backoff time.Duration
+	if b != nil && b.fails > 0 && !locked {
+		backoff = loginBaseBackoff << uint(min(b.fails-1, 20))
+		if backoff > loginMaxBackoff {
+			backoff = loginMaxBackoff
+		}
+	}
+	loginThrottleMu.Unlock()
+
+	if locked || globallyTripped {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "Too many failed attempts. Try again later.", http.StatusTooManyRequests)
+		return false
+	}
+	if backoff > 0 {
+		time.Sleep(backoff)
+	}
+	return true
+}
+
+func loginThrottleFail(r *http.Request) {
+	now := time.Now()
+	src := clientSource(r)
+	loginThrottleMu.Lock()
+	defer loginThrottleMu.Unlock()
+	b := loginThrottleBuckets[src]
+	if b == nil {
+		b = &loginBucket{}
+		loginThrottleBuckets[src] = b
+	}
+	b.fails++
+	b.lastFail = now
+	if b.fails >= loginLockThreshold {
+		b.lockedUntil = now.Add(loginLockDuration)
+		b.fails = 0 // reset the ladder; the lockout window does the work now
+	}
+	loginThrottleGlobal = append(loginThrottleGlobal, now)
+}
+
+func loginThrottleSuccess(r *http.Request) {
+	src := clientSource(r)
+	loginThrottleMu.Lock()
+	defer loginThrottleMu.Unlock()
+	delete(loginThrottleBuckets, src)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func isDevMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEV_MODE")), "1") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("DEV_MODE")), "true")
+}
+
+// securityHeaders adds baseline browser-hardening headers to every response
+// from the authenticated admin/API surfaces: no MIME sniffing, no framing
+// (clickjacking), and no referrer leakage.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		if h.Get("X-Content-Type-Options") == "" {
+			h.Set("X-Content-Type-Options", "nosniff")
+		}
+		if h.Get("X-Frame-Options") == "" {
+			h.Set("X-Frame-Options", "DENY")
+		}
+		if h.Get("Referrer-Policy") == "" {
+			h.Set("Referrer-Policy", "no-referrer")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -695,18 +891,28 @@ func serviceOrAdminAuth(adminUser, adminPass, svcUser, svcPass string, next http
 			adminOK := subtle.ConstantTimeCompare([]byte(u), []byte(adminUser)) == 1 &&
 				subtle.ConstantTimeCompare([]byte(p), []byte(adminPass)) == 1
 			if adminOK {
+				loginThrottleSuccess(r)
 				next.ServeHTTP(w, r)
 				return
 			}
+			var svcOK bool
+			var svcPathOK bool
 			if svcEnabled {
-				svcOK := subtle.ConstantTimeCompare([]byte(u), []byte(svcUser)) == 1 &&
+				svcOK = subtle.ConstantTimeCompare([]byte(u), []byte(svcUser)) == 1 &&
 					subtle.ConstantTimeCompare([]byte(p), []byte(svcPass)) == 1
-				if svcOK && servicePathAllowed(r.URL.Path) {
+				svcPathOK = servicePathAllowed(r.URL.Path)
+				if svcOK && svcPathOK {
+					loginThrottleSuccess(r)
 					next.ServeHTTP(w, r)
 					return
 				}
 			}
 		}
+		// Audit finding M3: throttle repeated failures on the /api surface too.
+		if !loginThrottleGuard(w, r) {
+			return
+		}
+		loginThrottleFail(r)
 		w.Header().Set("WWW-Authenticate", `Basic realm="Admin Area"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	})

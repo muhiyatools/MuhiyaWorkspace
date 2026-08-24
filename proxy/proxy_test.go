@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -422,14 +423,16 @@ func TestTranslateErrorBytes(t *testing.T) {
 		t.Errorf("Unexpected translated OpenAI error: %s", string(translatedOai))
 	}
 
-	// 3. Raw text fallback to Anthropic
+	// 3. Raw text fallback to Anthropic — unrecognized bodies are SANITIZED,
+	// never relayed verbatim (audit finding L1: provider payloads can embed
+	// account/project identifiers or internal endpoints).
 	rawText := `Bad Gateway`
 	translatedRawAnth := translateErrorBytes([]byte(rawText), true)
 	if err := json.Unmarshal(translatedRawAnth, &anthErr); err != nil {
-		t.Fatalf("Failed to parse translated error: %v", err)
+		t.Fatalf("Failed to parse translated error: %v", rawText+string(translatedRawAnth))
 	}
-	if anthErr.Type != "error" || anthErr.Error.Type != "api_error" || anthErr.Error.Message != "Bad Gateway" {
-		t.Errorf("Unexpected translated Anthropic error: %s", string(translatedRawAnth))
+	if anthErr.Type != "error" || anthErr.Error.Type != "api_error" || strings.Contains(string(translatedRawAnth), rawText) {
+		t.Errorf("Expected sanitized fallback message without raw body, got: %s", string(translatedRawAnth))
 	}
 
 	// 4. Raw text fallback to OpenAI
@@ -437,8 +440,8 @@ func TestTranslateErrorBytes(t *testing.T) {
 	if err := json.Unmarshal(translatedRawOai, &oaiErr); err != nil {
 		t.Fatalf("Failed to parse translated error: %v", err)
 	}
-	if oaiErr.Error.Type != "api_error" || oaiErr.Error.Message != "Bad Gateway" {
-		t.Errorf("Unexpected translated OpenAI error: %s", string(translatedRawOai))
+	if oaiErr.Error.Type != "api_error" || strings.Contains(string(translatedRawOai), rawText) {
+		t.Errorf("Expected sanitized fallback message without raw body, got: %s", string(translatedRawOai))
 	}
 }
 

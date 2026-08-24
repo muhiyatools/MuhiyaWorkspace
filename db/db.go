@@ -2332,7 +2332,11 @@ func requestLogFilter(query RequestLogQuery) (string, []any) {
 		where.WriteString(" AND request_logs.status_code >= 400")
 	}
 	if query.Search != "" {
-		args = append(args, query.Search)
+		// Escape LIKE metacharacters so a search for "%" or "_" (or a long
+		// run of them) cannot force full-table wildcard scans — the value is
+		// parameterized, but ILIKE still interprets these characters.
+		search := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query.Search)
+		args = append(args, search)
 		placeholder := len(args)
 		where.WriteString(fmt.Sprintf(` AND (COALESCE(request_logs.virtual_key_id, '') ILIKE '%%' || $%d || '%%'
 			OR COALESCE(request_logs.user_id, '') ILIKE '%%' || $%d || '%%'
