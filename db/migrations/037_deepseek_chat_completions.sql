@@ -2,6 +2,15 @@
 -- Chat Completions models. DeepSeek's context cache is automatic and has no
 -- cache-write charge, so only cache hits receive a separate input rate.
 
+-- The model rows below carry a foreign key on providers(id). This migration
+-- must not assume seeding created the provider: databases where the row was
+-- deleted or never seeded (seedDefaults only runs on an empty plans table)
+-- otherwise fail the whole migration with 23503 on every boot. Same defensive
+-- pattern as 009_minimax_models.sql and 015_openrouter_provider.sql.
+INSERT INTO providers (id, name, api_key, base_url, anthropic_base_url, status)
+VALUES ('deepseek', 'DeepSeek', '', 'https://api.deepseek.com', 'https://api.deepseek.com/anthropic', 'inactive')
+ON CONFLICT (id) DO NOTHING;
+
 CREATE OR REPLACE FUNCTION ensure_model_catalog_metadata()
 RETURNS TRIGGER AS $$
 DECLARE

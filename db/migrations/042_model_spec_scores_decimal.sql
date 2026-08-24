@@ -1,4 +1,4 @@
--- 038_model_spec_scores_decimal.sql
+-- 042_model_spec_scores_decimal.sql (renumbered from 038 to resolve a duplicate migration number)
 --
 -- Widen the model-picker capability ranks from INTEGER to one decimal place.
 --

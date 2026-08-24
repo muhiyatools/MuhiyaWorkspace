@@ -1,4 +1,4 @@
--- 037_model_spec_scores.sql
+-- 041_model_spec_scores.sql (renumbered from 037 to resolve a duplicate migration number)
 --
 -- Operator-supplied capability ranks, surfaced in the MuhiyaCode model picker as
 -- Intelligence / Speed bars alongside a Cost bar derived from the pricing that
@@ -6,7 +6,7 @@
 --
 -- coding_tier was already read by the MuhiyaCode catalog client
 -- (internal/gateway/catalog_discovery.go) and declared in its contract as an
--- "operator/provider supplied capability rank from 1 to 5" — but the gateway
+-- "operator/provider supplied capability rank from 1 to 5" â€” but the gateway
 -- never emitted it, so the field was dead end to end. This adds the column that
 -- backs it rather than inventing a second name for the same idea.
 --
