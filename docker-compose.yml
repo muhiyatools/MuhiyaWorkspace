@@ -7,14 +7,17 @@ services:
     restart: always
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.muhiyallm.rule=Host(`${GATEWAY_DOMAIN:-gateway.dawa24.com}`)"
+      - "traefik.http.routers.muhiyallm.rule=Host(`${GATEWAY_DOMAIN:-api.dawa24.com}`)"
       - "traefik.http.routers.muhiyallm.entrypoints=web,websecure"
+      - "traefik.http.routers.muhiyallm.tls=true"
       - "traefik.http.routers.muhiyallm.tls.certresolver=letsencrypt"
       - "traefik.http.services.muhiyallm.loadbalancer.server.port=8090"
     ports:
       - "8090:8090"
     environment:
       - PORT=8090
+      - GATEWAY_DOMAIN=${GATEWAY_DOMAIN:-api.dawa24.com}
+      - ADMIN_ALLOWED_ORIGINS=${ADMIN_ALLOWED_ORIGINS:-api.dawa24.com}
       - DATABASE_URL=${DATABASE_URL}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
