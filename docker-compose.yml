@@ -3,36 +3,34 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: muhiyallm
     restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.muhiyallm.rule=Host(`${GATEWAY_DOMAIN:-gateway.dawa24.com}`)"
+      - "traefik.http.routers.muhiyallm.entrypoints=web,websecure"
+      - "traefik.http.routers.muhiyallm.tls.certresolver=letsencrypt"
+      - "traefik.http.services.muhiyallm.loadbalancer.server.port=8090"
     ports:
       - "8090:8090"
     environment:
       - PORT=8090
-      # External PostgreSQL connection string.
-      # You will configure/edit this variable on Elest.io or in your .env file.
-      # Format: postgres://<POSTGRES_USER>:<POSTGRES_PASSWORD>@<POSTGRES_HOST>:<POSTGRES_PORT>/<POSTGRES_DB>?sslmode=require
-      # (audit L3: use an encrypted connection — do NOT ship sslmode=disable)
       - DATABASE_URL=${DATABASE_URL}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      # No insecure default: an unset ADMIN_PASSWORD now reaches the app as
-      # an empty string, which makes it refuse to boot (see main.go) instead
-      # of silently exposing the admin dashboard with a guessable password.
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - DEV_MODE=${DEV_MODE:-}
-      # Production defaults to fail-closed distributed limits. Set explicitly
-      # to false only for a single-instance local development deployment.
       - REQUIRE_REDIS=${REQUIRE_REDIS:-true}
       - PROVIDER_KEY_ENCRYPTION_KEY=${PROVIDER_KEY_ENCRYPTION_KEY:-}
-      # HMAC key for the stable, opaque per-user upstream identifier (DeepSeek
-      # user_id). Unset => identity injection is DISABLED (safe default) and all
-      # users share one upstream cache namespace. Set a long, stable, secret
-      # random string to enable per-user KVCache isolation. Keep it CONSTANT once
-      # set — changing it re-derives every user_id and cold-starts the cache once.
       - IDENTITY_SECRET=${IDENTITY_SECRET:-}
       - REQUEST_LOG_RETENTION_DAYS=${REQUEST_LOG_RETENTION_DAYS:-}
-      # Audit M2: process-wide cap on request bytes buffered in memory across
-      # concurrent in-flight requests (bytes). Default 268435456 (256 MiB).
       - MAX_INFLIGHT_REQUEST_BYTES=${MAX_INFLIGHT_REQUEST_BYTES:-}
-      - TAVILY_API_KEY=${TAVILY_API_KEY}
-      - SERPER_API_KEY=${SERPER_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - SERPER_API_KEY=${SERPER_API_KEY:-}
       - REDIS_URL=${REDIS_URL}
+    networks:
+      - postgresql-psr0_default
+
+networks:
+  postgresql-psr0_default:
+    external: true
+

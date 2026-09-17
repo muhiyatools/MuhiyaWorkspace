@@ -525,9 +525,19 @@ func withPostgresConnectTimeout(dsn string) string {
 		return dsn
 	}
 
+	// Auto-heal common typo where disable and require are concatenated
+	if strings.Contains(dsn, "sslmode=disablerequire") {
+		dsn = strings.ReplaceAll(dsn, "sslmode=disablerequire", "sslmode=disable")
+	} else if strings.Contains(dsn, "sslmode=requiredisable") {
+		dsn = strings.ReplaceAll(dsn, "sslmode=requiredisable", "sslmode=disable")
+	}
+
 	parsed, err := url.Parse(dsn)
 	if err == nil && (parsed.Scheme == "postgres" || parsed.Scheme == "postgresql") {
 		query := parsed.Query()
+		if query.Get("sslmode") == "disablerequire" || query.Get("sslmode") == "requiredisable" {
+			query.Set("sslmode", "disable")
+		}
 		for name, value := range postgresSafetyParams {
 			if query.Get(name) == "" {
 				query.Set(name, value)
