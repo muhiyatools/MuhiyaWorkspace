@@ -308,9 +308,30 @@ func TestSecurityHeadersApplied(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	securityHeaders(base).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	for _, h := range []string{"X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy"} {
+	for _, h := range []string{
+		"X-Content-Type-Options",
+		"X-Frame-Options",
+		"Referrer-Policy",
+		"Content-Security-Policy",
+		"Reporting-Endpoints",
+		"Report-To",
+		"Strict-Transport-Security",
+		"Permissions-Policy",
+	} {
 		if rec.Header().Get(h) == "" {
 			t.Errorf("missing security header %s", h)
 		}
+	}
+}
+
+func TestSecurityAutoContentType(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	securityHeaders(base).ServeHTTP(rec, req)
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("expected application/json, got %q", ct)
 	}
 }

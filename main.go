@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"net"
@@ -125,6 +126,16 @@ func main() {
 		http.NotFound(w, r)
 	})
 
+	// Unauthenticated CSP violation reporting endpoint for browser Reporting API
+	mux.HandleFunc("/api/csp-report", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	// Register API wrapper
 	mux.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !dbReady.Load() || apiMuxHandler == nil {
@@ -211,7 +222,7 @@ func main() {
 	// handling block below the fmt.Println banner).
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           recoveryMiddleware(pathNormalizationMiddleware(loggerMiddleware(mux))),
+		Handler:           recoveryMiddleware(pathNormalizationMiddleware(loggerMiddleware(securityHeaders(mux)))),
 		ReadHeaderTimeout: 10 * time.Second,
 		// ReadTimeout bounds how long a client may take to send its BODY.
 		// MaxBytesReader bounds the size but not the rate, so without this a
@@ -776,21 +787,86 @@ func isDevMode() bool {
 }
 
 // securityHeaders adds baseline browser-hardening headers to every response
-// from the authenticated admin/API surfaces: no MIME sniffing, no framing
-// (clickjacking), and no referrer leakage.
+type securityResponseWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+	path        string
+}
+
+func (w *securityResponseWriter) WriteHeader(statusCode int) {
+	if !w.wroteHeader {
+		w.ensureHeaders()
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *securityResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		if w.Header().Get("Content-Type") == "" {
+			if strings.HasPrefix(w.path, "/api/") || strings.HasPrefix(w.path, "/v1/") || w.path == "/" || w.path == "/health" {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			} else if strings.HasPrefix(w.path, "/admin/") || strings.HasSuffix(w.path, ".html") {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			} else {
+				w.Header().Set("Content-Type", http.DetectContentType(b))
+			}
+		}
+		w.ensureHeaders()
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *securityResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *securityResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *securityResponseWriter) ensureHeaders() {
+	h := w.Header()
+	if h.Get("X-Content-Type-Options") == "" {
+		h.Set("X-Content-Type-Options", "nosniff")
+	}
+	if h.Get("X-Frame-Options") == "" {
+		h.Set("X-Frame-Options", "DENY")
+	}
+	if h.Get("Referrer-Policy") == "" {
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	}
+	if h.Get("Strict-Transport-Security") == "" {
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	}
+	if h.Get("Permissions-Policy") == "" {
+		h.Set("Permissions-Policy", "geolocation=(), camera=(), microphone=(), payment=()")
+	}
+	if h.Get("Reporting-Endpoints") == "" {
+		h.Set("Reporting-Endpoints", `default="/api/csp-report", csp="/api/csp-report"`)
+	}
+	if h.Get("Report-To") == "" {
+		h.Set("Report-To", `{"group":"default","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}`)
+	}
+	if h.Get("Content-Security-Policy") == "" {
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; img-src 'self' data: https:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; report-to csp; report-uri /api/csp-report")
+	}
+}
+
+// securityHeaders adds baseline browser-hardening headers to every response:
+// no MIME sniffing, no framing (clickjacking), strict referrer, HSTS,
+// CSP, Reporting-Endpoints, and guaranteed Content-Type.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		if h.Get("X-Content-Type-Options") == "" {
-			h.Set("X-Content-Type-Options", "nosniff")
+		sw := &securityResponseWriter{
+			ResponseWriter: w,
+			path:           r.URL.Path,
 		}
-		if h.Get("X-Frame-Options") == "" {
-			h.Set("X-Frame-Options", "DENY")
-		}
-		if h.Get("Referrer-Policy") == "" {
-			h.Set("Referrer-Policy", "no-referrer")
-		}
-		next.ServeHTTP(w, r)
+		sw.ensureHeaders()
+		next.ServeHTTP(sw, r)
 	})
 }
 
