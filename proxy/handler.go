@@ -112,6 +112,25 @@ type noopFlusher struct{}
 
 func (noopFlusher) Flush() {}
 
+// generationScope decides the key under which AcquireGeneration serializes a
+// request. For interactive users (ChatGPT-like), the scope is the virtual key
+// owner so concurrent requests from one person settle sequentially. For
+// server-to-server batch clients — identified by the X-Dawa-Org-ID attribution
+// header — each request gets its own scope so the concurrent batches the
+// matchflow engine relies on are not serialized behind a single lock.
+//
+// This is safe because the budget system (affordableGeneration) already admits
+// each request individually, and the rate limiter (CheckLimit) still applies.
+// The generation guard's purpose — preventing double-spending during settlement
+// — is redundant for batch clients that manage their own concurrency through
+// ceilings and wall clocks.
+func generationScope(r *http.Request, keyUserID, requestID string) string {
+	if r.Header.Get("X-Dawa-Org-ID") != "" {
+		return requestID // per-request scope → no serialization
+	}
+	return keyUserID // default: one-at-a-time per user
+}
+
 // asFlusher returns the writer's Flusher or a no-op, so streaming paths never
 // panic on an unchecked type assertion if the writer chain ever changes.
 func asFlusher(w http.ResponseWriter) http.Flusher {
@@ -855,7 +874,7 @@ func (h *ProxyHandler) serveOpenAIClient(w http.ResponseWriter, r *http.Request,
 		h.writeLimitError(w, err)
 		return
 	}
-	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, requestID)
+	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), generationScope(r, key.UserID, requestID), requestID)
 	if err != nil {
 		h.saveAdmissionFailure(admissionFailure{
 			request: r, key: key, model: targetModel, provider: provider,
@@ -1050,7 +1069,7 @@ func (h *ProxyHandler) serveAnthropicClient(w http.ResponseWriter, r *http.Reque
 		h.writeLimitError(w, err)
 		return
 	}
-	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, requestID)
+	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), generationScope(r, key.UserID, requestID), requestID)
 	if err != nil {
 		h.saveAdmissionFailure(admissionFailure{
 			request: r, key: key, model: targetModel, provider: provider,
@@ -2847,7 +2866,7 @@ func (h *ProxyHandler) serveTranscriptionClient(w http.ResponseWriter, r *http.R
 		h.writeLimitError(w, err)
 		return
 	}
-	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), key.UserID, requestID)
+	releaseGeneration, err := h.limiter.AcquireGeneration(r.Context(), generationScope(r, key.UserID, requestID), requestID)
 	if err != nil {
 		entry := db.RequestLog{
 			ModelID: targetModel.ID, ProviderID: targetModel.ProviderID,
