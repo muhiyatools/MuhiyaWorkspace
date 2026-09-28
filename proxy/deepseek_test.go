@@ -72,6 +72,39 @@ func TestConditionDeepSeekNonThinkingRequest(t *testing.T) {
 	}
 }
 
+func TestConditionDeepSeekStripsUnsupportedResponseFormat(t *testing.T) {
+	cases := []struct {
+		name       string
+		format     interface{}
+		wantKeep   bool
+	}{
+		{"json_object kept", map[string]interface{}{"type": "json_object"}, true},
+		{"text kept", map[string]interface{}{"type": "text"}, true},
+		{"json_schema stripped", map[string]interface{}{
+			"type": "json_schema",
+			"json_schema": map[string]interface{}{
+				"name": "example",
+				"schema": map[string]interface{}{"type": "object"},
+			},
+		}, false},
+		{"unknown type stripped", map[string]interface{}{"type": "whatever_new"}, false},
+		{"no type field stripped", map[string]interface{}{"schema": "x"}, false},
+		{"non-map format kept", "verbose_json", true}, // non-object values pass through (no crash)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]interface{}{
+				"response_format": tc.format,
+			}
+			conditionDeepSeekChatCompletion(body)
+			_, exists := body["response_format"]
+			if exists != tc.wantKeep {
+				t.Errorf("response_format present = %v, want %v", exists, tc.wantKeep)
+			}
+		})
+	}
+}
+
 func TestDeepSeekAgentTurnReplaysReasoningContent(t *testing.T) {
 	upstream := newCaptureUpstream(http.StatusOK, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"inspect first\"},\"finish_reason\":null}]}\n\n"+
 		"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"+
@@ -114,3 +147,4 @@ func TestDeepSeekAgentTurnReplaysReasoningContent(t *testing.T) {
 		t.Errorf("upstream model = %v", sent["model"])
 	}
 }
+
